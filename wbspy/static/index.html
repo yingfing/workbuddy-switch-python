@@ -107,13 +107,13 @@ a{color:var(--accent);text-decoration:none}
 <body>
 <div class="wrap">
   <header>
-    <div class="logo">🐾</div>
+    <div class="logo">W</div>
     <div>
       <h1>WorkBuddy Switch <span class="pill">Python 版</span></h1>
       <div class="sub">多账号 · 扫码登录 · 积分自动化 · 本机 API 网关</div>
     </div>
     <div style="margin-left:auto" class="pill" id="gatewayInfo"></div>
-    <button id="themeBtn" title="切换主题">☀️</button>
+    <button id="themeBtn" title="切换主题">◐</button>
   </header>
 
   <nav id="tabs">
@@ -250,7 +250,7 @@ const $ = s => document.querySelector(s);
 const themeBtn = $('#themeBtn');
 function applyTheme(t){
   document.documentElement.dataset.theme = t;
-  themeBtn.textContent = t === 'light' ? '🌙' : '☀️';
+  themeBtn.textContent = '◐';
   try{ localStorage.setItem('wbspy-theme', t); }catch(e){}
 }
 applyTheme((()=>{ try{ return localStorage.getItem('wbspy-theme') || 'dark'; }catch(e){ return 'dark'; } })());
@@ -313,7 +313,7 @@ async function startLogin(channel, method) {
       if (p.status === 'success') {
         clearInterval(pollTimer);
         $('#mNote').textContent = '✓ 登录成功：' + p.data.document.label;
-        $('#qr').innerHTML = '<div style="padding:70px 20px;font-size:40px">🎉</div>';
+        $('#qr').innerHTML = '<div style="padding:64px 20px;font-size:26px;font-weight:600;color:var(--ok)">✓ 登录成功</div>';
         setTimeout(() => { closeModal(); loadChannels(); }, 1200);
       } else if (p.status === 'failed' || p.status === 'expired') {
         clearInterval(pollTimer);
@@ -405,9 +405,9 @@ function fmtCw(v) {
 }
 function attrBadges(x) {
   const parts = [];
-  if (x.vision === true) parts.push('<span class="badge" style="background:var(--blue-bg);color:var(--blue-fg)">👁 识图</span>');
-  else if (x.vision === false) parts.push('<span class="badge" style="opacity:.45">👁 不可</span>');
-  if (x.reasoning === true) parts.push('<span class="badge" style="background:var(--pur-bg);color:var(--pur-fg)">🧠 推理</span>');
+  if (x.vision === true) parts.push('<span class="badge" style="background:var(--blue-bg);color:var(--blue-fg)">识图</span>');
+  else if (x.vision === false) parts.push('<span class="badge" style="opacity:.45">无识图</span>');
+  if (x.reasoning === true) parts.push('<span class="badge" style="background:var(--pur-bg);color:var(--pur-fg)">推理</span>');
   const cw = fmtCw(x.context_window);
   if (cw) parts.push(`<span class="badge" style="background:var(--ok-bg);color:var(--ok-fg)">CTX ${cw}</span>`);
   return parts.join(' ') || '<span style="opacity:.4">—</span>';
