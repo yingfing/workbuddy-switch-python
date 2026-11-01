@@ -45,5 +45,6 @@ jobs:
           path: dist/
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.client_payload.tag || github.ref_name }}
           generate_release_notes: true        # 自动汇总上次 release 以来的 commits
           files: dist/*
