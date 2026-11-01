@@ -5,7 +5,7 @@
 **AI 账号、免费模型、签到积分**统一管理起来 —— 一个命令行 + 一个网页控制台 + 一个本地
 OpenAI 兼容 API 网关，全部搞定。
 
-> 🇨🇳 中文项目 · Windows / macOS / Linux 全平台 · 仅依赖 Python 3.11+，安装后占用极小
+> 🇨🇳 中文项目 · Windows / macOS / Linux 全平台 · 仅依赖 Python 3.9+，安装后占用极小
 >
 > Based on [WorkBuddy Switch](https://github.com/koi128bit/WorkBuddy-Switch) by koi128bit ·
 > 厂商注册表来自 [dsh-xdpool](https://www.npmjs.com/package/dsh-xdpool)（MIT）
@@ -143,9 +143,9 @@ wbspy web --port 8178    # 打开网页控制台
 
 | 项目 | 要求 |
 | --- | --- |
-| Python | **≥ 3.11** |
+| Python | **≥ 3.9**（3.11+ 亦支持；无 3.10+ 专属语法，老系统无需编译新 Python） |
 | 依赖 | `requests` / `fastapi` / `uvicorn`（纯 Python，无编译依赖，`pip install .` 自动装）；网页扫码渲染另需 `qrcode` |
-| 操作系统 | Linux / macOS / Windows 均可（无平台专属代码） |
+| 操作系统 | Linux / macOS / Windows 均可（无平台专属代码）；**32 位 ARM（armv7）低配设备（玩客云 / 树莓派 32 位）可跑**，已验证依赖链全有 wheel，实测内存 ~60 MB |
 | 资源 | 磁盘 < 10 MB，运行内存 ~50 MB |
 | 网络 | 能访问各渠道上游域名即可；国内网络直连，无需代理 |
 | 数据 | 凭据、配置、用量账本全部存于 `~/.wbspy/`；删除该目录即完全卸载，绝不散落别处 |
