@@ -1,0 +1,44 @@
+name: Release
+
+# push v* tag → 构建 sdist/wheel → 自动创建 GitHub Release 并附产物。
+# 由 auto-tag.yml 自动打 tag 触发，也可手动 git tag v0.x.y && git push --tags。
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install build
+      - name: 校验 tag 与 pyproject 版本一致
+        run: |
+          VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          [ "v$VERSION" = "${GITHUB_REF_NAME}" ] || {
+            echo "tag ${GITHUB_REF_NAME} 与 pyproject 版本 v$VERSION 不一致"; exit 1; }
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true        # 自动汇总上次 release 以来的 commits
+          files: dist/*

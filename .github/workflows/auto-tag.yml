@@ -1,0 +1,33 @@
+name: Auto Tag
+
+# 版本守卫：pyproject.toml 的 version 改了但对应 tag 还不存在时，
+# 自动打 tag → 触发 release.yml 发布。发版 = 改个版本号 push。
+
+on:
+  push:
+    branches: [main]
+    paths: ["pyproject.toml"]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                      # 需要历史以判断 tag 是否存在
+      - name: 版本号未变则跳过
+        run: |
+          VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          TAG="v$VERSION"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "tag $TAG 已存在，跳过"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "release $TAG (auto)"
+            git push origin "$TAG"
+            echo "已创建并推送 $TAG"
+          fi
