@@ -199,6 +199,9 @@ a{color:var(--accent);text-decoration:none}
   <div class="box">
     <h3 id="mTitle">扫码登录</h3>
     <div id="qr"></div>
+    <div id="mCode" hidden onclick="navigator.clipboard.writeText(this.textContent).then(()=>this.title='已复制')"
+         style="font-size:34px;letter-spacing:6px;text-align:center;margin:10px 0;cursor:pointer"
+         title="点击复制"></div>
     <div class="note" id="mNote"></div>
     <div class="row" style="justify-content:center;margin-top:6px">
       <a href="#" id="mLink" target="_blank" hidden><button class="btn ghost">在新窗口打开官方登录页 ↗</button></a>
@@ -250,14 +253,17 @@ async function startLogin(channel, method) {
     body: JSON.stringify({channel, method})});
   if (!r.ok) return alert(r.error);
   const d = r.data;
-  $('#mTitle').textContent = channelName(channel) + ' · ' + {qr:'扫码登录',browser:'网页授权',local:'本机凭据',manual:'手动'}[d.kind];
+  $('#mTitle').textContent = channelName(channel) + ' · ' + {qr:'扫码登录',browser:'网页授权',device:'设备码授权',local:'本机凭据',manual:'手动',done:'完成'}[d.kind];
   $('#mNote').textContent = d.message || '等待扫码…';
-  $('#qr').innerHTML = d.qr_svg || '<div style="padding:60px 20px;color:#666">无二维码</div>';
+  $('#qr').innerHTML = d.qr_svg || '';
+  $('#qr').style.display = d.qr_svg ? '' : 'none';   // 没码就别硬渲染
+  const codeBox = $('#mCode');
+  if (d.code) { codeBox.textContent = d.code; codeBox.hidden = false; } else codeBox.hidden = true;
   const link = $('#mLink');
   if (d.auth_url) { link.href = d.auth_url; link.hidden = false; } else link.hidden = true;
   $('#modal').classList.add('on');
   clearInterval(pollTimer);
-  if (d.kind === 'qr' || d.kind === 'browser') {
+  if (d.kind === 'qr' || d.kind === 'browser' || d.kind === 'device') {
     pollTimer = setInterval(async () => {
       const p = await api('/api/login/poll/' + d.ticket);
       if (p.status === 'success') {

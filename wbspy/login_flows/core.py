@@ -48,7 +48,7 @@ class Ticket:
         return {
             "ticket": self.id, "channel": self.channel_id, "method": self.method,
             "kind": self.kind, "qr_svg": self.qr_svg, "auth_url": self.auth_url,
-            "message": self.message, "error": self.error,
+            "message": self.message, "error": self.error, "code": self.code,
         }
 
 
