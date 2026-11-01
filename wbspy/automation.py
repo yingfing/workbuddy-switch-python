@@ -83,14 +83,22 @@ def run_once(doc: Document, log: Callable[[str], None] = print) -> dict:
                 r = client.claim_task(t["code"])
                 if not r.get("already"):
                     earned.append(str(r.get("credit") or "?"))
-        accepted = [t["code"] for t in tasks if not t["claimed"] and not t["locked"]
-                    and t["status"] in ("", "pending")]
+        accepted = [t["code"] for t in tasks if t.get("accept_needed")]
+        accepted_n = 0
         if accepted:
             try:
                 client.accept_tasks(accepted)
+                accepted_n = len(accepted)
             except UpstreamError:
                 pass
-        return f"领取 {len(earned)} 项（+{'+'.join(earned) or '0'}）"
+        done_n = sum(1 for t in tasks if t.get("progress_done") and not t["claimed"])
+        got = "+".join(earned) if earned else "0"
+        msg = "claimed %d items (+%s)" % (len(earned), got)
+        if accepted_n:
+            msg += ", accepted %d" % accepted_n
+        if done_n:
+            msg += ", %d ready to claim" % done_n
+        return msg
     result = _retry(_tasks, "tasks", log, summary)
     if result:
         summary["tasks"] = result
