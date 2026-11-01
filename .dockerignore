@@ -1,0 +1,10 @@
+.git
+build
+dist
+*.egg-info
+tests
+__pycache__
+*.pyc
+data/wbspy
+.dockerignore
+docker-compose.yml

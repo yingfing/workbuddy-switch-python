@@ -1,0 +1,16 @@
+services:
+  wbspy:
+    build: .
+    container_name: wbspy
+    restart: unless-stopped
+    ports:
+      - "8178:8178"
+    volumes:
+      # 凭据持久化：换容器/升级镜像不丢账号池
+      - ./data/wbspy:/root/.wbspy
+    environment:
+      # 公网部署且用到 TRAE / LobsterAI 回调登录时，改成你的公网域名
+      # - WBSPY_PUBLIC_ORIGIN=https://wbspy.example.com
+      # - WBSPY_PUBLIC_SHARECODE=
+      # 网关 / 管理接口鉴权 key（设置后 /v1/* /api/* 需 Bearer 或 X-Wbspy-Key 认证）
+      - WBSPY_API_KEY=${WBSPY_API_KEY:-}

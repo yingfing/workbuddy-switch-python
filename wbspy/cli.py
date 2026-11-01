@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from . import __version__
@@ -125,7 +126,8 @@ def _cmd_gateway(args) -> int:
         print("账号库为空，先 wbspy login。")
         return 1
     config = load_config()
-    api_key = args.api_key or config.get("api_key", "")
+    api_key = args.api_key or os.environ.get("WBSPY_API_KEY", "") \
+        or config.get("api_key", "")
     from .pool import AccountPool as Pool
     from .gateway import run_gateway
     print(f"网关启动：http://{args.host}:{args.port}/v1  （账号 {len(accounts)} 个）")
@@ -136,7 +138,8 @@ def _cmd_gateway(args) -> int:
 def _cmd_web(args) -> int:
     """Web 界面 + 网关同进程。"""
     config = load_config()
-    api_key = args.api_key or config.get("api_key", "")
+    api_key = args.api_key or os.environ.get("WBSPY_API_KEY", "") \
+        or config.get("api_key", "")
     pool = AccountPool(load_accounts())
     from .gateway import create_app  # noqa: F401  确保依赖就绪
     from .webui import run_web

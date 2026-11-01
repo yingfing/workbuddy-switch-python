@@ -139,6 +139,71 @@ wbspy web --port 8178    # 打开网页控制台
 依赖极小：`requests` + `fastapi` + `uvicorn`（扫码另装 `qrcode`）。无 Node、无数据库、
 无后台服务，全部本地运行。
 
+## 🖥️ 部署要求
+
+| 项目 | 要求 |
+| --- | --- |
+| Python | **≥ 3.11** |
+| 依赖 | `requests` / `fastapi` / `uvicorn`（纯 Python，无编译依赖，`pip install .` 自动装）；网页扫码渲染另需 `qrcode` |
+| 操作系统 | Linux / macOS / Windows 均可（无平台专属代码） |
+| 资源 | 磁盘 < 10 MB，运行内存 ~50 MB |
+| 网络 | 能访问各渠道上游域名即可；国内网络直连，无需代理 |
+| 数据 | 凭据、配置、用量账本全部存于 `~/.wbspy/`；删除该目录即完全卸载，绝不散落别处 |
+
+## 📦 部署方式
+
+### 方式一：裸机 / VPS 直接跑
+
+```bash
+git clone https://github.com/yingfing/workbuddy-switch-python
+cd workbuddy-switch-python && pip install .
+wbspy web --host 0.0.0.0 --port 8178
+```
+
+systemd 常驻（`/etc/systemd/system/wbspy.service`）：
+
+```ini
+[Unit]
+Description=wbspy - WorkBuddy Switch (Python)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/wbspy web --host 0.0.0.0 --port 8178
+Restart=on-failure
+# 公网部署且用到 TRAE / LobsterAI 回调登录时取消注释：
+# Environment=WBSPY_PUBLIC_ORIGIN=https://wbspy.example.com
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 方式二：Docker
+
+```bash
+docker compose up -d --build          # 凭据持久化在 ./data/wbspy
+# 或纯 docker：
+docker build -t wbspy . && docker run -d -p 8178:8178 -v wbspy-data:/root/.wbspy wbspy
+```
+
+### 迁移账号池
+
+凭据就是 `~/.wbspy/` 目录下的文件，整机搬迁 = 拷目录：
+
+```bash
+rsync -av ~/.wbspy/ new-server:~/.wbspy/
+```
+
+不迁移也行——新机器上重新扫码，一分钟的事。
+
+## 🌐 公网部署清单
+
+暴露到公网前建议按顺序过一遍：
+
+1. **设置鉴权 key**（三选一，优先级从高到低）：环境变量 `WBSPY_API_KEY=xxx`、启动参数 `wbspy web --api-key xxx`、或写入 `~/.wbspy/config.json` 的 `"api_key"` 字段。设置后 `/v1/*`（OpenAI 网关）与 `/api/*`（管理接口）全部要求 `Authorization: Bearer <key>` 或 `X-Wbspy-Key`，控制台页面与 `/healthz` 不受影响
+2. **上 HTTPS**：前面挂 Nginx / Caddy 反代即可（Caddy 两行配置自动签证书）
+3. **回调域名**：用到 TRAE / LobsterAI 扫码登录时，设置 `WBSPY_PUBLIC_ORIGIN=https://你的域名`，授权回调会自动指向公网（否则回调打在 127.0.0.1 上，扫码走不完）
+4. **防火墙**：只放行 80/443，8178 端口不必对外
+
 ## 🆚 与原版的关系
 
 | | WorkBuddy-Switch（原版） | wbspy（本项目） |
