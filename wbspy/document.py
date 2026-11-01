@@ -41,10 +41,27 @@ CN_LEGACY_DOMAINS = {
 GLOBAL_DOMAINS = {"workbuddy.ai", "www.workbuddy.ai"}
 
 
+# 非 WorkBuddy 渠道账号的 API origin 白名单（仍为封闭集合，绝不外发到未知域）。
+CHANNEL_API_ORIGINS = {
+    "account.minimax.cn": "https://api.minimaxi.com",
+    "googleapis.com": "https://oauth2.googleapis.com",
+    "codearts.huaweicloud.com": "https://snap-access.cn-north-4.myhuaweicloud.com",
+}
+
+
+def _channel_origin(domain: str) -> str | None:
+    for suffix, origin in CHANNEL_API_ORIGINS.items():
+        if domain == suffix or domain.endswith("." + suffix):
+            return origin
+    return None
+
+
 def api_origin(domain: str | None) -> str:
     """凭据所属账号服务的 API origin。无法识别的域名直接拒绝，绝不外发凭据。"""
     if domain in GLOBAL_DOMAINS:
         return GLOBAL_ORIGIN
+    if domain and _channel_origin(domain):
+        return _channel_origin(domain)
     if domain and domain not in CN_LEGACY_DOMAINS:
         raise ValueError("账号服务地区或域名无法识别，已停止发送凭据。")
     if domain in ("workbuddy.cn", "www.workbuddy.cn"):

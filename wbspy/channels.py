@@ -50,7 +50,7 @@ CHANNELS: dict[str, Channel] = {c.id: c for c in (
             login_kind="raccoon-qr"),
     # --- 其余 browser 渠道（打开厂商登录页，完成后按各自协议接 token）---
     Channel("codearts", "CodeArts", "华为云", "browser",
-            origin="https://www.huaweicloud.com",
+            origin="https://www.huaweicloud.com", login_kind="codearts-ticket",
             note="免费体验套餐自动续期不收费；新人积分 + DeepSeek · GLM · openPangu 每日免费额度",
             credits_claim=True),
     Channel("lobsterai", "LobsterAI", "有道", "browser",
