@@ -346,12 +346,12 @@ async function loadAccounts() {
       a.api_ready ? '可用' : (a.protected ? '加密凭据' : '已过期')}</td>
     <td>${a.label}</td><td>${a.region === 'global' ? '国际版' : '国内版'}</td>
     <td>${a.api_ready ? '✓' : '—'}</td>
-    <td><button class="btn sm bad" onclick="rmAccount('${a.uid}')">移除</button></td>
+    <td><button class="btn sm bad" onclick="rmAccount('${a.uid}','${a.domain || ''}')">移除</button></td>
   </tr>`).join('');
 }
-async function rmAccount(uid) {
+async function rmAccount(uid, domain) {
   if (!confirm('确定移除该账号？')) return;
-  await api('/api/accounts/' + uid, {method: 'DELETE'});
+  await api('/api/accounts/' + uid + (domain ? '?domain=' + encodeURIComponent(domain) : ''), {method: 'DELETE'});
   loadAccounts();
 }
 

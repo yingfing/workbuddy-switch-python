@@ -121,6 +121,20 @@ class Document:
     domain: str = ""
 
     @property
+    def storage_scope(self) -> str:
+        """存储与路由的命名空间：凭据实际服务的 API origin。
+
+        不同渠道的 uid 命名空间互相独立（TRAE 的 "1" 和 Qoder 的 "1" 是两个
+        人），因此凡是以「账号」为键的场景（磁盘文件名、账号池索引、冷却表）
+        都必须用 scope+uid 复合键，绝不能裸用 uid。域名无法识别时退回原始
+        domain，保证键仍然稳定。
+        """
+        try:
+            return api_origin(self.domain)
+        except ValueError:
+            return self.domain or "unknown"
+
+    @property
     def api(self) -> str:
         return api_origin(self.domain)
 

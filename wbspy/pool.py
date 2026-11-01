@@ -19,20 +19,29 @@ from .upstream import UpstreamError, WorkBuddyClient
 DEFAULT_MODEL_COOLDOWN = 60
 
 
+def _key(doc: Document) -> tuple[str, str]:
+    """账号池内部键：(storage_scope, uid)。
+
+    跨渠道 uid 命名空间独立（TRAE 的 "1" ≠ Qoder 的 "1"），
+    裸 uid 会在池字典/冷却表里互相覆盖。
+    """
+    return (doc.storage_scope, doc.uid)
+
+
 class CooldownTable:
-    """(uid, model) → 冷却截止时间。线程安全。"""
+    """(scope, uid, model) → 冷却截止时间。线程安全。"""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._until: dict[tuple[str, str], float] = {}
+        self._until: dict[tuple[str, str, str], float] = {}
 
-    def set(self, uid: str, model: str, seconds: int) -> None:
+    def set(self, account: tuple[str, str], model: str, seconds: int) -> None:
         with self._lock:
-            self._until[(uid, model)] = time.time() + max(0, seconds)
+            self._until[(account[0], account[1], model)] = time.time() + max(0, seconds)
 
-    def get(self, uid: str, model: str) -> float:
+    def get(self, account: tuple[str, str], model: str) -> float:
         with self._lock:
-            return self._until.get((uid, model), 0.0)
+            return self._until.get((account[0], account[1], model), 0.0)
 
     def sweep(self) -> None:
         now = time.time()
@@ -43,15 +52,15 @@ class CooldownTable:
 
     def snapshot(self) -> list[dict]:
         with self._lock:
-            return [{"uid": uid, "model": model, "cooldown_until": until}
-                    for (uid, model), until in self._until.items()]
+            return [{"uid": f"{scope}::{uid}", "model": model, "cooldown_until": until}
+                    for (scope, uid, model), until in self._until.items()]
 
 
 class AccountPool:
     def __init__(self, documents: list[Document]):
-        self.documents = {d.uid: d for d in documents}
-        self.clients = {uid: WorkBuddyClient(doc) for uid, doc in self.documents.items()}
-        self.dead_until: dict[str, float] = {}      # 凭据失效账号的复活时间
+        self.documents = {_key(d): d for d in documents}
+        self.clients = {k: WorkBuddyClient(doc) for k, doc in self.documents.items()}
+        self.dead_until: dict[tuple[str, str], float] = {}   # 凭据失效账号的复活时间
         self.cooldowns = CooldownTable()
         self._cursor = 0
         self._lock = threading.Lock()
@@ -61,19 +70,20 @@ class AccountPool:
     def refresh_documents(self, documents: list[Document]) -> None:
         with self._lock:
             for doc in documents:
-                self.documents[doc.uid] = doc
-                self.clients[doc.uid] = WorkBuddyClient(doc)
+                k = _key(doc)
+                self.documents[k] = doc
+                self.clients[k] = WorkBuddyClient(doc)
                 if doc.api_ready:
-                    self.dead_until.pop(doc.uid, None)
+                    self.dead_until.pop(k, None)
 
     def healthy(self, model: str = "*") -> list[Document]:
         now = time.time()
         self.cooldowns.sweep()
         out = []
-        for doc in self.documents.values():
-            if not doc.api_ready or self.dead_until.get(doc.uid, 0) > now:
+        for k, doc in self.documents.items():
+            if not doc.api_ready or self.dead_until.get(k, 0) > now:
                 continue
-            if model != "*" and self.cooldowns.get(doc.uid, model) > now:
+            if model != "*" and self.cooldowns.get(k, model) > now:
                 continue
             out.append(doc)
         return out
@@ -84,16 +94,17 @@ class AccountPool:
             "uid": d.uid[:12], "label": d.label(), "region": d.region,
             "api_ready": d.api_ready,
             "token_expires_at": d.token_expires_at,
-            "dead": self.dead_until.get(d.uid, 0) > now,
-            "cooldowns": [c for c in self.cooldowns.snapshot() if c["uid"] == d.uid],
+            "dead": self.dead_until.get(_key(d), 0) > now,
+            "cooldowns": [c for c in self.cooldowns.snapshot()
+                          if c["uid"].endswith("::" + d.uid)],
         } for d in self.documents.values()]
 
     # -- 调度 -----------------------------------------------------------------
 
-    def pick(self, model: str, exclude: set[str] | None = None) -> Document | None:
+    def pick(self, model: str, exclude: set | None = None) -> Document | None:
         """轮换选择下一个健康账号。"""
         exclude = exclude or set()
-        candidates = [d for d in self.healthy(model) if d.uid not in exclude]
+        candidates = [d for d in self.healthy(model) if _key(d) not in exclude]
         if not candidates:
             return None
         with self._lock:
@@ -102,10 +113,11 @@ class AccountPool:
 
     def apply_error(self, doc: Document, error: UpstreamError, model: str) -> None:
         """按错误类型记账冷却 / 死亡。"""
+        k = _key(doc)
         if error.kind == "auth":
-            self.dead_until[doc.uid] = time.time() + 300   # 5 分钟后允许刷新重试
+            self.dead_until[k] = time.time() + 300   # 5 分钟后允许刷新重试
         elif error.kind in ("rate", "model", "channel"):
-            self.cooldowns.set(doc.uid, model, error.retry_after or DEFAULT_MODEL_COOLDOWN)
+            self.cooldowns.set(k, model, error.retry_after or DEFAULT_MODEL_COOLDOWN)
 
     # -- 请求 -----------------------------------------------------------------
 
@@ -115,7 +127,7 @@ class AccountPool:
         生成器场景下 response 由调用方负责 close()。
         """
         model = str(payload.get("model", ""))
-        tried: set[str] = set()
+        tried: set = set()
         last_error: UpstreamError | None = None
         while True:
             doc = self.pick(model, exclude=tried)
@@ -124,9 +136,9 @@ class AccountPool:
                     raise last_error
                 raise UpstreamError(503, "no_available_accounts",
                                     "账号池中没有可用账号（全部冷却、失效或未登录）。")
-            tried.add(doc.uid)
+            tried.add(_key(doc))
             try:
-                return doc, self.clients[doc.uid].chat(payload)
+                return doc, self.clients[_key(doc)].chat(payload)
             except UpstreamError as exc:
                 last_error = exc
                 self.apply_error(doc, exc, model)
@@ -139,7 +151,7 @@ class AccountPool:
         seen: dict[str, dict] = {}
         for doc in self.healthy():
             try:
-                for row in self.clients[doc.uid].models():
+                for row in self.clients[_key(doc)].models():
                     key = f"{'global' if doc.region == 'global' else 'cn'}:{row['id']}"
                     seen.setdefault(key, {**row, "id": key})
             except UpstreamError:
@@ -155,18 +167,18 @@ class AccountPool:
             import json as _json
             from .store import save_account
             while True:
-                for uid, doc in list(self.documents.items()):
+                for k, doc in list(self.documents.items()):
                     if not doc.refresh_token or doc.protected_token:
                         continue
                     exp = doc.token_expires_at or 0
                     if exp and exp > (time.time() + 600) * 1000:
                         continue                       # 还没临期
                     try:
-                        auth = self.clients[uid].refresh()
+                        auth = self.clients[k].refresh()
                         root = doc.raw
                         root["auth"] = {**root.get("auth", {}), **auth}
                         fresh = Document(
-                            raw=root, uid=uid,
+                            raw=root, uid=doc.uid,
                             token=auth["accessToken"],
                             refresh_token=auth.get("refreshToken", doc.refresh_token),
                             nickname=doc.nickname, region=doc.region, domain=doc.domain)

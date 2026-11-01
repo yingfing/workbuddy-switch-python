@@ -148,12 +148,12 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         return _ok([{
             "uid": d.uid, "label": d.label(), "region": d.region,
             "api_ready": d.api_ready, "protected": d.protected_token,
-            "expires_at": d.token_expires_at,
+            "expires_at": d.token_expires_at, "domain": d.domain,
         } for d in load_accounts()])
 
     @app.delete("/api/accounts/{uid}")
-    def api_account_remove(uid: str):
-        if not remove_account(uid):
+    def api_account_remove(uid: str, domain: str = ""):
+        if not remove_account(uid, domain=domain):
             raise HTTPException(404, "账号不存在")
         pool.refresh_documents(load_accounts())
         return _ok()

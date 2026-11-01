@@ -57,4 +57,5 @@ class Ticket:
 def doc_public(doc: Document) -> dict:
     """凭据脱敏视图（回传前端展示用）。"""
     return {"uid": doc.uid, "label": doc.label(), "region": doc.region,
-            "api_ready": doc.api_ready, "protected": doc.protected_token}
+            "api_ready": doc.api_ready, "protected": doc.protected_token,
+            "domain": doc.domain}
