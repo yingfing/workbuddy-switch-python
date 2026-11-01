@@ -74,6 +74,9 @@ def free_model_index() -> list[dict]:
                 "provider_id": p.get("id"),
                 "model": m.get("id"),
                 "model_name": m.get("name"),
+                "vision": m.get("vision"),
+                "reasoning": m.get("reasoning"),
+                "context_window": m.get("contextWindow"),
                 "category": p.get("category"),
                 "signup_url": (p.get("auth") or {}).get("url") or p.get("website"),
             })

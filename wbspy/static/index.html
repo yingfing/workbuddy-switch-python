@@ -120,9 +120,10 @@ a{color:var(--accent);text-decoration:none}
     </div>
     <div class="card">
       <h2>免费额度模型索引 <span class="tag">完全免费 + 有免费额度的厂商（吸收自 dsh-xdpool 聚合渠道）</span></h2>
+      <div class="row" id="attrChips" style="margin-bottom:6px"></div>
       <div class="row" id="freeChips" style="margin-bottom:10px"></div>
       <table id="freeTable"><thead><tr>
-        <th>厂商</th><th>模型</th><th>类型</th><th>去接入</th>
+        <th>厂商</th><th>模型</th><th>属性</th><th>类型</th><th>去接入</th>
       </tr></thead><tbody></tbody></table>
       <div class="empty" id="freeEmpty" hidden>暂无数据</div>
     </div>
@@ -345,7 +346,23 @@ async function snapRestore() {
 }
 
 // -- 免费可调用 API --
-let freeAll = [], provAll = [], provFilter = '全部';
+let freeAll = [], provAll = [], provFilter = '全部', attrFilter = '全部';
+function fmtCw(v) {
+  if (!v) return '';
+  if (v >= 1e6) return (v / 1e6).toString().replace(/\.0$/, '') + 'M';
+  if (v >= 1e3) return Math.round(v / 1e3) + 'K';
+  return String(v);
+}
+function attrBadges(x) {
+  const parts = [];
+  if (x.vision === true) parts.push('<span class="badge" style="background:rgba(96,165,250,.15);color:#93c5fd">👁 识图</span>');
+  else if (x.vision === false) parts.push('<span class="badge" style="opacity:.45">👁 不可</span>');
+  if (x.reasoning === true) parts.push('<span class="badge" style="background:rgba(167,139,250,.15);color:#c4b5fd">🧠 推理</span>');
+  const cw = fmtCw(x.context_window);
+  if (cw) parts.push(`<span class="badge" style="background:rgba(52,211,153,.12);color:#6ee7b7">CTX ${cw}</span>`);
+  return parts.join(' ') || '<span style="opacity:.4">—</span>';
+}
+function setAttrFilter(f) { attrFilter = f; renderFree(); }
 async function loadFree() {
   const r = await api('/api/free-models');
   const mine = r.data.mine || [];
@@ -403,9 +420,17 @@ async function saveKey(pid) {
 }
 
 function renderFree() {
-  $('#freeTable tbody').innerHTML = freeAll.map(x => `<tr>
+  const rows = freeAll.filter(x =>
+    attrFilter === '全部' ||
+    (attrFilter === '可识图' && x.vision === true) ||
+    (attrFilter === '可推理' && x.reasoning === true));
+  $('#attrChips').innerHTML = ['全部', '可识图', '可推理'].map(f =>
+    `<button class="btn sm ghost" style="${f === attrFilter ? 'outline:1px solid #8b5cf6' : ''}"
+      onclick="setAttrFilter('${f}')">${f} · ${f === '全部' ? freeAll.length : freeAll.filter(x => f === '可识图' ? x.vision === true : x.reasoning === true).length}</button>`).join('');
+  $('#freeTable tbody').innerHTML = rows.map(x => `<tr>
     <td><b>${x.provider}</b></td>
     <td><code>${x.model}</code>${x.model_name && x.model_name !== x.model ? ` · ${x.model_name}` : ''}</td>
+    <td>${attrBadges(x)}</td>
     <td>${x.category === 'free' ? '<span class="badge" style="background:rgba(52,211,153,.15);color:#6ee7b7">完全免费</span>'
         : '<span class="badge" style="background:rgba(251,191,36,.15);color:#fcd34d">免费额度</span>'}</td>
     <td>${x.signup_url ? `<a href="${x.signup_url}" target="_blank">接入 ↗</a>` : '—'}</td>

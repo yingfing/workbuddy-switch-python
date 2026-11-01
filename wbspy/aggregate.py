@@ -93,6 +93,9 @@ def _provider_index() -> list[dict]:
                     "provider": p.get("name"),
                     "model": m["id"],
                     "model_name": m.get("name"),
+                    "vision": m.get("vision"),
+                    "reasoning": m.get("reasoning"),
+                    "context_window": m.get("contextWindow"),
                     "format": p.get("format"),
                     "base_url": p.get("baseUrl"),
                     "auth_kind": (p.get("auth") or {}).get("kind", "apiKey"),
@@ -125,7 +128,9 @@ def models() -> list[dict]:
             "owned_by": f"wbspy:{row['provider_id']}",
             "wbspy": {"configured": configured, "category": row["category"],
                       "provider": row["provider"], "auth_kind": row["auth_kind"],
-                      "format": row["format"]},
+                      "format": row["format"],
+                      "vision": row["vision"], "reasoning": row["reasoning"],
+                      "context_window": row["context_window"]},
         })
     return out
 
