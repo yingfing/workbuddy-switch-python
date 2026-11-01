@@ -34,6 +34,47 @@ from .upstream import EMBEDDING_MODELS, UpstreamError
 MODEL_TTL_SEC = 300
 
 
+def _sse_aggregate(resp, route_model: str) -> dict:
+    """上游强制流式 → 聚合 SSE 块为完整 chat.completion（对齐参考实现）。"""
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    usage: dict | None = None
+    finish = ""
+    model = route_model
+    cid = ""
+    for raw_line in resp.iter_lines(decode_unicode=True):
+        if not raw_line or not str(raw_line).startswith("data:"):
+            continue
+        data = str(raw_line)[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            continue
+        cid = chunk.get("id") or cid
+        model = chunk.get("model") or model
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+        for ch in chunk.get("choices") or []:
+            delta = ch.get("delta") or ch.get("message") or {}
+            if delta.get("content"):
+                content_parts.append(delta["content"])
+            if delta.get("reasoning_content"):
+                reasoning_parts.append(delta["reasoning_content"])
+            if ch.get("finish_reason"):
+                finish = ch["finish_reason"]
+    message: dict = {"role": "assistant", "content": "".join(content_parts)}
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
+    body = {"id": cid or "wbspy-agg", "model": model, "object": "chat.completion",
+            "created": int(time.time()),
+            "choices": [{"index": 0, "message": message,
+                         "finish_reason": finish or "stop"}],
+            "usage": usage or {}}
+    return body
+
+
 def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     app = FastAPI(title="wbspy gateway", docs_url=None, redoc_url=None)
     app.state.model_cache: list[dict] = []
@@ -114,7 +155,13 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             return StreamingResponse(sse(), media_type="text/event-stream",
                                      headers={"X-Wbspy-Provider": used_row["provider_id"]})
         try:
-            body = resp.json()
+            ctype = resp.headers.get("content-type", "")
+            if "text/event-stream" in ctype:
+                # 上游强制流式（对齐 WorkBuddy-Switch：payload 恒 stream:true），
+                # 非流式请求在此聚合为完整 chat.completion 对象。
+                body = _sse_aggregate(resp, route_model)
+            else:
+                body = resp.json()
         finally:
             resp.close()
         LEDGER.record(model=route_model, provider=used_row["provider_id"],
@@ -196,18 +243,27 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         except UpstreamError as exc:
             return _error(exc)
 
-        def sse() -> Iterator[bytes]:
-            try:
-                for chunk in resp.iter_content(chunk_size=None):
-                    if chunk:
-                        yield chunk
-            finally:
-                resp.close()
-                LEDGER.record(model=model, provider="workbuddy", account=doc.uid[:12],
-                              prompt_tokens=estimate_tokens(raw.get("messages", [])))
+        if raw.get("stream"):
+            def sse() -> Iterator[bytes]:
+                try:
+                    for chunk in resp.iter_content(chunk_size=None):
+                        if chunk:
+                            yield chunk
+                finally:
+                    resp.close()
+                    LEDGER.record(model=model, provider="workbuddy", account=doc.uid[:12],
+                                  prompt_tokens=estimate_tokens(raw.get("messages", [])))
+            return StreamingResponse(sse(), media_type="text/event-stream",
+                                     headers={"X-Wbspy-Account": doc.uid[:12]})
 
-        return StreamingResponse(sse(), media_type="text/event-stream",
-                                 headers={"X-Wbspy-Account": doc.uid[:12]})
+        # 上游恒为流式（payload 强制 stream:true），非流式请求聚合为完整对象
+        body = _sse_aggregate(resp, model)
+        resp.close()
+        LEDGER.record(model=model, provider="workbuddy", account=doc.uid[:12],
+                      prompt_tokens=estimate_tokens(raw.get("messages", [])),
+                      completion_tokens=len(str(body.get("choices", [{}])[0]
+                                               .get("message", {}).get("content") or "")) // 3)
+        return JSONResponse(body, headers={"X-Wbspy-Account": doc.uid[:12]})
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request, authorization: str = Header("")) -> Any:
