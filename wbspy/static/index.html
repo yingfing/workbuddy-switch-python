@@ -280,7 +280,7 @@ async function loadChannels() {
       <b>${c.name}</b><span class="org">${c.org}</span>
       <div style="margin:4px 0">${c.methods.map(m =>
         `<span class="badge">${{qr:'扫码',browser:'网页',local:'本机'}[m]||m}</span>`).join('')}
-        ${c.checkin ? '<span class="badge" style="background:var(--ok-bg);color:var(--ok-fg)">每日签到</span>' : ''}
+        ${c.checkin ? `<span class="badge" style="background:var(--ok-bg);color:var(--ok-fg)">${c.id === 'buddy' ? '每日签到·已托管' : '有签到·未托管'}</span>` : ''}
       </div>
       <p>${c.note}</p>
       <div class="row">
@@ -308,16 +308,22 @@ async function startLogin(channel, method) {
   $('#modal').classList.add('on');
   clearInterval(pollTimer);
   if (d.kind === 'qr' || d.kind === 'browser' || d.kind === 'device') {
+    $('#mNote').textContent = (d.message || '等待扫码…') + '（每 3 秒自动查询状态，成功后本窗口自动关闭）';
     pollTimer = setInterval(async () => {
-      const p = await api('/api/login/poll/' + d.ticket);
+      const r = await api('/api/login/poll/' + d.ticket);
+      if (!r.ok) { $('#mNote').textContent = '✗ ' + (r.error || '状态查询失败，将继续重试'); return; }
+      const p = r.data || r;
       if (p.status === 'success') {
         clearInterval(pollTimer);
-        $('#mNote').textContent = '✓ 登录成功：' + p.data.document.label;
-        $('#qr').innerHTML = '<div style="padding:64px 20px;font-size:26px;font-weight:600;color:var(--ok)">✓ 登录成功</div>';
-        setTimeout(() => { closeModal(); loadChannels(); }, 1200);
+        $('#qr').innerHTML = '<div style="padding:56px 20px;font-size:34px;font-weight:600;color:var(--ok)">✓ 登录成功</div>';
+        $('#mNote').textContent = '账号「' + ((p.document && p.document.label) || '') + '」已入库，窗口即将自动关闭…';
+        setTimeout(() => { closeModal(); loadChannels(); }, 1800);
       } else if (p.status === 'failed' || p.status === 'expired') {
         clearInterval(pollTimer);
-        $('#mNote').textContent = '✗ ' + (p.error || '失败');
+        $('#qr').innerHTML = ''; $('#qr').style.display = 'none';
+        $('#mNote').textContent = '✗ ' + (p.error || '登录未完成，请关闭窗口后重新发起');
+      } else {
+        $('#mNote').textContent = (p.message || '等待扫码…') + '（每 3 秒自动查询状态）';
       }
     }, 3000);
   }
