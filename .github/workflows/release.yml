@@ -35,13 +35,41 @@ jobs:
           name: dist
           path: dist/
 
+  build-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.client_payload.tag || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install . pyinstaller
+      - name: 打包单文件 exe
+        run: >
+          pyinstaller --onefile --name wbspy --clean --noconfirm
+          --collect-all wbspy wbspy/launcher.py
+      - name: 冒烟（exe 能跑起来才算数）
+        run: |
+          .\dist\wbspy.exe --help
+          .\dist\wbspy.exe --version
+          .\dist\wbspy.exe accounts list
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exe
+          path: dist/wbspy.exe
+
   release:
-    needs: build
+    needs: [build, build-exe]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: exe
           path: dist/
       - uses: softprops/action-gh-release@v2
         with:
