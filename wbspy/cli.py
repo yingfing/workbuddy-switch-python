@@ -260,6 +260,13 @@ def _cmd_update(_args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows 控制台默认 GBK/cp936，中文输出会 UnicodeEncodeError；
+    # 统一转 UTF-8（重定向到文件/管道时同样受益）。不支持的环境静默跳过。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
     args = build_parser().parse_args(argv)
     try:
         return args.fn(args)
