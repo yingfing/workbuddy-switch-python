@@ -99,11 +99,15 @@ jobs:
           Categories=Development;
           Terminal=true
           EOF
-          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy-x86_64.AppImage
-          ./linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
-            --appdir AppDir --executable AppDir/usr/bin/wbspy
-          chmod -R a+rX AppDir && chmod +x AppDir/AppRun
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          HERE=$(dirname "$(readlink -f "$0")")
+          exec "$HERE/usr/bin/wbspy" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+          ln -sf wbspy.png AppDir/.DirIcon
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+          cp wbspy.png AppDir/usr/share/icons/hicolor/256x256/apps/wbspy.png
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
           ./appimagetool-x86_64.AppImage --appimage-extract-and-run \
