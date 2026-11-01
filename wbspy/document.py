@@ -46,6 +46,8 @@ CHANNEL_API_ORIGINS = {
     "account.minimax.cn": "https://api.minimaxi.com",
     "googleapis.com": "https://oauth2.googleapis.com",
     "codearts.huaweicloud.com": "https://snap-access.cn-north-4.myhuaweicloud.com",
+    "api.cline.bot": "https://api.cline.bot",
+    "account.xfinfr.com": "https://loomyad.xunfei.cn/api/v1",
 }
 
 

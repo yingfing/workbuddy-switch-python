@@ -17,6 +17,11 @@ import base64
 import json
 import secrets
 import threading
+import base64
+import hashlib
+import hmac
+import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -181,6 +186,53 @@ class LoginSessionManager:
             ticket.message = ("在新窗口打开华为云登录页完成登录；登录成功后的跳转"
                               "页面可无视，此处会自动检测到凭据（DeepSeek/GLM/"
                               "openPangu 每日免费额度）")
+        elif method == "browser" and channel.login_kind == "cline-device":
+            # Cline = WorkOS 设备码（对齐 channel-pack requestClineDeviceAuthorization）
+            resp = requests.post(
+                "https://api.workos.com/user_management/authorize/device",
+                data={"client_id": "client_01K3A541FN8TA3EPPHTD2325AR"},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15)
+            data = resp.json() if resp.ok else {}
+            device_code = data.get("device_code") or ""
+            user_code = data.get("user_code") or ""
+            url = (data.get("verification_uri_complete")
+                   or data.get("verification_uri") or "")
+            if not (device_code and user_code and url):
+                raise RuntimeError(f"WorkOS 设备码授权失败（HTTP {resp.status_code}）。")
+            ticket.kind = "device"
+            ticket.platform = "cline"
+            ticket.origin = "https://api.workos.com"
+            ticket.state = device_code
+            ticket.code = user_code
+            ticket.auth_url = url
+            ticket.message = (f"在新窗口打开 Cline 授权页并确认设备码 "
+                              f"{user_code}；此处自动等待")
+        elif method == "qr" and channel.login_kind == "loomy-wechat":
+            # Loomy = 微信开放平台扫码（对齐 channel-pack loomy-wechat.ts）
+            state = uuid.uuid4().hex
+            auth_url = ("https://open.weixin.qq.com/connect/qrconnect"
+                        "?appid=wx18d60be432287cf8"
+                        f"&redirect_uri={quote_plus('https://loomy.xunfei.cn/oauth/wechat/callback')}"
+                        f"&response_type=code&scope=snsapi_login&state={state}#wechat_redirect")
+            resp = requests.get(auth_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://open.weixin.qq.com/"}, timeout=20)
+            m = (re.search(r"/connect/qrcode/([A-Za-z0-9_\-=+/]+)", resp.text)
+                 or re.search(r"l/qrconnect\?uuid=([A-Za-z0-9_\-=+/]+)", resp.text))
+            if not resp.ok or not m:
+                raise RuntimeError("微信授权页拉取失败或页面结构已变化。")
+            wuuid = m.group(1)
+            ticket.kind = "qr"
+            ticket.platform = "loomy-wechat"
+            ticket.origin = "https://account.xfinfr.com"
+            ticket.state = state
+            ticket.code = wuuid
+            ticket.auth_url = auth_url
+            ticket.qr_content = f"https://open.weixin.qq.com/connect/qrcode/{wuuid}"
+            ticket.qr_svg = f'<img src="{ticket.qr_content}" alt="微信二维码" width="220"/>'
+            ticket.message = "请用微信扫码并确认登录（讯飞星火 Loomy）"
         elif method == "qr" and channel.login_kind == "minimax-device":
             from .login import MINIMAX_ACCOUNT, _pkce_pair
             import requests as _rq
@@ -250,6 +302,10 @@ class LoginSessionManager:
                 doc = self._poll_raccoon(ticket)
             elif ticket.kind == "device" and ticket.state:
                 doc = self._poll_minimax(ticket)
+            elif ticket.kind == "device" and ticket.platform == "cline":
+                doc = self._poll_cline(ticket)
+            elif ticket.kind == "qr" and ticket.platform == "loomy-wechat":
+                doc = self._poll_loomy(ticket)
             elif ticket.kind == "browser" and ticket.platform == "codearts":
                 doc = self._poll_codearts(ticket)
             elif ticket.kind == "browser" and ticket.platform == "gemini":
@@ -341,6 +397,115 @@ class LoginSessionManager:
             return None
         doc = parse_minimax_token(resp)
         return doc                                       # None = 还没批准
+
+    def _poll_cline(self, ticket: Ticket) -> Document | None:
+        """WorkOS 设备码轮询 + Cline token 注册（对齐 pollClineWorkOsTokens）。"""
+        try:
+            resp = requests.post(
+                "https://api.workos.com/user_management/authenticate",
+                data={"grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                      "device_code": ticket.state,
+                      "client_id": "client_01K3A541FN8TA3EPPHTD2325AR"},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15)
+            payload = resp.json() if resp.text else {}
+        except (requests.RequestException, ValueError):
+            return None
+        err = payload.get("error")
+        if err in ("authorization_pending", "slow_down"):
+            return None
+        if err:
+            raise RuntimeError(f"WorkOS 授权失败：{payload.get('error_description') or err}")
+        access = payload.get("access_token") or ""
+        refresh = payload.get("refresh_token") or ""
+        if not access:
+            return None
+        # 注册到 Cline 换取正式凭据
+        reg = requests.post(
+            "https://api.cline.bot/api/v1/auth/register",
+            json={"accessToken": access, "refreshToken": refresh},
+            headers={"Content-Type": "application/json",
+                     "HTTP-Referer": "https://cline.bot", "X-Title": "Cline",
+                     "X-IS-MULTIROOT": "false", "X-CLIENT-TYPE": "cline-sdk"},
+            timeout=20)
+        reg_data = reg.json() if reg.ok else {}
+        inner = reg_data.get("data") if isinstance(reg_data.get("data"), dict) else reg_data
+        token = inner.get("accessToken") or inner.get("access_token") or access
+        exp_ms = _decode_jwt_exp_ms(token) if isinstance(token, str) else None
+        account = (inner.get("userInfo") or {}) if isinstance(inner, dict) else {}
+        doc = parse_auth({
+            "account": {"uid": str(account.get("clineUserId") or account.get("accountId")
+                                   or inner.get("accountId") or "cline-user"),
+                        "nickname": (f"{account.get('firstName', '')} {account.get('lastName', '')}".strip()
+                                     or account.get("email") or "Cline 账号")},
+            "auth": {"accessToken": token, "refreshToken": refresh,
+                     "domain": "api.cline.bot", "expiresAt": exp_ms},
+        })
+        doc.raw.setdefault("channel", "cline")
+        return doc
+
+    def _poll_loomy(self, ticket: Ticket) -> Document | None:
+        """微信扫码长轮询 + 讯飞账号绑定（对齐 pollLoomyWechatOnce）。"""
+        try:
+            resp = requests.get(
+                "https://long.open.weixin.qq.com/connect/l/qrconnect",
+                params={"uuid": ticket.code, "_": int(time.time() * 1000)},
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                         "Referer": "https://open.weixin.qq.com/"}, timeout=40)
+            body = resp.text
+        except requests.RequestException:
+            return None
+        errcode = (re.search(r"wx_errcode\s*=\s*(\d+)", body) or [None, ""])[1] if             re.search(r"wx_errcode\s*=\s*(\d+)", body) else ""
+        wx_code = (re.search(r"wx_code\s*=\s*'([^']*)'", body) or [None, ""])[1] if             re.search(r"wx_code\s*=\s*'([^']*)'", body) else ""
+        if errcode in ("", "408", "404"):
+            return None  # 等待扫码 / 已扫码待确认
+        if errcode == "402":
+            raise RuntimeError("二维码已失效，请重新发起登录。")
+        if errcode == "403":
+            raise RuntimeError("你取消了微信授权。")
+        if errcode != "405" or not wx_code:
+            return None
+        # 确认成功：绑定微信 → 换 session
+        def loomy_body(param: dict) -> dict:
+            return {"base": {"appid": "GM3LOOMY", "modelid": "Web", "version": "1.0.0",
+                             "devid": "web", "ua": "Loomy|Desktop|Electron|macOS",
+                             "traceid": uuid.uuid4().hex}, "param": param}
+
+        def loomy_headers(body_json: str, path: str) -> dict:
+            date = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
+            nonce = uuid.uuid4()
+            md5 = base64.b64encode(hashlib.md5(body_json.encode()).digest()).decode()
+            sts = "\n".join(["POST", path, "", md5, "application/json", date,
+                              str(nonce), "", ""])
+            sig = base64.b64encode(hmac.new(b"zsak6eadrbawz683wf5r3m2snrwj868r",
+                                            sts.encode(), hashlib.sha1).digest()).decode()
+            return {"Authorization": f"account 2thryby66wxi53sk:{sig}",
+                    "Date": date, "Nonce": str(nonce),
+                    "Content-Type": "application/json", "Content-MD5": md5}
+
+        bj = json.dumps(loomy_body({"tcode": {"code": wx_code}, "type": "wx"}))
+        r1 = requests.post("https://account.xfinfr.com/login/thirdAccount/bind/auth",
+                           data=bj, headers=loomy_headers(bj, "/login/thirdAccount/bind/auth"),
+                           timeout=15)
+        rcode = (r1.json() or {}).get("rcode") if r1.ok else ""
+        if not rcode:
+            raise RuntimeError("微信授权绑定失败。")
+        bj2 = json.dumps(loomy_body({"rcode": rcode, "expire": 1209600}))
+        r2 = requests.post("https://account.xfinfr.com/login/thirdAccount/bind/skip",
+                           data=bj2, headers=loomy_headers(bj2, "/login/thirdAccount/bind/skip"),
+                           timeout=15)
+        rec = (r2.json() or {}) if r2.ok else {}
+        session, userid = rec.get("session") or "", rec.get("userid") or ""
+        if not (session and userid):
+            raise RuntimeError("Loomy 登录未返回有效会话。")
+        doc = parse_auth({
+            "account": {"uid": str(userid), "nickname": rec.get("nickname") or "Loomy 账号"},
+            "auth": {"accessToken": session, "domain": "account.xfinfr.com",
+                     "expiresAt": int(time.time() * 1000 + 1209600 * 1000)},
+        })
+        doc.raw.setdefault("channel", "loomy")
+        return doc
 
     def _poll_codearts(self, ticket: Ticket) -> Document | None:
         """轮询华为云 snap-manager 取回 CodeArts STS 临时凭据。"""
