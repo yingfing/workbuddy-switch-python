@@ -19,6 +19,8 @@ jobs:
         with:
           fetch-depth: 0                      # 需要历史以判断 tag 是否存在
       - name: 版本号未变则跳过
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
           TAG="v$VERSION"
@@ -30,4 +32,9 @@ jobs:
             git tag -a "$TAG" -m "release $TAG (auto)"
             git push origin "$TAG"
             echo "已创建并推送 $TAG"
+            # GITHUB_TOKEN 推的 tag 不会触发 on:push:tags（GitHub 防循环机制），
+            # 必须显式发 dispatch 事件叫醒 release.yml
+            gh api "repos/$GITHUB_REPOSITORY/dispatches" \
+              -f event_type=release -f "client_payload[tag]=$TAG"
+            echo "已触发 Release 工作流"
           fi

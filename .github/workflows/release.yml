@@ -5,7 +5,9 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*"]            # 手动 git push --tags 也能发版
+  repository_dispatch:      # auto-tag.yml 打 tag 后显式叫醒（GITHUB_TOKEN 推 tag 不触发 push）
+    types: [release]
 
 permissions:
   contents: write
@@ -15,15 +17,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.client_payload.tag || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - run: pip install build
       - name: 校验 tag 与 pyproject 版本一致
         run: |
+          TAG="${{ github.event.client_payload.tag || github.ref_name }}"
           VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
-          [ "v$VERSION" = "${GITHUB_REF_NAME}" ] || {
-            echo "tag ${GITHUB_REF_NAME} 与 pyproject 版本 v$VERSION 不一致"; exit 1; }
+          [ "v$VERSION" = "$TAG" ] || {
+            echo "tag $TAG 与 pyproject 版本 v$VERSION 不一致"; exit 1; }
       - run: python -m build
       - uses: actions/upload-artifact@v4
         with:
