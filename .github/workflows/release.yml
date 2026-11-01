@@ -102,7 +102,7 @@ jobs:
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy-x86_64.AppImage
           ./linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
-            --appdir AppDir --output appimage
+            --appdir AppDir --executable AppDir/usr/bin/wbspy --output appimage
           mv WorkBuddy_Switch-*.AppImage dist/wbspy-linux-x86_64.AppImage
       - name: AppImage 冒烟（CI 无 FUSE，用 extract-and-run）
         if: matrix.os == 'ubuntu-22.04'
