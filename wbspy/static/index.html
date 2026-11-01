@@ -209,7 +209,7 @@ a{color:var(--accent);text-decoration:none}
 
 <script>
 const $ = s => document.querySelector(s);
-const api = (p, opt) => fetch(p, opt).then(r => r.json());
+const api = (p, opt) => fetch(p + (p.includes('?') ? '&' : '?') + location.search.slice(1), opt).then(r => r.json());
 let pollTimer = null;
 
 // -- 标签页 --
@@ -438,7 +438,7 @@ function renderFree() {
 }
 
 // -- 网关 --
-async async function loadGateway() {
+async function loadGateway() {
   const u = await api('/api/usage');
   const days = Object.entries(u.data || {});
   $('#usageEmpty').hidden = days.length > 0;
