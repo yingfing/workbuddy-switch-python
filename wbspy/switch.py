@@ -17,16 +17,21 @@ import time
 from pathlib import Path
 
 from .document import Document, parse_auth
+from .platform_paths import find_local_auth
 from .store import BACKUP_PATH, ensure_dirs, load_snapshot, save_snapshot
-
-AUTH_FILES = {
-    "cn": Path.home() / ".workbuddy" / "workbuddy-desktop.info",
-    "global": Path.home() / ".workbuddy-ai" / "workbuddy-desktop-ai.info",
-}
 
 
 def auth_file(region: str = "cn") -> Path:
-    return AUTH_FILES.get(region, AUTH_FILES["cn"])
+    """桌面客户端登录文件（按当前平台解析，找不到才落回旧 home 路径以兼容旧快照）。"""
+    channel = "workbuddy" if region == "global" else "buddy"
+    try:
+        return find_local_auth(channel)
+    except FileNotFoundError:
+        legacy = {
+            "cn": Path.home() / ".workbuddy" / "workbuddy-desktop.info",
+            "global": Path.home() / ".workbuddy-ai" / "workbuddy-desktop-ai.info",
+        }
+        return legacy.get(region, legacy["cn"])
 
 
 def merge_auth(current_raw: str, target_raw: str) -> str:

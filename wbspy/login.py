@@ -212,24 +212,23 @@ def workbuddy_web_login(provider: str = "workbuddy",
 # ---------------------------------------------------------------------------
 
 LOCAL_SOURCES = {
-    "buddy": ("~/.workbuddy", "workbuddy-desktop.info"),
-    "workbuddy": ("~/.workbuddy-ai", "workbuddy-desktop-ai.info"),
-    "trae": ("~/.trae", "workbuddy-desktop.info"),
-    "qoder": ("~/.qoder", "workbuddy-desktop.info"),
+    "buddy": "workbuddy-desktop.info",
+    "workbuddy": "workbuddy-desktop-ai.info",
+    "trae": "workbuddy-desktop.info",
+    "qodercn": "workbuddy-desktop.info",
+    "qoder": "workbuddy-desktop.info",
 }
 
 
 def local_login(channel_id: str) -> Document:
-    """读本机桌面客户端登录文件。"""
-    try:
-        dirname, filename = LOCAL_SOURCES[channel_id]
-    except KeyError:
-        raise RuntimeError(f"渠道 {channel_id} 暂无本机凭据来源。") from None
+    """读本机桌面客户端登录文件（Windows / macOS / Linux 平台路径解析）。"""
     from pathlib import Path
-    path = Path(dirname).expanduser() / filename
-    if not path.exists():
-        raise FileNotFoundError(f"未找到 {channel_id} 的本机登录文件：{path}")
-    doc = parse_auth(path.read_text(encoding="utf-8"))
+
+    from .platform_paths import find_local_auth
+    if channel_id not in LOCAL_SOURCES:
+        raise RuntimeError(f"渠道 {channel_id} 暂无本机凭据来源。") from None
+    path = find_local_auth(channel_id)
+    doc = parse_auth(Path(path).read_text(encoding="utf-8"))
     doc.raw.setdefault("channel", channel_id)
     print(f"✓ 已读取本机凭据：{doc.label()}")
     return doc
