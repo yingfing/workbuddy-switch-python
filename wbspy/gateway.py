@@ -216,6 +216,9 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         except ValueError:
             raise HTTPException(400, "请求须为 JSON 对象。")
         model = raw.get("model", "")
+        if isinstance(model, str) and model.startswith("global:"):
+            raise HTTPException(400, "unsupported_region",
+                                "向量模型目前仅国内版可用，不接受 global: 前缀。")
         inputs = raw.get("input", [])
         inputs = [inputs] if isinstance(inputs, str) else list(inputs)
         doc = pool.pick(model)

@@ -581,33 +581,70 @@ class WorkBuddyClient:
 
     # -- 模型目录 -----------------------------------------------------------------
 
-    def models(self) -> list[dict]:
-        if not self.doc.token:
-            raise UpstreamError(401, "credential_required", "请先完成网页登录授权。")
-        # 实战校准（2026-11-01，真实账号验证）：CN 目录只认 GET + CLI UA +
-        # Origin/Referer，POST 会 404。
-        resp = self.http.get(
-            f"{self.doc.api}/v2/enterprises/personal/models",
-            headers={"Authorization": f"Bearer {self.doc.token}",
-                     "Accept": "application/json",
-                     "Origin": self.doc.origin, "Referer": f"{self.doc.origin}/",
-                     "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2"},
-            timeout=TIMEOUT, allow_redirects=False,
-        )
-        if resp.status_code in (401, 403):
-            raise UpstreamError(401, "upstream_auth_expired", "登录凭据已失效。")
-        if not resp.ok:
-            raise UpstreamError(502, "upstream_error", f"模型目录暂不可用（HTTP {resp.status_code}）。")
-        data = resp.json().get("data") or []
-        out = []
-        for row in data if isinstance(data, list) else []:
+    def _catalog_headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.doc.token}",
+                "Accept": "application/json",
+                "Origin": self.doc.origin, "Referer": f"{self.doc.origin}/",
+                "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2"}
+
+    def _parse_catalog(self, payload: dict) -> list[dict]:
+        """解析目录响应。global 的 /v3/config 走 availableModels 过滤（对应
+        WorkBuddy-Switch api-upstream.mjs 的 catalog 逻辑）。"""
+        data = payload.get("data")
+        if isinstance(data, dict):
+            catalog = data.get("models")
+            allowed = data.get("availableModels")
+        else:
+            catalog, allowed = data, None
+        if not isinstance(catalog, list):
+            return []
+        allowed_ids = None
+        if isinstance(allowed, list):
+            allowed_ids = {v if isinstance(v, str) else v.get("id")
+                           for v in allowed if isinstance(v, (str, dict))}
+        out, seen = [], set()
+        for row in catalog:
             if not isinstance(row, dict):
                 continue
             mid = row.get("model") or row.get("id") or row.get("name")
-            if isinstance(mid, str) and mid:
-                out.append({"id": mid, "name": str(row.get("display_name") or mid)[:80],
-                            "region": self.doc.region})
+            if not (isinstance(mid, str) and mid) or mid in seen:
+                continue
+            if row.get("disabled") or row.get("enabled") is False:
+                continue
+            if allowed_ids is not None and mid not in allowed_ids:
+                continue
+            seen.add(mid)
+            out.append({"id": mid, "name": str(row.get("display_name") or row.get("name") or mid)[:80],
+                        "region": self.doc.region})
         return out
+
+    def models(self) -> list[dict]:
+        if not self.doc.token:
+            raise UpstreamError(401, "credential_required", "请先完成网页登录授权。")
+        # 区域化目录（对齐 WorkBuddy-Switch）：global 的 personal 端点只服务旧
+        # 别名目录，优先产品配置源 /v3/config，失败回落 personal/models；
+        # CN 反之（personal/models 已实战校准：只认 GET + CLI UA）。
+        routes = (["/v3/config", "/v2/enterprises/personal/models"]
+                  if self.doc.region == "global"
+                  else ["/v2/enterprises/personal/models", "/v3/config"])
+        last_status = 0
+        for route in routes:
+            resp = self.http.get(
+                f"{self.doc.api}{route}", headers=self._catalog_headers(),
+                timeout=TIMEOUT, allow_redirects=False,
+            )
+            last_status = resp.status_code
+            if resp.status_code in (401, 403):
+                raise UpstreamError(401, "upstream_auth_expired", "登录凭据已失效。")
+            if resp.ok:
+                try:
+                    rows = self._parse_catalog(resp.json())
+                except ValueError:
+                    rows = []
+                if rows:
+                    return rows
+        raise UpstreamError(502, "upstream_error",
+                            f"模型目录暂不可用（HTTP {last_status}）。")
 
     # -- 对话 -----------------------------------------------------------------
 
@@ -642,6 +679,13 @@ class WorkBuddyClient:
             raise UpstreamError(401, "credential_required", "请先完成网页登录授权。")
         conv = conversation_id or str(uuid.uuid4())
         url = f"{self.doc.origin}/v2/chat/completions"
+        # 国际版上游要求请求必须含 system 消息（对齐 WorkBuddy-Switch）。
+        if self.doc.region == "global" and not any(
+                m.get("role") == "system" for m in payload.get("messages", [])):
+            payload = {**payload, "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                *payload.get("messages", []),
+            ]}
         body = json.dumps(normalize_payload(payload))
 
         def send(payload_text: str) -> requests.Response:
