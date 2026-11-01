@@ -550,19 +550,36 @@ class WorkBuddyClient:
         for raw in tasks or []:
             if not isinstance(raw, dict) or not raw.get("task_code"):
                 continue
-            status = str(raw.get("status", ""))
-            claimed = raw.get("claimed") is True or status == "claimed"
+            # API uses accept_status (not_accepted / accepted / claimed);
+            # older responses also carried status/completed. Prefer accept_status.
+            status = str(raw.get("accept_status") or raw.get("status") or "")
+            claimed = (raw.get("claimed") is True
+                       or status == "claimed"
+                       or status == "completed_claimed")
             locked = raw.get("locked") is True
             progress = raw.get("progress") or {}
+            current = progress.get("current")
+            target = progress.get("target")
+            progress_done = (isinstance(current, (int, float))
+                             and isinstance(target, (int, float))
+                             and target > 0
+                             and current >= target)
             out.append({
                 "code": raw["task_code"],
                 "title": str(raw.get("title") or raw["task_code"])[:120],
                 "status": status,
                 "claimed": claimed,
                 "locked": locked,
-                "claimable": not claimed and not locked and (
-                    raw.get("claimable") is True or
-                    (raw.get("claimable") is not False and status == "completed")),
+                "progress_done": progress_done,
+                # claimable: accepted(or no state) + progress finished + not claimed + not locked
+                "claimable": (not claimed and not locked
+                              and status in ("", "accepted", "completed")
+                              and (raw.get("claimable") is True
+                                   or progress_done
+                                   or status == "completed")),
+                # not yet accepted -> caller can auto-accept it
+                "accept_needed": (not claimed and not locked
+                                  and status in ("not_accepted", "pending", "")),
                 "reward_credit": raw.get("reward_credit"),
             })
         return out
