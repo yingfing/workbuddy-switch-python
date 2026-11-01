@@ -131,6 +131,16 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             pool.refresh_documents(load_accounts())   # 新账号即时进池
         return _ok(result)
 
+    @app.get("/authorize")
+    def authorize_callback(request: Request):
+        """TRAE / LobsterAI 授权回调：把查询参数投递给等待中的登录票据。"""
+        from fastapi.responses import HTMLResponse
+        message = sessions.deliver_callback(dict(request.query_params))
+        return HTMLResponse(
+            '<!doctype html><meta charset="utf-8"><title>wbspy 授权</title>'
+            '<body style="font:16px system-ui;padding:48px;text-align:center">'
+            f'<p>{message}</p></body>')
+
     # -- 账号 ---------------------------------------------------------------
 
     @app.get("/api/accounts")

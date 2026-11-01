@@ -36,10 +36,16 @@ wbspy switch restore         # 一键还原到切换前的登录状态
 
 | 方式 | 说明 | 已实现渠道 |
 | --- | --- | --- |
-| **qr 扫码** | 协议级扫码，二维码直接显示，手机扫一扫拿 token | Raccoon（商汤小浣熊）、Loomy |
+| **qr 扫码** | 协议级扫码，二维码直接显示，手机扫一扫拿 token | Raccoon（商汤小浣熊）、Loomy（微信）、MiniMax、ZCode |
 | **browser 网页授权** | 授权链接渲染成二维码 + 自动开浏览器，轮询拿凭据 | WorkBuddy 国内版 / 国际版（state → token → 档案） |
-| **device 设备码** | 设备码 + PKCE，跨设备登录 | MiniMax |
+| **device 设备码** | 设备码 + PKCE，跨设备登录 | MiniMax、Cline（WorkOS）、Qoder 国内 / 国际版、CodeArts（华为云 ticket） |
+| **callback 授权回调** | 授权页登录后 302 回本服务 /authorize 换凭据 | TRAE（refreshToken / PKCE 双路）、LobsterAI（authCode → exchange） |
+| **oauth 本地回调** | Google OAuth，本地 8199 端口收 code | Gemini Code Assist |
 | **local 读本机** | 读桌面客户端登录文件，零交互兜底 | 其余渠道 |
+
+13 家渠道登录协议**全部真实现**（无「打开官网手动登录」降级）。TRAE / LobsterAI 的
+回调在公网部署时自动指向 `WBSPY_PUBLIC_ORIGIN`（配合 `WBSPY_PUBLIC_SHARECODE`），
+手机扫码登录后 302 跳回公网服务完成换票。
 
 登录入口有两套：**命令行**（`wbspy login`）和**网页**（Web 控制台里点卡片，SVG 二维码弹窗，
 全程不用终端 —— Windows 没法在终端扫码的问题不存在了）。MiniMax 还可以在网页里

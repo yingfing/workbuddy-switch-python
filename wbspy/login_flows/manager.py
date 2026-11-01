@@ -17,7 +17,8 @@ import uuid
 from ..channels import Channel, get_channel, methods_of
 from ..login import LOGIN_TIMEOUT_SEC, local_login
 from ..store import save_account
-from . import cline, codearts, gemini, loomy, minimax, qoder, raccoon, workbuddy
+from . import cline, codearts, gemini, loomy, minimax, qoder, raccoon
+from . import trae, workbuddy, lobsterai, zcode
 from .core import Ticket, doc_public
 
 # (method, channel.login_kind) → flow 模块
@@ -31,6 +32,9 @@ _FLOWS: dict[tuple[str, str], object] = {
     ("qr", "loomy-wechat"): loomy,
     ("browser", "qoder-device"): qoder,
     ("qr", "qoder-device"): qoder,
+    ("browser", "trae-callback"): trae,
+    ("browser", "lobsterai-callback"): lobsterai,
+    ("qr", "zcode-oauth"): zcode,
 }
 
 
@@ -110,6 +114,29 @@ class LoginSessionManager:
     def drop(self, ticket_id: str) -> None:
         with self._lock:
             self._tickets.pop(ticket_id, None)
+
+    # -- 回调投递（/authorize 端点 → 等待中的 flow）---------------------------
+
+    def deliver_callback(self, params: dict) -> str:
+        """按 state/loginTraceID 找到等待中的票据并投递回调参数。
+
+        返回给浏览器的提示文案；找不到票据或已过期返回对应错误提示。
+        """
+        state = str(params.get("loginTraceID") or params.get("state") or "")
+        if not state or len(state) > 200:
+            return "回调参数无效，请返回应用重试。"
+        with self._lock:
+            ticket = next((t for t in self._tickets.values()
+                           if t.state == state), None)
+        if ticket is None:
+            return "授权会话不存在或已完成，请关闭此页。"
+        if ticket.document is not None:
+            return "该授权已完成，请返回应用查看。"
+        if time.time() > ticket.expires_at:
+            return "授权会话已超时，请重新发起登录。"
+        with self._lock:
+            ticket.callback = dict(params)
+        return "授权信息已接收，正在换取凭据；请返回应用查看结果。"
 
     def sweep(self) -> None:
         now = time.time()

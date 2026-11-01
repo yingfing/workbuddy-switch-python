@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..document import Document
 
@@ -40,6 +40,8 @@ class Ticket:
     code: str = ""
     origin: str = ""
     platform: str = ""
+    secret: str = ""                      # 流程私有密钥（不进 public()）
+    callback: dict = field(default_factory=dict)  # /authorize 端点投递的回调参数
     expires_at: float = 0.0
     document: Document | None = None
     error: str = ""
