@@ -193,7 +193,7 @@ def schedule(documents: list[Document],
              log: Callable[[str], None] = print) -> None:  # pragma: no cover
     """每日定点托管（读 config automation.daily_at，默认 09:00）。"""
     cfg = (load_config().get("automation") or {})
-    hh, mm = "09:00" if not cfg.get("daily_at") else str(cfg["daily_at"]).split(":")[:2]
+    hh, mm = ("09:00" if not cfg.get("daily_at") else str(cfg["daily_at"])).split(":")[:2]
     log(f"自动化定点托管：每日 {hh}:{mm} 执行（Ctrl+C 退出）。")
     while True:
         wait = seconds_until(int(hh), int(mm))
