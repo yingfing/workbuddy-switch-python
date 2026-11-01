@@ -1,0 +1,21 @@
+# 凭据与账号数据（绝不入库）
+keys.json
+accounts/
+*.info
+*.token
+*.json.bak
+~/.wbspy/
+.wbspy/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+
+# 测试与临时
+.pytest_cache/
+.coverage
+*.log

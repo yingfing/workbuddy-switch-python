@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorkBuddy Switch · Python</title>
+<style>
+:root{
+  --bg:#0d0f14; --panel:rgba(255,255,255,.045); --panel-2:rgba(255,255,255,.07);
+  --line:rgba(255,255,255,.09); --text:#e8eaf0; --dim:#8a919e; --accent:#6c8cff;
+  --accent-2:#8b5cf6; --ok:#34d399; --warn:#fbbf24; --bad:#f87171; --r:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:radial-gradient(1200px 600px at 20% -10%,rgba(108,140,255,.14),transparent 60%),
+     radial-gradient(900px 500px at 90% 10%,rgba(139,92,246,.10),transparent 55%),var(--bg);
+     color:var(--text);font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+     min-height:100vh;padding:28px}
+.wrap{max-width:1080px;margin:0 auto}
+header{display:flex;align-items:center;gap:14px;margin-bottom:22px}
+header .logo{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;font-size:22px;
+  background:linear-gradient(135deg,var(--accent),var(--accent-2));box-shadow:0 8px 30px rgba(108,140,255,.35)}
+h1{font-size:19px;font-weight:600}
+header .sub{color:var(--dim);font-size:12px}
+nav{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap}
+nav button{background:transparent;border:1px solid transparent;color:var(--dim);padding:8px 16px;
+  border-radius:10px;cursor:pointer;font-size:13.5px;transition:.15s}
+nav button:hover{color:var(--text);background:var(--panel)}
+nav button.on{color:var(--text);background:var(--panel-2);border-color:var(--line)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:20px;margin-bottom:16px;backdrop-filter:blur(18px)}
+.card h2{font-size:14px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.card h2 .tag{font-size:11px;color:var(--dim);font-weight:400;margin-left:auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.chan{border:1px solid var(--line);border-radius:12px;padding:14px;background:rgba(255,255,255,.02);transition:.15s}
+.chan:hover{background:rgba(255,255,255,.05)}
+.chan b{font-size:13.5px}
+.chan .org{color:var(--accent);font-size:11px;margin-left:6px}
+.chan p{color:var(--dim);font-size:12px;margin:6px 0 10px;min-height:34px}
+.badge{display:inline-block;font-size:10.5px;padding:2px 8px;border-radius:6px;
+  background:rgba(108,140,255,.15);color:#a5b4ff;margin-right:4px}
+.btn{background:linear-gradient(135deg,var(--accent),var(--accent-2));border:0;color:#fff;
+  padding:7px 16px;border-radius:9px;cursor:pointer;font-size:12.5px;font-weight:500;transition:.15s}
+.btn:hover{filter:brightness(1.12)} .btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.ghost{background:var(--panel-2);border:1px solid var(--line);color:var(--text)}
+.btn.sm{padding:4px 12px;font-size:11.5px}
+.btn.bad{background:linear-gradient(135deg,#ef4444,#f87171)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{color:var(--dim);text-align:left;font-weight:500;padding:6px 10px;border-bottom:1px solid var(--line)}
+td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.04)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+.dot.g{background:var(--ok)} .dot.y{background:var(--warn)} .dot.r{background:var(--bad)}
+.log{background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:10px;padding:12px;
+  font:11.5px/1.8 ui-monospace,Consolas,monospace;color:#a8b3c4;max-height:260px;overflow:auto;white-space:pre-wrap}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+input,select{background:rgba(0,0,0,.3);border:1px solid var(--line);border-radius:9px;
+  color:var(--text);padding:8px 12px;font-size:13px;outline:none}
+input:focus{border-color:var(--accent)}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;place-items:center;z-index:50}
+.modal.on{display:grid}
+.modal .box{background:#151823;border:1px solid var(--line);border-radius:16px;padding:26px;
+  width:min(420px,92vw);text-align:center;backdrop-filter:blur(20px)}
+.modal .box h3{font-size:15px;margin-bottom:8px}
+.modal .box .note{color:var(--dim);font-size:12px;margin:10px 0}
+#qr{background:#fff;border-radius:12px;padding:10px;display:inline-block;min-width:180px;min-height:180px}
+#qr svg{display:block;width:200px;height:200px}
+.pill{font-size:11px;color:var(--dim)}
+.kv{display:flex;justify-content:space-between;padding:7px 10px;border-radius:8px;font-size:12.5px}
+.kv:nth-child(odd){background:rgba(255,255,255,.03)}
+a{color:var(--accent);text-decoration:none}
+.empty{color:var(--dim);font-size:12.5px;text-align:center;padding:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🐾</div>
+    <div>
+      <h1>WorkBuddy Switch <span class="pill">Python 版</span></h1>
+      <div class="sub">多账号 · 扫码登录 · 积分自动化 · 本机 API 网关</div>
+    </div>
+    <div style="margin-left:auto" class="pill" id="gatewayInfo"></div>
+  </header>
+
+  <nav id="tabs">
+    <button data-tab="login" class="on">登录</button>
+    <button data-tab="accounts">账号池</button>
+    <button data-tab="free">免费可调用 API</button>
+    <button data-tab="auto">积分自动化</button>
+    <button data-tab="switch">桌面切换</button>
+    <button data-tab="gateway">网关</button>
+  </nav>
+
+  <!-- 登录 -->
+  <section id="tab-login">
+    <div class="card">
+      <h2>登录渠道 <span class="tag">扫码 → 网页 → 本机，自动回退</span></h2>
+      <div class="grid" id="channels"></div>
+    </div>
+  </section>
+
+  <!-- 账号 -->
+  <section id="tab-accounts" hidden>
+    <div class="card">
+      <h2>账号库 <span class="tag" id="accCount"></span></h2>
+      <table id="accTable"><thead><tr>
+        <th>状态</th><th>账号</th><th>地区</th><th>API</th><th>操作</th>
+      </tr></thead><tbody></tbody></table>
+      <div class="empty" id="accEmpty" hidden>账号库为空，去「登录」页添加账号</div>
+    </div>
+  </section>
+
+  <!-- 免费可调用 API -->
+  <section id="tab-free" hidden>
+    <div class="card">
+      <h2>我的账号可调用的模型 <span class="tag">来自账号池实时目录 · cn=国内版 global=国际版</span></h2>
+      <table id="myModelTable"><thead><tr>
+        <th>调用 ID</th><th>名称</th><th>地区</th>
+      </tr></thead><tbody></tbody></table>
+      <div class="empty" id="myModelEmpty" hidden>账号池为空或目录未就绪 —— 先去「登录」页添加账号</div>
+    </div>
+    <div class="card">
+      <h2>免费额度模型索引 <span class="tag">完全免费 + 有免费额度的厂商（吸收自 dsh-xdpool 聚合渠道）</span></h2>
+      <div class="row" id="freeChips" style="margin-bottom:10px"></div>
+      <table id="freeTable"><thead><tr>
+        <th>厂商</th><th>模型</th><th>类型</th><th>去接入</th>
+      </tr></thead><tbody></tbody></table>
+      <div class="empty" id="freeEmpty" hidden>暂无数据</div>
+    </div>
+    <div class="card">
+      <h2>全部聚合渠道（76 家） <span class="tag">填 Key 才计入网关，默认全关</span></h2>
+      <div class="row" id="provChips" style="margin-bottom:10px"></div>
+      <input id="provSearch" placeholder="🔍 搜索厂商 / 模型…" style="width:240px;margin-bottom:10px"
+             oninput="renderProv()">
+      <table id="provTable"><thead><tr>
+        <th>厂商</th><th>分类</th><th>接入方式</th><th>模型数</th><th>统一调用（填 Key 即穿透）</th><th>官网</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+
+  <!-- 自动化 -->
+  <section id="tab-auto" hidden>
+    <div class="card">
+      <h2>积分自动化 <span class="tag">签到 · 猫猫旅行 · 成长任务（仅国内版）</span></h2>
+      <div class="row" style="margin-bottom:12px">
+        <button class="btn" id="autoRun" onclick="autoRun()">▶ 立即跑一轮</button>
+        <span class="pill" id="autoState"></span>
+      </div>
+      <div class="log" id="autoLog">暂无日志。</div>
+    </div>
+  </section>
+
+  <!-- 切换 -->
+  <section id="tab-switch" hidden>
+    <div class="card">
+      <h2>桌面客户端账号切换 <span class="tag">保留机器本地元数据，只换登录字段</span></h2>
+      <div class="row" style="margin-bottom:12px">
+        <select id="snapRegion"><option value="cn">国内版</option><option value="global">国际版</option></select>
+        <input id="snapName" placeholder="快照名（可留空自动命名）" style="width:220px">
+        <button class="btn" onclick="snapSave()">💾 保存当前登录</button>
+        <button class="btn ghost" onclick="snapRestore()">↩ 恢复切换前</button>
+      </div>
+      <table id="snapTable"><thead><tr>
+        <th>快照</th><th>账号</th><th>操作</th>
+      </tr></thead><tbody></tbody></table>
+      <div class="empty" id="snapEmpty" hidden>暂无快照</div>
+    </div>
+  </section>
+
+  <!-- 网关 -->
+  <section id="tab-gateway" hidden>
+    <div class="card">
+      <h2>本机 OpenAI 兼容网关 <span class="tag" id="gwAddr"></span></h2>
+      <p class="pill" style="margin-bottom:10px">
+        <code>POST /v1/chat/completions</code>（流式，多账号自动换号容错） ·
+        <code>GET /v1/models</code> · <code>POST /v1/embeddings</code></p>
+      <div class="kv"><span>网关地址</span><span id="gwUrl">—</span></div>
+      <div class="kv"><span>API Key</span><span id="gwKey">未启用（仅本机回环）</span></div>
+      <div class="kv"><span>可用账号</span><span id="gwHealthy">—</span></div>
+    </div>
+    <div class="card">
+      <h2>模型目录</h2>
+      <table id="modelTable"><thead><tr><th>模型 ID</th><th>名称</th><th>地区</th></tr></thead><tbody></tbody></table>
+      <div class="empty" id="modelEmpty" hidden>暂无模型（需要已授权账号）</div>
+    </div>
+    <div class="card">
+      <h2>用量账本 <span class="tag">近 7 天 · 请求/换号救回/token</span>
+        <a href="/api/usage/export"><button class="btn sm ghost">⬇ 导出 CSV</button></a></h2>
+      <table id="usageTable"><thead><tr>
+        <th>日期</th><th>请求</th><th>错误</th><th>换号救回</th><th>token（进/出）</th>
+      </tr></thead><tbody></tbody></table>
+      <div class="empty" id="usageEmpty" hidden>暂无用量数据</div>
+    </div>
+  </section>
+</div>
+
+<!-- 登录弹窗 -->
+<div class="modal" id="modal">
+  <div class="box">
+    <h3 id="mTitle">扫码登录</h3>
+    <div id="qr"></div>
+    <div class="note" id="mNote"></div>
+    <div class="row" style="justify-content:center;margin-top:6px">
+      <a href="#" id="mLink" target="_blank" hidden><button class="btn ghost">在新窗口打开官方登录页 ↗</button></a>
+    </div>
+    <div style="margin-top:14px"><button class="btn ghost" onclick="closeModal()">关闭</button></div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = (p, opt) => fetch(p, opt).then(r => r.json());
+let pollTimer = null;
+
+// -- 标签页 --
+document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#tabs button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  ['login','accounts','free','auto','switch','gateway'].forEach(t =>
+    $('#tab-' + t).hidden = t !== b.dataset.tab);
+  if (b.dataset.tab === 'accounts') loadAccounts();
+  if (b.dataset.tab === 'auto') pollAuto();
+  if (b.dataset.tab === 'switch') loadSnapshots();
+  if (b.dataset.tab === 'gateway') loadGateway();
+  if (b.dataset.tab === 'free') loadFree();
+});
+
+// -- 渠道列表 --
+async function loadChannels() {
+  const r = await api('/api/channels');
+  $('#channels').innerHTML = r.data.map(c => `
+    <div class="chan">
+      <b>${c.name}</b><span class="org">${c.org}</span>
+      <div style="margin:4px 0">${c.methods.map(m =>
+        `<span class="badge">${{qr:'扫码',browser:'网页',local:'本机'}[m]||m}</span>`).join('')}
+        ${c.checkin ? '<span class="badge" style="background:rgba(52,211,153,.15);color:#6ee7b7">每日签到</span>' : ''}
+      </div>
+      <p>${c.note}</p>
+      <div class="row">
+        ${c.methods.map(m => `<button class="btn sm" onclick="startLogin('${c.id}','${m}')">${
+          {qr:'扫码登录',browser:'网页登录',local:'读本机'}[m]}</button>`).join('')}
+      </div>
+    </div>`).join('');
+}
+
+// -- 登录流程 --
+async function startLogin(channel, method) {
+  const r = await api('/api/login/start', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel, method})});
+  if (!r.ok) return alert(r.error);
+  const d = r.data;
+  $('#mTitle').textContent = channelName(channel) + ' · ' + {qr:'扫码登录',browser:'网页授权',local:'本机凭据',manual:'手动'}[d.kind];
+  $('#mNote').textContent = d.message || '等待扫码…';
+  $('#qr').innerHTML = d.qr_svg || '<div style="padding:60px 20px;color:#666">无二维码</div>';
+  const link = $('#mLink');
+  if (d.auth_url) { link.href = d.auth_url; link.hidden = false; } else link.hidden = true;
+  $('#modal').classList.add('on');
+  clearInterval(pollTimer);
+  if (d.kind === 'qr' || d.kind === 'browser') {
+    pollTimer = setInterval(async () => {
+      const p = await api('/api/login/poll/' + d.ticket);
+      if (p.status === 'success') {
+        clearInterval(pollTimer);
+        $('#mNote').textContent = '✓ 登录成功：' + p.data.document.label;
+        $('#qr').innerHTML = '<div style="padding:70px 20px;font-size:40px">🎉</div>';
+        setTimeout(() => { closeModal(); loadChannels(); }, 1200);
+      } else if (p.status === 'failed' || p.status === 'expired') {
+        clearInterval(pollTimer);
+        $('#mNote').textContent = '✗ ' + (p.error || '失败');
+      }
+    }, 3000);
+  }
+}
+function closeModal() { clearInterval(pollTimer); $('#modal').classList.remove('on'); }
+function channelName(id) {
+  const el = [...document.querySelectorAll('.chan b')].find(b => true);
+  return ({buddy:'WorkBuddy 国内版', workbuddy:'WorkBuddy 国际版', raccoon:'Raccoon'})[id] || id;
+}
+
+// -- 账号 --
+async function loadAccounts() {
+  const r = await api('/api/accounts');
+  const list = r.data || [];
+  $('#accCount').textContent = list.length + ' 个账号';
+  $('#accEmpty').hidden = list.length > 0;
+  $('#accTable').style.display = list.length ? '' : 'none';
+  $('#accTable tbody').innerHTML = list.map(a => `<tr>
+    <td><span class="dot ${a.api_ready ? 'g' : (a.protected ? 'y' : 'r')}"></span>${
+      a.api_ready ? '可用' : (a.protected ? '加密凭据' : '已过期')}</td>
+    <td>${a.label}</td><td>${a.region === 'global' ? '国际版' : '国内版'}</td>
+    <td>${a.api_ready ? '✓' : '—'}</td>
+    <td><button class="btn sm bad" onclick="rmAccount('${a.uid}')">移除</button></td>
+  </tr>`).join('');
+}
+async function rmAccount(uid) {
+  if (!confirm('确定移除该账号？')) return;
+  await api('/api/accounts/' + uid, {method: 'DELETE'});
+  loadAccounts();
+}
+
+// -- 自动化 --
+async function autoRun() {
+  const r = await api('/api/automation/run', {method: 'POST'});
+  if (!r.ok) alert(r.error);
+  pollAuto();
+}
+async function pollAuto() {
+  const r = await api('/api/automation/status');
+  $('#autoState').textContent = r.data.running ? '运行中…' : '空闲';
+  $('#autoRun').disabled = r.data.running;
+  if (r.data.log.length) $('#autoLog').textContent = r.data.log.join('\n');
+  if ($('#tab-auto').hidden === false) setTimeout(pollAuto, 2500);
+}
+
+// -- 切换 --
+async function loadSnapshots() {
+  const r = await api('/api/snapshots');
+  const list = r.data || [];
+  $('#snapEmpty').hidden = list.length > 0;
+  $('#snapTable').style.display = list.length ? '' : 'none';
+  $('#snapTable tbody').innerHTML = list.map(s => `<tr>
+    <td>${s.name}</td><td>${s.label}</td>
+    <td><button class="btn sm" onclick="snapSwitch('${s.name}')">切换</button></td>
+  </tr>`).join('');
+}
+async function snapSave() {
+  const r = await api('/api/switch/save', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: $('#snapName').value, region: $('#snapRegion').value})});
+  r.ok ? loadSnapshots() : alert(r.error);
+}
+async function snapSwitch(name) {
+  if (!confirm('切换桌面客户端登录到「' + name + '」？（当前登录会自动备份）')) return;
+  const r = await api('/api/switch/switch', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, region: $('#snapRegion').value})});
+  alert(r.ok ? '✓ 已切换，重启官方客户端生效' : '✗ ' + r.error);
+  loadSnapshots();
+}
+async function snapRestore() {
+  const r = await api('/api/switch/restore', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({region: $('#snapRegion').value})});
+  alert(r.ok ? '✓ 已恢复切换前登录' : '✗ ' + r.error);
+}
+
+// -- 免费可调用 API --
+let freeAll = [], provAll = [], provFilter = '全部';
+async function loadFree() {
+  const r = await api('/api/free-models');
+  const mine = r.data.mine || [];
+  $('#myModelEmpty').hidden = mine.length > 0;
+  $('#myModelTable').style.display = mine.length ? '' : 'none';
+  $('#myModelTable tbody').innerHTML = mine.map(m => `<tr>
+    <td><code>${m.id}</code></td><td>${m.name}</td>
+    <td>${m.region === 'global' ? '<span class="badge" style="background:rgba(139,92,246,.18);color:#c4b5fd">国际版</span>' : '<span class="badge">国内版</span>'}</td>
+  </tr>`).join('');
+  const emb = r.data.embeddings || [];
+  if (emb.length) $('#myModelTable tbody').insertAdjacentHTML('beforeend',
+    emb.map(m => `<tr><td><code>${m.id}</code></td><td>${m.name}（向量）</td>
+      <td>${m.region === 'global' ? '国际版' : '国内版'}</td></tr>`).join(''));
+
+  freeAll = r.data.free || [];
+  renderFree();
+  const [p, k] = await Promise.all([api('/api/providers'), api('/api/keys')]);
+  const kmap = {};
+  (k.data || []).forEach(x => kmap[x.provider_id] = x);
+  provAll = (p.data.providers || []).map(x => ({...x,
+    configured: (kmap[x.id] || {}).configured || x.auth_kind === 'none',
+    key_hint: (kmap[x.id] || {}).key_hint || ''}));
+  const stats = p.data.stats || {};
+  $('#provChips').innerHTML = ['全部', ...Object.keys(stats)].map(k =>
+    `<button class="btn sm ghost" data-f="${k}" onclick="setProvFilter('${k}')">${k} · ${k === '全部' ? provAll.length : stats[k]}</button>`).join('');
+  renderProv();
+}
+function setProvFilter(k) { provFilter = k; renderProv(); }
+function renderProv() {
+  const q = ($('#provSearch')?.value || '').toLowerCase();
+  let rows = provFilter === '全部' ? provAll : provAll.filter(x => x.category_label === provFilter);
+  if (q) rows = rows.filter(x => (x.name + ' ' + x.id + ' ' + (x.models || []).join(' ') + ' ' + (x.notes || '')).toLowerCase().includes(q));
+  $('#provTable tbody').innerHTML = rows.map(x => `<tr>
+    <td><b>${x.name}</b>${x.notes ? `<div class="pill">${x.notes}</div>` : ''}</td>
+    <td><span class="badge">${x.category_label}</span></td>
+    <td>${{apiKey:'API Key',local:'本地',oauth:'网页授权'}[x.auth_kind] || x.auth_kind}</td>
+    <td>${x.model_count}</td>
+    <td><div class="row" style="gap:6px">
+      <input id="key-${x.id}" placeholder="${x.auth_kind === 'none' ? '免 Key 直接用' : x.key_hint || '粘贴 API Key'}"
+             style="width:170px;font-size:11.5px;padding:5px 8px" ${x.auth_kind === 'none' ? 'disabled' : ''}>
+      <button class="btn sm" onclick="saveKey('${x.id}')" ${x.auth_kind === 'none' ? 'disabled' : ''}>存</button>
+      ${x.configured ? '<span class="dot g" title="已配置，模型已在 /v1/models"></span>' : ''}
+    </div></td>
+    <td>${x.signup_url ? `<a href="${x.signup_url}" target="_blank">打开 ↗</a>` : '—'}</td>
+  </tr>`).join('');
+  document.querySelectorAll('#provChips [data-f]').forEach(b =>
+    b.style.opacity = b.dataset.f === provFilter ? 1 : .55);
+}
+async function saveKey(pid) {
+  const input = document.getElementById('key-' + pid);
+  const r = await api('/api/keys', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({provider: pid, key: input.value.trim()})});
+  if (r.ok) { loadFree(); } else alert(r.error);
+}
+
+function renderFree() {
+  $('#freeTable tbody').innerHTML = freeAll.map(x => `<tr>
+    <td><b>${x.provider}</b></td>
+    <td><code>${x.model}</code>${x.model_name && x.model_name !== x.model ? ` · ${x.model_name}` : ''}</td>
+    <td>${x.category === 'free' ? '<span class="badge" style="background:rgba(52,211,153,.15);color:#6ee7b7">完全免费</span>'
+        : '<span class="badge" style="background:rgba(251,191,36,.15);color:#fcd34d">免费额度</span>'}</td>
+    <td>${x.signup_url ? `<a href="${x.signup_url}" target="_blank">接入 ↗</a>` : '—'}</td>
+  </tr>`).join('');
+}
+
+// -- 网关 --
+async async function loadGateway() {
+  const u = await api('/api/usage');
+  const days = Object.entries(u.data || {});
+  $('#usageEmpty').hidden = days.length > 0;
+  $('#usageTable').style.display = days.length ? '' : 'none';
+  $('#usageTable tbody').innerHTML = days.map(([d, v]) => `<tr>
+    <td>${d}</td><td>${v.requests || 0}</td><td>${v.errors || 0}</td>
+    <td>${v.failover_saves || 0}</td><td>${v.prompt_tokens || 0} / ${v.completion_tokens || 0}</td>
+  </tr>`).join('');
+  const r = await api('/api/pool');
+  const accs = r.data || [];
+  const healthy = accs.filter(a => a.api_ready && !a.dead).length;
+  $('#gwHealthy').textContent = healthy + ' / ' + accs.length;
+  $('#gwAddr').textContent = location.origin;
+  $('#gwUrl').textContent = location.origin + '/v1';
+  const m = await api('/api/models');
+  const list = m.data || [];
+  $('#modelEmpty').hidden = list.length > 0;
+  $('#modelTable').style.display = list.length ? '' : 'none';
+  $('#modelTable tbody').innerHTML = list.map(m => `<tr>
+    <td><code>${m.id}</code></td><td>${m.name}</td><td>${m.region || '—'}</td></tr>`).join('');
+}
+
+loadChannels();
+</script>
+<footer style="text-align:center;padding:14px 0 20px;font-size:11px;color:#5c5f70;">
+  wbspy · Based on WorkBuddy Switch by <a href="https://github.com/koi128bit/WorkBuddy-Switch" target="_blank" style="color:#6c7bd9;">koi128bit</a>
+  · 厂商注册表来自 <a href="https://www.npmjs.com/package/dsh-xdpool" target="_blank" style="color:#6c7bd9;">dsh-xdpool</a> (MIT)
+  · MIT Licensed, 详见 <a href="https://github.com/wbspy/wbspy/blob/main/NOTICE.md" target="_blank" style="color:#6c7bd9;">NOTICE.md</a>
+</footer>
+</body>
+</html>
