@@ -82,12 +82,13 @@ jobs:
           cp dist/wbspy AppDir/usr/bin/wbspy
           python - <<'EOF'
           from PIL import Image, ImageDraw
-          img = Image.new("RGB", (128, 128), "#0078d4")
+          img = Image.new("RGB", (256, 256), "#0078d4")
           d = ImageDraw.Draw(img)
-          d.rectangle([16, 16, 112, 112], outline="white", width=6)
-          d.rectangle([38, 52, 90, 96], fill="white")
+          d.rectangle([32, 32, 224, 224], outline="white", width=12)
+          d.rectangle([76, 104, 180, 192], fill="white")
           img.save("wbspy.png")
           EOF
+          cp wbspy.png AppDir/wbspy.png           # 图标必须在 AppDir 顶层，.DirIcon 由工具生成
           cat > AppDir/wbspy.desktop <<'EOF'
           [Desktop Entry]
           Type=Application
@@ -95,14 +96,14 @@ jobs:
           Comment=多账号 · 扫码登录 · 积分自动化 · 本机 API 网关
           Exec=wbspy
           Icon=wbspy
-          Categories=Development;Network;
+          Categories=Development;
           Terminal=true
           EOF
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy-x86_64.AppImage
           ./linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
-            --appdir AppDir --icon-file wbspy.png --output appimage
-          mv Wbspy-*.AppImage dist/wbspy-linux-x86_64.AppImage
+            --appdir AppDir --output appimage
+          mv WorkBuddy_Switch-*.AppImage dist/wbspy-linux-x86_64.AppImage
       - name: AppImage 冒烟（CI 无 FUSE，用 extract-and-run）
         if: matrix.os == 'ubuntu-22.04'
         run: ./dist/wbspy-linux-x86_64.AppImage --appimage-extract-and-run --version
@@ -126,6 +127,9 @@ jobs:
     needs: [build, build-bin]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                      # 生成「本版变更」需要提交历史
       - uses: actions/download-artifact@v4
         with:
           pattern: dist-pypi
@@ -137,8 +141,33 @@ jobs:
           path: dist/
           merge-multiple: true
       - run: ls -lh dist/
+      - name: 生成发布说明（安装指引 + 自动变更日志）
+        run: |
+          TAG="${{ github.event.client_payload.tag || github.ref_name }}"
+          cat > body.md <<EOF
+          ## 安装
+
+          | 平台 | 下载 | 使用方式 |
+          |---|---|---|
+          | Windows | \`wbspy.exe\` | 下载后直接命令行运行：\`wbspy.exe web\`（无需安装 Python） |
+          | Linux | \`wbspy-linux-x86_64.AppImage\` | \`chmod +x wbspy-linux-x86_64.AppImage && ./wbspy-linux-x86_64.AppImage web\`（需 glibc 2.35+） |
+          | macOS (Apple Silicon) | \`wbspy-macos-arm64\` | \`chmod +x wbspy-macos-arm64 && ./wbspy-macos-arm64 web\` |
+          | macOS (Intel) | \`wbspy-macos-x86_64\` | \`chmod +x wbspy-macos-x86_64 && ./wbspy-macos-x86_64 web\` |
+          | pip（全平台） | \`wbspy-${TAG#v}-py3-none-any.whl\` 或源码 | \`pip install . && wbspy web\` |
+          | Docker | 见 README | \`docker compose up -d\` |
+
+          启动 \`web\` 后浏览器打开提示的地址：扫码登录 → 自动化托管 → OpenAI 兼容网关。
+          检查更新：\`wbspy update\`（国内网络自动走 DoH / 优选 IP）。
+
+          ## 本版变更
+
+          $(git log $(git describe --tags --abbrev=0 HEAD^ 2>/dev/null)..HEAD --oneline 2>/dev/null || true)
+
+          ---
+          EOF
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.client_payload.tag || github.ref_name }}
-          generate_release_notes: true        # 自动汇总上次 release 以来的 commits
+          body_path: body.md
+          generate_release_notes: true        # 自动 notes 追加在 body 之后
           files: dist/*
