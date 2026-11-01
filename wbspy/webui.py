@@ -100,6 +100,12 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     def index():
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/api/update/check")
+    def api_update_check():
+        """检查新版本：只返回对比结果与发布页链接，绝不自动升级。"""
+        from .update import check_update
+        return _ok(check_update())
+
     if (STATIC_DIR / "index.html").exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

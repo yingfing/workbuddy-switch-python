@@ -227,7 +227,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--region", choices=["cn", "global"], default="cn")
     p.set_defaults(fn=_cmd_switch)
 
+    p = sub.add_parser("update", help="检查新版本（只提示链接，不自动升级）")
+    p.set_defaults(fn=_cmd_update)
+
     return parser
+
+
+def _cmd_update(_args) -> int:
+    from .update import check_update
+    print("正在检查新版本……")
+    r = check_update()
+    if not r["ok"]:
+        print(f"✗ {r['error']}")
+        print(f"  可手动打开发布页查看：{r['url']}")
+        return 1
+    if r["update_available"]:
+        print(f"有新版本：v{r['current']} → v{r['latest']}")
+        if r.get("notes"):
+            print("\n更新说明（节选）：")
+            for line in r["notes"].splitlines()[:8]:
+                print(f"  {line}")
+        print(f"\n发布页：{r['url']}")
+        print("升级方式（按你的安装方式选其一）：")
+        print("  git 安装： git pull && pip install -e .")
+        print("  pip 安装： pip install -U https://github.com/yingfing/"
+              "workbuddy-switch-python/archive/refs/heads/main.tar.gz")
+        print("  Docker：  docker compose pull && docker compose up -d")
+        print("升级后重启服务即可生效。")
+    else:
+        print(f"✓ 已是最新版本（v{r['current']}）")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -113,6 +113,7 @@ a{color:var(--accent);text-decoration:none}
       <div class="sub">多账号 · 扫码登录 · 积分自动化 · 本机 API 网关</div>
     </div>
     <div style="margin-left:auto" class="pill" id="gatewayInfo"></div>
+    <button id="updateBtn" class="btn ghost sm" onclick="checkUpdate(this)" title="检查新版本">检查更新</button>
     <button id="themeBtn" title="切换主题">◐</button>
   </header>
 
@@ -329,6 +330,25 @@ async function startLogin(channel, method) {
   }
 }
 function closeModal() { clearInterval(pollTimer); $('#modal').classList.remove('on'); }
+
+// -- 更新检查（只提示，不自动升级） --
+async function checkUpdate(btn) {
+  const old = btn.textContent;
+  btn.textContent = '检查中…'; btn.disabled = true;
+  try {
+    const r = await api('/api/update/check');
+    const d = r.data || r;
+    if (!d.ok) { alert(d.error + '\n可手动打开发布页：' + d.url); return; }
+    if (!d.update_available) { alert('已是最新版本（v' + d.current + '）'); return; }
+    if (confirm('发现新版本：v' + d.current + ' → v' + d.latest + '\n\n' +
+                (d.notes || '').slice(0, 300) +
+                '\n\n是否打开发布页查看升级方式？')) {
+      window.open(d.url, '_blank');
+    }
+  } finally {
+    btn.textContent = old; btn.disabled = false;
+  }
+}
 function channelName(id) {
   const el = [...document.querySelectorAll('.chan b')].find(b => true);
   return ({buddy:'WorkBuddy 国内版', workbuddy:'WorkBuddy 国际版', raccoon:'Raccoon'})[id] || id;
