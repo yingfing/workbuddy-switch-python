@@ -392,17 +392,20 @@ async function loadFree() {
     configured: (kmap[x.id] || {}).configured || x.auth_kind === 'none',
     key_hint: (kmap[x.id] || {}).key_hint || ''}));
   const stats = p.data.stats || {};
-  $('#provChips').innerHTML = ['全部', ...Object.keys(stats)].map(k =>
-    `<button class="btn sm ghost" data-f="${k}" onclick="setProvFilter('${k}')">${k} · ${k === '全部' ? provAll.length : stats[k]}</button>`).join('');
+  $('#provChips').innerHTML = ['全部', '国内直连', '需魔法', ...Object.keys(stats)].map(k =>
+    `<button class="btn sm ghost" data-f="${k}" onclick="setProvFilter('${k}')">${k} · ${k === '全部' ? provAll.length : k === '国内直连' ? provAll.filter(x => x.cn_reachable !== false).length : k === '需魔法' ? provAll.filter(x => x.cn_reachable === false).length : stats[k]}</button>`).join('');
   renderProv();
 }
 function setProvFilter(k) { provFilter = k; renderProv(); }
 function renderProv() {
   const q = ($('#provSearch')?.value || '').toLowerCase();
-  let rows = provFilter === '全部' ? provAll : provAll.filter(x => x.category_label === provFilter);
+  let rows = provFilter === '全部' ? provAll
+    : provFilter === '国内直连' ? provAll.filter(x => x.cn_reachable !== false)
+    : provFilter === '需魔法' ? provAll.filter(x => x.cn_reachable === false)
+    : provAll.filter(x => x.category_label === provFilter);
   if (q) rows = rows.filter(x => (x.name + ' ' + x.id + ' ' + (x.models || []).join(' ') + ' ' + (x.notes || '')).toLowerCase().includes(q));
   $('#provTable tbody').innerHTML = rows.map(x => `<tr>
-    <td><b>${x.name}</b>${x.notes ? `<div class="pill">${x.notes}</div>` : ''}</td>
+    <td><b>${x.name}</b>${x.cn_reachable === false ? '<span class="badge" style="background:rgba(248,113,113,.15);color:#fca5a5" title="国内直连不通，需代理">需魔法</span>' : ''}${x.notes ? `<div class="pill">${x.notes}</div>` : ''}</td>
     <td><span class="badge">${x.category_label}</span></td>
     <td>${{apiKey:'API Key',local:'本地',oauth:'网页授权'}[x.auth_kind] || x.auth_kind}</td>
     <td>${x.model_count}</td>

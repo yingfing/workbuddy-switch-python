@@ -51,6 +51,7 @@ def provider_rows() -> list[dict]:
             "base_url": p.get("baseUrl"),
             "model_count": len(p.get("models") or []),
             "models": [m.get("id") for m in (p.get("models") or [])[:12]],
+            "cn_reachable": p.get("cn_reachable", True),
             "notes": (p.get("notes") or "")[:160],
         })
     return rows
