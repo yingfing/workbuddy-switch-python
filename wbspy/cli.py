@@ -102,13 +102,18 @@ def _cmd_chat(args) -> int:
         print(f"对话失败：{exc}")
         return 1
     print(f"[{doc.label()}]")
-    for line in resp.iter_lines(decode_unicode=True):
-        if line and line.startswith("data: ") and line != "data: [DONE]":
-            try:
-                delta = json.loads(line[6:])["choices"][0].get("delta", {})
-                print(delta.get("content", ""), end="", flush=True)
-            except (ValueError, KeyError, IndexError):
-                continue
+    buf = b""
+    for chunk in resp.iter_content(chunk_size=None):
+        buf += chunk
+        *lines, buf = buf.split(b"\n")
+        for line in lines:
+            text = line.decode("utf-8", "ignore").strip()
+            if text.startswith("data: ") and text != "data: [DONE]":
+                try:
+                    delta = json.loads(text[6:])["choices"][0].get("delta", {})
+                    print(delta.get("content", ""), end="", flush=True)
+                except (ValueError, KeyError, IndexError):
+                    continue
     print()
     resp.close()
     return 0
@@ -197,7 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=_cmd_models)
 
     p = sub.add_parser("chat", help="快速对话（走账号池）")
-    p.add_argument("--model", default="deepseek-v3")
+    p.add_argument("--model", default="deepseek-v4.1-flash")
     p.add_argument("prompt")
     p.set_defaults(fn=_cmd_chat)
 

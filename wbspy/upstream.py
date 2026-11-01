@@ -201,7 +201,7 @@ def classify_business_error(status: int, body: str, retry_header: str = "",
         return UpstreamError(403, "upstream_access_denied",
                              f"上游渠道检查拒绝本次请求{official}。",
                              retry_after=retry, upstream_status=status, upstream_code=upstream_code)
-    if status == 404 or code in ("11102", "11158", "model_not_found", "unsupported_model"):
+    if status == 404 or code in ("11102", "11134", "11158", "model_not_found", "unsupported_model"):
         return UpstreamError(404, "model_not_available", f"该账号暂不能使用所选模型{official}。",
                              retry_after=60, upstream_status=status, upstream_code=upstream_code)
     local = 400 if 400 <= status < 500 else 502
@@ -584,9 +584,14 @@ class WorkBuddyClient:
     def models(self) -> list[dict]:
         if not self.doc.token:
             raise UpstreamError(401, "credential_required", "请先完成网页登录授权。")
-        resp = self.http.post(
-            f"{self.doc.origin}/v2/enterprises/personal/models",
-            headers=self._reward_headers(), data="{}",
+        # 实战校准（2026-11-01，真实账号验证）：CN 目录只认 GET + CLI UA +
+        # Origin/Referer，POST 会 404。
+        resp = self.http.get(
+            f"{self.doc.api}/v2/enterprises/personal/models",
+            headers={"Authorization": f"Bearer {self.doc.token}",
+                     "Accept": "application/json",
+                     "Origin": self.doc.origin, "Referer": f"{self.doc.origin}/",
+                     "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2"},
             timeout=TIMEOUT, allow_redirects=False,
         )
         if resp.status_code in (401, 403):
