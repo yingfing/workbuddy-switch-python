@@ -74,6 +74,22 @@ NOT_FOUND = {"__not_found__": True}
 # ---------------------------------------------------------------------------
 
 
+def _parse_ms(raw) -> float | None:
+    """账单接口的时间字段：毫秒时间戳或 'YYYY-MM-DD HH:MM:SS' 字符串。"""
+    if isinstance(raw, (int, float)) and raw > 1e12:
+        return float(raw)
+    if isinstance(raw, str) and raw:
+        try:
+            return time.mktime(time.strptime(raw, "%Y-%m-%d %H:%M:%S")) * 1000
+        except ValueError:
+            try:
+                v = float(raw)
+                return v * 1000 if v < 1e11 else v
+            except ValueError:
+                return None
+    return None
+
+
 class UpstreamError(Exception):
     """本地可分类的上游失败。"""
 
@@ -334,6 +350,73 @@ class WorkBuddyClient:
                 raise UpstreamError(401, "upstream_auth_expired", "登录凭据已失效，请重新登录。")
             raise UpstreamError(502, "service_rejected", f"积分服务拒绝请求（{str(code)[:12]}）。")
         return data.get("data", data)
+
+    def credits(self) -> dict:
+        """结构化余额：按套餐聚合的剩余积分（只读，不消耗积分）。
+
+        解析自 dsh-xdpool fetchCredits 实测：响应壳 data.Response.Data.Accounts[]，
+        CapacityType==4 为月度套餐（Cycle* 字段，永不过期按周期刷新），
+        否则为一次性包（Capacity* 字段 + ExpiredTime）。
+        """
+        origin = self.doc.api
+        now = time.localtime()
+        fmt = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", t)          # noqa: E731
+        end = time.localtime(time.time() + 365 * 101 * 86400)
+        resp = self.http.post(
+            f"{origin}/v2/billing/meter/get-user-resource",
+            headers=self._meter_headers(),
+            data=json.dumps({
+                "PageNumber": 1, "PageSize": 100, "ProductCode": "p_tcaca",
+                "Status": [0, 3],
+                "PackageEndTimeRangeBegin": fmt(now),
+                "PackageEndTimeRangeEnd": fmt(end),
+            }),
+            timeout=TIMEOUT, allow_redirects=False,
+        )
+        if resp.status_code in (401, 403):
+            raise UpstreamError(401, "upstream_auth_expired", "登录凭据已失效，请重新登录。")
+        if not resp.ok:
+            raise UpstreamError(502, "upstream_error", f"积分服务暂不可用（HTTP {resp.status_code}）。")
+        data = self._parse_quota(resp.json())
+        # 拆三层壳：data → Response → Data → Accounts
+        node = data
+        for key in ("Response", "Data"):
+            node = node.get(key) if isinstance(node, dict) else None
+            if node is None:
+                break
+        accounts = (node or {}).get("Accounts") if isinstance(node, dict) else None
+        if not isinstance(accounts, list):
+            return {"total": 0, "packages": [], "expiring_soon": 0}
+
+        now_ms = time.time() * 1000
+        SOON_MS = 3 * 86400 * 1000
+        total, expiring = 0, 0
+        nearest: float | None = None
+        packages: list[dict] = []
+        for raw in accounts:
+            if not isinstance(raw, dict):
+                continue
+            num = lambda k: raw[k] if isinstance(raw.get(k), (int, float)) else 0   # noqa: E731
+            monthly = num("CapacityType") == 4
+            size = num("CycleCapacitySize") if monthly else num("CapacitySize")
+            remain = num("CycleCapacityRemain") if monthly else num("CapacityRemain")
+            remain = max(0, remain)
+            exp_ms = _parse_ms(raw.get("CycleEndTime") if monthly else raw.get("ExpiredTime"))
+            if not monthly and (remain <= 0 or (exp_ms is not None and exp_ms <= now_ms)):
+                continue                                    # 已用尽 / 已过期的包不展示
+            total += remain
+            if not monthly and exp_ms is not None:
+                if nearest is None or exp_ms < nearest:
+                    nearest = exp_ms
+                if exp_ms - now_ms <= SOON_MS:
+                    expiring += remain
+            packages.append({
+                "name": raw.get("PackageName") if isinstance(raw.get("PackageName"), str) else "套餐",
+                "remain": remain, "size": size, "monthly": monthly,
+                **({"expires_at": exp_ms} if not monthly and exp_ms else {}),
+            })
+        return {"total": total, "packages": packages, "expiring_soon": expiring,
+                **({"nearest_expiry": nearest} if nearest else {})}
 
     # -- token 续期 ----------------------------------------------------------
 

@@ -137,9 +137,10 @@ a{color:var(--accent);text-decoration:none}
   <!-- 账号 -->
   <section id="tab-accounts" hidden>
     <div class="card">
-      <h2>账号库 <span class="tag" id="accCount"></span></h2>
+      <h2>账号库 <span class="tag" id="accCount"></span>
+        <button class="btn sm ghost" onclick="loadCredits(this)" title="逐账号向上游查询剩余积分（只读）">查询余额</button></h2>
       <table id="accTable"><thead><tr>
-        <th>状态</th><th>账号</th><th>渠道</th><th>地区</th><th>API</th><th>操作</th>
+        <th>状态</th><th>账号</th><th>渠道</th><th>地区</th><th>API</th><th>余额</th><th>操作</th>
       </tr></thead><tbody></tbody></table>
       <div class="empty" id="accEmpty" hidden>账号库为空，去「登录」页添加账号</div>
     </div>
@@ -366,8 +367,27 @@ async function loadAccounts() {
       a.api_ready ? '可用' : (a.protected ? '加密凭据' : '已过期')}</td>
     <td>${a.label}</td><td>${a.channel || a.domain || '—'}</td><td>${a.region === 'global' ? '国际版' : '国内版'}</td>
     <td>${a.api_ready ? '✓' : '—'}</td>
+    <td id="quota-${a.uid.replace(/[^a-zA-Z0-9-]/g, '')}">—</td>
     <td><button class="btn sm bad" onclick="rmAccount('${a.uid}','${a.domain || ''}')">移除</button></td>
   </tr>`).join('');
+}
+async function loadCredits(btn) {
+  const old = btn.textContent; btn.textContent = '查询中…'; btn.disabled = true;
+  try {
+    const r = await api('/api/credits');
+    for (const row of (r.data || [])) {
+      const cell = document.getElementById('quota-' + row.uid.replace(/[^a-zA-Z0-9-]/g, ''));
+      if (!cell) continue;
+      if (row.error) { cell.innerHTML = `<span style="color:var(--bad)">${row.error}</span>`; continue; }
+      const c = row.credits || {};
+      const exp = c.nearest_expiry
+        ? `<span class="tag">最快 ${new Date(c.nearest_expiry).toLocaleDateString()} 到期</span>` : '';
+      cell.innerHTML = `<b>${c.total ?? 0}</b> 积分 ${exp}`;
+      cell.title = (c.packages || []).map(p =>
+        `${p.name}: 剩 ${p.remain}/${p.size}${p.monthly ? '（月度）' : ''}`).join('\n') || '无有效套餐';
+    }
+  } catch (e) { alert('余额查询失败：' + e); }
+  btn.textContent = old; btn.disabled = false;
 }
 async function rmAccount(uid, domain) {
   if (!confirm('确定移除该账号？')) return;

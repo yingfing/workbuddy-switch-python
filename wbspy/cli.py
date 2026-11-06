@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 from . import __version__
 from .automation import loop, run_all
@@ -58,12 +59,21 @@ def _cmd_accounts(args) -> int:
 
 def _cmd_quota(_args) -> int:
     for doc in load_accounts():
+        print(f"· {doc.label()}")
+        if not doc.token:
+            print("    加密凭据，请重新网页授权后查询。")
+            continue
         try:
-            data = WorkBuddyClient(doc).quota()
-            print(f"· {doc.label()}")
-            print(f"    {json.dumps(data, ensure_ascii=False)[:400]}")
+            c = WorkBuddyClient(doc).credits()
+            print(f"    剩余 {c['total']} 积分"
+                  + (f"（其中 {c['expiring_soon']} 三天内到期）" if c.get("expiring_soon") else ""))
+            for p in c.get("packages", []):
+                exp = f"，{time.strftime('%m-%d', time.localtime(p['expires_at'] / 1000))} 到期" \
+                    if p.get("expires_at") else ""
+                print(f"      - {p['name']}: {p['remain']}/{p['size']}"
+                      + ("（月度）" if p["monthly"] else "") + exp)
         except Exception as exc:
-            print(f"· {doc.label()}  积分查询失败：{exc}")
+            print(f"    积分查询失败：{exc}")
     return 0
 
 

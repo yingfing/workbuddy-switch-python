@@ -266,6 +266,25 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
 
     # -- 用量账本 ----------------------------------------------------------------
 
+    @app.get("/api/credits")
+    def api_credits():
+        """逐账号查询 WorkBuddy 余额（只读，不消耗积分；单账号失败不拦整体）。"""
+        from .store import load_accounts
+        from .upstream import WorkBuddyClient
+        out = []
+        for d in load_accounts():
+            row = {"uid": d.uid, "label": d.label(), "channel": d.channel_name,
+                   "region": d.region, "api_ready": d.api_ready}
+            if not d.token:
+                row.update(error="加密凭据，请重新网页授权后查询")
+            else:
+                try:
+                    row.update(credits=WorkBuddyClient(d).credits())
+                except Exception as exc:
+                    row.update(error=str(exc)[:120])
+            out.append(row)
+        return _ok(out)
+
     @app.get("/api/usage")
     def api_usage():
         return _ok(LEDGER.summary())

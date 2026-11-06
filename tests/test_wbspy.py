@@ -1,6 +1,7 @@
 """wbspy 协议核心单元测试：python3 -m unittest tests.test_wbspy -v"""
 
 import json
+import time
 import sys
 import unittest
 from pathlib import Path
@@ -224,3 +225,55 @@ class TestChannelName(unittest.TestCase):
     def test_unknown_domain_shown_raw(self):
         self.assertEqual(self._doc("some-new-vendor.com").channel_name,
                          "some-new-vendor.com")
+
+
+class TestCreditsParse(unittest.TestCase):
+    """credits() 的 Accounts 解析（对照 dsh-xdpool fetchCredits 实测结构）。"""
+
+    def test_parse_ms(self):
+        from wbspy.upstream import _parse_ms
+        self.assertEqual(_parse_ms(1762400000000), 1762400000000)
+        self.assertEqual(_parse_ms("2026-11-06 17:00:00"),
+                         time.mktime(time.strptime("2026-11-06 17:00:00", "%Y-%m-%d %H:%M:%S")) * 1000)
+        self.assertIsNone(_parse_ms("garbage"))
+        self.assertIsNone(_parse_ms(None))
+
+    def _account(self, **kw):
+        base = {"PackageName": "新人礼包", "CapacityType": 1, "CapacitySize": 1000,
+                "CapacityRemain": 500, "ExpiredTime": "2099-01-01 00:00:00"}
+        base.update(kw)
+        return base
+
+    def _credits_of(self, accounts):
+        """走 credits() 的真实解析路径（mock HTTP 层）。"""
+        from unittest.mock import patch, MagicMock
+        from wbspy.document import parse_auth
+        from wbspy.upstream import WorkBuddyClient
+        doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
+                          "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}})
+        client = WorkBuddyClient(doc)
+        resp = MagicMock(ok=True, status_code=200)
+        resp.json.return_value = {"code": 0, "data": {"Response": {"Data": {"Accounts": accounts}}}}
+        with patch.object(client.http, "post", return_value=resp):
+            return client.credits()
+
+    def test_one_shot_and_monthly_packages(self):
+        monthly = {"PackageName": "月度包", "CapacityType": 4, "CycleCapacitySize": 2000,
+                   "CycleCapacityRemain": 1500, "CycleEndTime": "2099-01-31 23:59:59"}
+        c = self._credits_of([self._account(), monthly])
+        self.assertEqual(c["total"], 2000)          # 500 一次性 + 1500 月度
+        self.assertEqual(len(c["packages"]), 2)
+        self.assertTrue(c["packages"][1]["monthly"])
+        self.assertIn("nearest_expiry", c)
+
+    def test_exhausted_and_expired_skipped(self):
+        used_up = self._account(CapacityRemain=0)
+        expired = self._account(PackageName="过期包", CapacityRemain=999,
+                                ExpiredTime="2020-01-01 00:00:00")
+        c = self._credits_of([used_up, expired])
+        self.assertEqual(c["total"], 0)
+        self.assertEqual(c["packages"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()
