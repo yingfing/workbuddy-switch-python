@@ -377,3 +377,36 @@ class TestCapabilities(unittest.TestCase):
         doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
                           "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}})
         self.assertEqual(doc.channel_name, CHANNELS["buddy"].name)
+
+
+class TestAutomationHistory(unittest.TestCase):
+    """自动化历史落盘：任何入口跑完都有据可查。"""
+
+    def test_run_all_writes_history(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch, MagicMock
+        from wbspy import automation
+        doc = parse_auth({"account": {"uid": "h1", "nickname": "历史号"},
+                          "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}})
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_path = Path(tmp) / "automation-history.json"
+            with patch.object(automation, "HISTORY_PATH", fake_path), \
+                 patch.object(automation, "WorkBuddyClient") as MC:
+                client = MagicMock()
+                client.buddy_ensure.return_value = ""
+                client.checkin.return_value = {"gotCredits": 100}
+                client.tasks.return_value = {}
+                client.streak_claim.return_value = {}
+                client.lottery.return_value = {}
+                client.travel_status.return_value = {"state": "idle", "daily_limit_reached": True}
+                client.travel_depart.return_value = {}
+                client.travel_claim.return_value = {}
+                client.makeup.return_value = {}
+                MC.return_value = client
+                out = automation.run_all([doc], log=lambda *_: None)
+            self.assertTrue(fake_path.exists())
+            hist = json.loads(fake_path.read_text(encoding="utf-8"))
+            self.assertEqual(hist[0]["results"][0]["uid"], "h1")
+            self.assertTrue(hist[0]["log"])             # 日志行也入档
+            self.assertIn("checkin", out["h1"])

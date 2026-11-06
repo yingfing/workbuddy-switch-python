@@ -197,7 +197,26 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
 
     @app.get("/api/automation/status")
     def automation_status():
-        return _ok({"running": app.state.auto_running, "log": app.state.auto_log[-60:]})
+        history: list = []
+        try:
+            from .automation import HISTORY_PATH
+            import json as _json
+            if HISTORY_PATH.exists():
+                raw = _json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+                for entry in raw[:10]:
+                    ok = sum(1 for r in entry.get("results", [])
+                             if r.get("summary") and not r["summary"].get("skip"))
+                    history.append({
+                        "at": entry.get("at"),
+                        "accounts": len(entry.get("results", [])),
+                        "ok": ok,
+                        "results": [{"label": r.get("label"), "summary": r.get("summary")}
+                                    for r in entry.get("results", [])],
+                    })
+        except Exception:
+            history = []
+        return _ok({"running": app.state.auto_running,
+                    "log": app.state.auto_log[-60:], "history": history})
 
     # -- 桌面切换 ---------------------------------------------------------------
 

@@ -185,6 +185,13 @@ a{color:var(--accent);text-decoration:none}
       </div>
       <div class="log" id="autoLog">暂无日志。</div>
     </div>
+    <div class="card">
+      <h2>运行历史 <span class="tag">最近 10 轮 · 落盘 ~/.wbspy/automation-history.json</span></h2>
+      <table id="autoHistTable"><thead><tr>
+        <th>时间</th><th>概况</th><th>各账号结果</th>
+      </tr></thead><tbody></tbody></table>
+      <div class="empty" id="autoHistEmpty" hidden>还没有运行记录 —— 点上面的「立即跑一轮」</div>
+    </div>
   </section>
 
   <!-- 切换 -->
@@ -414,6 +421,22 @@ async function pollAuto() {
   $('#autoState').textContent = r.data.running ? '运行中…' : '空闲';
   $('#autoRun').disabled = r.data.running;
   if (r.data.log.length) $('#autoLog').textContent = r.data.log.join('\n');
+  const hist = r.data.history || [];
+  $('#autoHistEmpty').hidden = hist.length > 0;
+  $('#autoHistTable').style.display = hist.length ? '' : 'none';
+  $('#autoHistTable tbody').innerHTML = hist.map(h => {
+    const when = h.at ? new Date(h.at).toLocaleString() : '—';
+    const done = Object.values(h.results || []).flatMap(r => Object.values(r.summary || {}));
+    const items = done.filter(s => s && !s.skip && !s.error).length;
+    const badge = h.ok > 0 ? `<b style="color:var(--ok)">${h.ok}/${h.accounts} 账号执行 · ${items} 项</b>`
+                           : `<span style="color:var(--dim)">0 执行</span>`;
+    const detail = (h.results || []).map(r => {
+      const parts = Object.entries(r.summary || {}).map(([k, v]) =>
+        typeof v === 'string' ? `${k}: ${v}` : `${k}: ${JSON.stringify(v)}`);
+      return `<div><b>${r.label}</b> —— ${parts.join(' · ') || '无动作'}</div>`;
+    }).join('');
+    return `<tr><td>${when}</td><td>${badge}</td><td style="font-size:12px">${detail}</td></tr>`;
+  }).join('');
   if ($('#tab-auto').hidden === false) setTimeout(pollAuto, 2500);
 }
 

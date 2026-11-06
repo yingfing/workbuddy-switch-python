@@ -155,11 +155,52 @@ def run_once(doc: Document, log: Callable[[str], None] = print) -> dict:
 
 
 def run_all(documents: list[Document], log: Callable[[str], None] = print) -> dict[str, dict]:
-    out = {}
+    out: dict[str, dict] = {}
+    lines: list[str] = []
+
+    def _log(msg: str) -> None:
+        lines.append(f"{time.strftime('%H:%M:%S')}  {msg}")
+        log(msg)
+
     for doc in documents:
-        out[doc.uid] = run_once(doc, log)
-    _notify(out, log)
+        out[doc.uid] = run_once(doc, _log)
+    _notify(out, _log)
+    _append_history(out, lines, documents)
     return out
+
+
+# -- 运行历史（落盘，所有触发入口共用） ------------------------------------------
+
+HISTORY_PATH = __import__("pathlib").Path.home() / ".wbspy" / "automation-history.json"
+HISTORY_KEEP = 30
+
+
+def _append_history(results: dict[str, dict], lines: list[str],
+                    documents: list[Document]) -> None:
+    """每轮结果落盘。失败静默——历史是加分项，绝不挡签到主流程。"""
+    try:
+        import os
+        from pathlib import Path
+        labels = {d.uid: d.label() for d in documents}
+        entry = {
+            "at": int(time.time() * 1000),
+            "results": [{"uid": uid, "label": labels.get(uid, uid), "summary": summary}
+                        for uid, summary in results.items()],
+            "log": lines[-80:],
+        }
+        hist: list = []
+        if HISTORY_PATH.exists():
+            try:
+                hist = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                hist = []
+        hist.insert(0, entry)
+        HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        HISTORY_PATH.write_text(json.dumps(hist[:HISTORY_KEEP], ensure_ascii=False, indent=1),
+                                encoding="utf-8")
+        os.chmod(HISTORY_PATH, 0o600)
+    except Exception:
+        pass
 
 
 def _notify(result: dict, log: Callable[[str], None]) -> None:
