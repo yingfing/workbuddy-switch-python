@@ -1,0 +1,137 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]: W
+      - generic [ref=e5]:
+        - heading "WorkBuddy Switch Python 版" [level=1] [ref=e6]
+        - generic [ref=e7]: 多账号 · 扫码登录 · 积分自动化 · 本机 API 网关
+      - button "检查更新" [ref=e8] [cursor=pointer]
+      - button "◐" [ref=e9] [cursor=pointer]
+    - navigation [ref=e10]:
+      - button "登录" [ref=e11] [cursor=pointer]
+      - button "账号池" [ref=e12] [cursor=pointer]
+      - button "免费可调用 API" [ref=e13] [cursor=pointer]
+      - button "积分自动化" [ref=e14] [cursor=pointer]
+      - button "桌面切换" [ref=e15] [cursor=pointer]
+      - button "网关" [ref=e16] [cursor=pointer]
+    - generic [ref=e18]:
+      - heading "登录渠道 扫码 → 网页 → 本机，自动回退" [level=2] [ref=e19]:
+        - text: 登录渠道
+        - generic [ref=e20]: 扫码 → 网页 → 本机，自动回退
+      - generic [ref=e21]:
+        - generic [ref=e22]:
+          - text: WorkBuddy 国内版腾讯
+          - generic [ref=e23]:
+            - generic [ref=e24]: 网页
+            - generic [ref=e25]: 本机
+            - generic [ref=e26]: 每日签到·已托管
+          - paragraph [ref=e27]: DeepSeek · Kimi · GLM 免费线，每日赠送积分；桌面客户端可读本机快照
+          - generic [ref=e28]:
+            - button "网页登录" [ref=e29] [cursor=pointer]
+            - button "读本机" [ref=e30] [cursor=pointer]
+        - generic [ref=e31]:
+          - text: WorkBuddy 国际版腾讯
+          - generic [ref=e32]:
+            - generic [ref=e33]: 网页
+            - generic [ref=e34]: 本机
+          - paragraph [ref=e35]: 独立端点与账号体系，积分与国内版不互通；后端没有每日签到接口
+          - generic [ref=e36]:
+            - button "网页登录" [ref=e37] [cursor=pointer]
+            - button "读本机" [ref=e38] [cursor=pointer]
+        - generic [ref=e39]:
+          - text: Raccoon商汤
+          - generic [ref=e40]: 扫码
+          - paragraph [ref=e42]: 扫码直登：终端出二维码，手机小浣熊 App 扫一扫；短信验证码备用
+          - button "扫码登录" [ref=e44] [cursor=pointer]
+        - generic [ref=e45]:
+          - text: CodeArts华为云
+          - generic [ref=e46]:
+            - generic [ref=e47]: 网页
+            - generic [ref=e48]: 有签到·未托管
+          - paragraph [ref=e49]: 免费体验套餐自动续期不收费；新人积分 + DeepSeek · GLM · openPangu 每日免费额度
+          - button "网页登录" [ref=e51] [cursor=pointer]
+        - generic [ref=e52]:
+          - text: LobsterAI有道
+          - generic [ref=e53]:
+            - generic [ref=e54]: 网页
+            - generic [ref=e55]: 有签到·未托管
+          - paragraph [ref=e56]: 每日签到领积分，积分换模型调用额度
+          - button "网页登录" [ref=e58] [cursor=pointer]
+        - generic [ref=e59]:
+          - text: Qoder 国际版阿里云
+          - generic [ref=e60]:
+            - generic [ref=e61]: 网页
+            - generic [ref=e62]: 有签到·未托管
+          - paragraph [ref=e63]: 每日 100 Credits，加密推理端点（wasm auth）
+          - button "网页登录" [ref=e65] [cursor=pointer]
+        - generic [ref=e66]:
+          - text: Qoder 国内版阿里云
+          - generic [ref=e67]:
+            - generic [ref=e68]: 网页
+            - generic [ref=e69]: 有签到·未托管
+          - paragraph [ref=e70]: 每日 100 Credits，国内端点与模型池（wasm auth）
+          - button "网页登录" [ref=e72] [cursor=pointer]
+        - generic [ref=e73]:
+          - text: TRAE字节跳动
+          - generic [ref=e74]:
+            - generic [ref=e75]: 网页
+            - generic [ref=e76]: 本机
+            - generic [ref=e77]: 有签到·未托管
+          - paragraph [ref=e78]: 手机号注册即送免费额度；本机有 Trae CN 客户端可直接读快照切换
+          - generic [ref=e79]:
+            - button "网页登录" [ref=e80] [cursor=pointer]
+            - button "读本机" [ref=e81] [cursor=pointer]
+        - generic [ref=e82]:
+          - text: ClineCline Bot
+          - generic [ref=e83]: 网页
+          - paragraph [ref=e85]: 绑定 GitHub 账号后送美元计价免费额度；无每日签到
+          - button "网页登录" [ref=e87] [cursor=pointer]
+        - generic [ref=e88]:
+          - text: Loomy讯飞星火
+          - generic [ref=e89]:
+            - generic [ref=e90]: 扫码
+            - generic [ref=e91]: 有签到·未托管
+          - paragraph [ref=e92]: 星火模型每日免费额度；登录页自带扫码或手机号入口
+          - button "扫码登录" [ref=e94] [cursor=pointer]
+        - generic [ref=e95]:
+          - text: MiniMax CodeMiniMax
+          - generic [ref=e96]:
+            - generic [ref=e97]: 扫码
+            - generic [ref=e98]: 有签到·未托管
+          - paragraph [ref=e99]: 设备码 + PKCE 登录：网页显示设备码与验证链接，每日签到领额度
+          - button "扫码登录" [ref=e101] [cursor=pointer]
+        - generic [ref=e102]:
+          - text: ZCode智谱
+          - generic [ref=e103]:
+            - generic [ref=e104]: 扫码
+            - generic [ref=e105]: 有签到·未托管
+          - paragraph [ref=e106]: GLM 模型按 token 计免费额度；CLI OAuth 自动轮询，扫码或浏览器均可
+          - button "扫码登录" [ref=e108] [cursor=pointer]
+        - generic [ref=e109]:
+          - text: Gemini Code AssistGoogle
+          - generic [ref=e110]: 网页
+          - paragraph [ref=e112]: 个人 Google 账号免费配额，本地回调 OAuth（网页出授权链接）
+          - button "网页登录" [ref=e114] [cursor=pointer]
+  - button "📜 2" [ref=e115] [cursor=pointer]:
+    - text: 📜
+    - generic [ref=e116]: "2"
+  - complementary [ref=e117]:
+    - generic [ref=e118]:
+      - generic [ref=e119]: 运行日志
+      - generic [ref=e120]: 累计 2 行
+      - button "↻" [ref=e121] [cursor=pointer]
+      - button "✕ 关闭" [ref=e122] [cursor=pointer]
+    - generic [ref=e123]:
+      - button "实时日志" [ref=e124] [cursor=pointer]
+      - button "历史轮次" [ref=e125] [cursor=pointer]
+    - generic [ref=e126]: 暂无日志。
+  - contentinfo [ref=e128]:
+    - text: wbspy · Based on WorkBuddy Switch by
+    - link "koi128bit" [ref=e129] [cursor=pointer]:
+      - /url: https://github.com/koi128bit/WorkBuddy-Switch
+    - text: · 厂商注册表来自
+    - link "dsh-xdpool" [ref=e130] [cursor=pointer]:
+      - /url: https://www.npmjs.com/package/dsh-xdpool
+    - text: (MIT) · MIT Licensed, 详见
+    - link "NOTICE.md" [ref=e131] [cursor=pointer]:
+      - /url: https://github.com/wbspy/wbspy/blob/main/NOTICE.md

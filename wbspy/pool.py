@@ -258,14 +258,37 @@ class AccountPool:
         客户端里一眼可辨；区域信息在 region 字段（路由时本就不分区域，
         cn/global 同名模型自然合并）。"""
         seen: dict[str, dict] = {}
+        for _doc, _rows in self._models_by_account_raw():
+            for row in _rows:
+                key = f"workbuddy:{row['id']}"
+                seen.setdefault(key, {**row, "id": key})
+        return list(seen.values())
+
+    def _models_by_account_raw(self, ttl: int = 300) -> list[tuple]:
+        """（账号, 该账号模型目录）明细；带 TTL 缓存，单账号失败不拦整体。"""
+        now = time.time()
+        cache = getattr(self, "_mba_cache", None)
+        if cache is not None and now - getattr(self, "_mba_at", 0) < ttl:
+            return cache
+        out: list[tuple] = []
         for doc in self.healthy():
             try:
-                for row in self.clients[_key(doc)].models():
-                    key = f"workbuddy:{row['id']}"
-                    seen.setdefault(key, {**row, "id": key})
-            except UpstreamError:
-                continue
-        return list(seen.values())
+                out.append((doc, self.clients[_key(doc)].models()))
+            except Exception:
+                out.append((doc, []))
+        self._mba_cache, self._mba_at = out, now
+        return out
+
+    def models_by_account(self, ttl: int = 300) -> list[dict]:
+        """逐账号的可用模型索引（网页「我的模型」页）。
+
+        单账号目录拉取失败记 0 个模型，不挡其他账号；整表缓存 5 分钟，
+        避免每次打开页面都打一轮上游目录接口。
+        """
+        return [{
+            "uid": doc.uid, "label": doc.label(), "region": doc.region,
+            "channel": doc.channel_name, "count": len(rows), "models": rows,
+        } for doc, rows in self._models_by_account_raw(ttl)]
 
     # -- 后台 token 自动刷新 -----------------------------------------------------
 

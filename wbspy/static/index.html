@@ -228,7 +228,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
   <nav id="tabs">
     <button data-tab="login" class="on">登录</button>
     <button data-tab="accounts">账号池</button>
-    <button data-tab="free">免费可调用 API</button>
+    <button data-tab="free">我的模型</button>
     <button data-tab="auto">积分自动化</button>
     <button data-tab="switch">桌面切换</button>
     <button data-tab="gateway">网关</button>
@@ -254,32 +254,32 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
     </div>
   </section>
 
-  <!-- 免费可调用 API -->
+  <!-- 我的模型 -->
   <section id="tab-free" hidden>
     <div class="card">
-      <h2>我的账号可调用的模型 <span class="tag">来自账号池实时目录 · cn=国内版 global=国际版</span></h2>
-      <table id="myModelTable"><thead><tr>
-        <th>调用 ID</th><th>名称</th><th>地区</th>
+      <h2>已入库账号可调用的模型 <span class="tag" id="mymStat">—</span></h2>
+      <table id="mymTable"><thead><tr>
+        <th>调用 ID</th><th>名称</th><th>倍率</th><th>可用账号</th>
       </tr></thead><tbody></tbody></table>
-      <div class="empty" id="myModelEmpty" hidden>账号池为空或目录未就绪 —— 先去「登录」页添加账号</div>
+      <div class="empty" id="mymEmpty" hidden>账号池为空或目录未就绪 —— 先去「登录」页添加账号</div>
+      <h2 style="margin-top:16px">逐账号明细</h2>
+      <table id="mymAccTable"><thead><tr>
+        <th>账号</th><th>地区</th><th>可调模型数</th>
+      </tr></thead><tbody></tbody></table>
+      <span class="tag">目录缓存 5 分钟；调用一律走网关 <code>/v1</code>，模型 ID 带 <code>workbuddy:</code> 前缀</span>
     </div>
     <div class="card">
-      <h2>免费额度模型索引 <span class="tag">完全免费 + 有免费额度的厂商（吸收自 dsh-xdpool 聚合渠道）</span></h2>
-      <div class="row" id="attrChips" style="margin-bottom:6px"></div>
-      <div class="row" id="freeChips" style="margin-bottom:10px"></div>
-      <table id="freeTable"><thead><tr>
-        <th>厂商</th><th>模型</th><th>属性</th><th>类型</th><th>去接入</th>
+      <h2>聚合渠道密钥 <span class="tag">填了 Key 的渠道，其模型才会出现在网关目录</span></h2>
+      <table id="keyCardTable"><thead><tr>
+        <th>渠道</th><th>Key</th><th>模型数</th><th>操作</th>
       </tr></thead><tbody></tbody></table>
-      <div class="empty" id="freeEmpty" hidden>暂无数据</div>
-    </div>
-    <div class="card">
-      <h2>全部聚合渠道（76 家） <span class="tag">填 Key 才计入网关，默认全关</span></h2>
-      <div class="row" id="provChips" style="margin-bottom:10px"></div>
-      <input id="provSearch" placeholder="🔍 搜索厂商 / 模型…" style="width:240px;margin-bottom:10px"
-             oninput="renderProv()">
-      <table id="provTable"><thead><tr>
-        <th>厂商</th><th>分类</th><th>接入方式</th><th>模型数</th><th>统一调用（填 Key 即穿透）</th><th>官网</th>
-      </tr></thead><tbody></tbody></table>
+      <div class="row" style="margin-top:10px">
+        <input id="ckProvider" list="ckProviderList" placeholder="渠道 ID（如 open_router、nvidia-nim）" style="flex:1" autocomplete="off">
+        <datalist id="ckProviderList"></datalist>
+        <input id="ckKey" placeholder="API Key（免 Key 渠道留空）" style="flex:1">
+        <button class="btn" onclick="saveChannelKey(this)">💾 保存渠道 Key</button>
+      </div>
+      <span class="tag">渠道 ID 可输入自动补全（76 家注册表）；Key 只落本机 <code>~/.wbspy/aggregate-keys.json</code>，不会上传，保存后网关目录即时刷新</span>
     </div>
   </section>
 
@@ -800,102 +800,73 @@ async function snapRestore() {
   alert(r.ok ? '✓ 已恢复切换前登录' : '✗ ' + r.error);
 }
 
-// -- 免费可调用 API --
-let freeAll = [], provAll = [], provFilter = '全部', attrFilter = '全部';
-function fmtCw(v) {
-  if (!v) return '';
-  if (v >= 1e6) return (v / 1e6).toString().replace(/\.0$/, '') + 'M';
-  if (v >= 1e3) return Math.round(v / 1e3) + 'K';
-  return String(v);
-}
-function attrBadges(x) {
-  const parts = [];
-  if (x.vision === true) parts.push('<span class="badge" style="background:var(--blue-bg);color:var(--blue-fg)">识图</span>');
-  else if (x.vision === false) parts.push('<span class="badge" style="opacity:.45">无识图</span>');
-  if (x.reasoning === true) parts.push('<span class="badge" style="background:var(--pur-bg);color:var(--pur-fg)">推理</span>');
-  const cw = fmtCw(x.context_window);
-  if (cw) parts.push(`<span class="badge" style="background:var(--ok-bg);color:var(--ok-fg)">CTX ${cw}</span>`);
-  return parts.join(' ') || '<span style="opacity:.4">—</span>';
-}
-function setAttrFilter(f) { attrFilter = f; renderFree(); }
+// -- 我的模型（已入库账号可调用索引）+ 聚合渠道密钥 --
 async function loadFree() {
-  const r = await api('/api/free-models');
-  const mine = r.data.mine || [];
-  $('#myModelEmpty').hidden = mine.length > 0;
-  $('#myModelTable').style.display = mine.length ? '' : 'none';
-  $('#myModelTable tbody').innerHTML = mine.map(m => `<tr>
-    <td><code>${m.id}</code></td><td>${m.name}</td>
-    <td>${m.region === 'global' ? '<span class="badge" style="background:var(--pur-bg);color:var(--pur-fg)">国际版</span>' : '<span class="badge">国内版</span>'}</td>
-  </tr>`).join('');
-  const emb = r.data.embeddings || [];
-  if (emb.length) $('#myModelTable tbody').insertAdjacentHTML('beforeend',
-    emb.map(m => `<tr><td><code>${m.id}</code></td><td>${m.name}（向量）</td>
-      <td>${m.region === 'global' ? '国际版' : '国内版'}</td></tr>`).join(''));
+  const r = await api('/api/my-models');
+  const accs = r.data || [];
+  const ok = accs.filter(a => a.count > 0);
+  $('#mymStat').textContent = ok.length
+    ? `${ok.length} / ${accs.length} 个账号可用`
+    : '账号池为空';
+  // 统一索引：跨账号合并同名模型，标注可用账号数
+  const uni = {};
+  for (const a of ok) for (const m of a.models) {
+    const u = uni[m.id] || (uni[m.id] = {id: m.id, name: m.name, cm: m.credit_multiplier, n: 0});
+    u.n++;
+    if (u.cm === undefined && m.credit_multiplier !== undefined) u.cm = m.credit_multiplier;
+  }
+  const rows = Object.values(uni).sort((x, y) => y.n - x.n || x.id.localeCompare(y.id));
+  $('#mymEmpty').hidden = rows.length > 0;
+  $('#mymTable').style.display = rows.length ? '' : 'none';
+  $('#mymTable tbody').innerHTML = rows.map(m => {
+    const cm = m.cm === 0 ? '<span style="color:var(--bad);font-weight:600">限时免费</span>'
+      : (typeof m.cm === 'number' ? m.cm + 'x' : '—');
+    return `<tr><td><code>workbuddy:${m.id}</code></td><td>${m.name}</td>
+      <td>${cm}</td><td>${m.n} / ${ok.length}</td></tr>`;
+  }).join('');
+  $('#mymAccTable tbody').innerHTML = accs.map(a => `<tr>
+    <td>${a.label}</td><td>${a.region === 'global' ? '国际版' : '国内版'}</td>
+    <td>${a.count ? `<b>${a.count}</b>` : '<span style="color:var(--bad)">目录不可用</span>'}</td></tr>`).join('');
+  loadChannelKeys();
+}
 
-  freeAll = r.data.free || [];
-  renderFree();
-  const [p, k] = await Promise.all([api('/api/providers'), api('/api/keys')]);
-  const kmap = {};
-  (k.data || []).forEach(x => kmap[x.provider_id] = x);
-  provAll = (p.data.providers || []).map(x => ({...x,
-    configured: (kmap[x.id] || {}).configured || x.auth_kind === 'none',
-    key_hint: (kmap[x.id] || {}).key_hint || ''}));
-  const stats = p.data.stats || {};
-  $('#provChips').innerHTML = ['全部', '国内直连', '需魔法', ...Object.keys(stats)].map(k =>
-    `<button class="btn sm ghost" data-f="${k}" onclick="setProvFilter('${k}')">${k} · ${k === '全部' ? provAll.length : k === '国内直连' ? provAll.filter(x => x.cn_reachable !== false).length : k === '需魔法' ? provAll.filter(x => x.cn_reachable === false).length : stats[k]}</button>`).join('');
-  renderProv();
-}
-function setProvFilter(k) { provFilter = k; renderProv(); }
-function renderProv() {
-  const q = ($('#provSearch')?.value || '').toLowerCase();
-  let rows = provFilter === '全部' ? provAll
-    : provFilter === '国内直连' ? provAll.filter(x => x.cn_reachable !== false)
-    : provFilter === '需魔法' ? provAll.filter(x => x.cn_reachable === false)
-    : provAll.filter(x => x.category_label === provFilter);
-  if (q) rows = rows.filter(x => (x.name + ' ' + x.id + ' ' + (x.models || []).join(' ') + ' ' + (x.notes || '')).toLowerCase().includes(q));
-  $('#provTable tbody').innerHTML = rows.map(x => `<tr>
-    <td><b>${x.name}</b>${x.cn_reachable === false ? '<span class="badge" style="background:var(--bad-bg);color:var(--bad-fg)" title="国内直连不通，需代理">需魔法</span>' : ''}${x.notes ? `<div class="pill">${x.notes}</div>` : ''}</td>
-    <td><span class="badge">${x.category_label}</span></td>
-    <td>${{apiKey:'API Key',local:'本地',oauth:'网页授权'}[x.auth_kind] || x.auth_kind}</td>
+async function loadChannelKeys() {
+  const k = await api('/api/keys');
+  const rows = k.data || [];
+  $('#ckProviderList').innerHTML = rows.map(x =>
+    `<option value="${x.provider_id}">${x.provider}${x.auth_kind === 'none' ? '（免 Key）' : ''}</option>`).join('');
+  const mine = rows.filter(x => x.configured);
+  const withKey = mine.filter(x => x.auth_kind !== 'none');
+  $('#keyCardTable tbody').innerHTML = (withKey.length ? withKey : mine).map(x => `<tr>
+    <td><b>${x.provider}</b>${x.auth_kind === 'none' ? ' <span class="badge">免 Key</span>' : ''}</td>
+    <td>${x.auth_kind === 'none' ? '—' : x.key_hint}</td>
     <td>${x.model_count}</td>
-    <td><div class="row" style="gap:6px">
-      <input id="key-${x.id}" placeholder="${x.auth_kind === 'none' ? '免 Key 直接用' : x.key_hint || '粘贴 API Key'}"
-             style="width:170px;font-size:11.5px;padding:5px 8px" ${x.auth_kind === 'none' ? 'disabled' : ''}>
-      <button class="btn sm" onclick="saveKey('${x.id}',this)" ${x.auth_kind === 'none' ? 'disabled' : ''}>存</button>
-      ${x.configured ? '<span class="dot g" title="已配置，模型已在 /v1/models"></span>' : ''}
-    </div></td>
-    <td>${x.signup_url ? `<a href="${x.signup_url}" target="_blank">打开 ↗</a>` : '—'}</td>
-  </tr>`).join('');
-  document.querySelectorAll('#provChips [data-f]').forEach(b =>
-    b.style.opacity = b.dataset.f === provFilter ? 1 : .55);
+    <td>${x.auth_kind === 'none' ? '' :
+      `<button class="btn sm ghost" onclick="delKey('${x.provider_id}')">删除</button>`}</td>
+  </tr>`).join('') ||
+    '<tr><td colspan="4" style="opacity:.6">未配置任何渠道 —— 在下方填渠道 ID 和 Key 即可接入更多模型</td></tr>';
 }
-async function saveKey(pid, btn) {
+
+async function saveChannelKey(btn) {
   await busy(btn, async () => {
-    const input = document.getElementById('key-' + pid);
+    const pid = $('#ckProvider').value.trim().toLowerCase();
+    const key = $('#ckKey').value.trim();
+    if (!pid) return toast('先填渠道 ID（如 openrouter）', false);
     const r = await api('/api/keys', {method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({provider: pid, key: input.value.trim()})});
-    if (r.ok) { toast(pid + ' 渠道密钥已保存，模型目录已刷新'); loadFree(); }
-    else toast(r.error, false);
+      body: JSON.stringify({provider: pid, key})});
+    if (!r.ok) return toast(r.error, false);
+    $('#ckProvider').value = ''; $('#ckKey').value = '';
+    toast(pid + ' 渠道已保存，网关模型目录已刷新');
+    loadChannelKeys();
   });
 }
 
-function renderFree() {
-  const rows = freeAll.filter(x =>
-    attrFilter === '全部' ||
-    (attrFilter === '可识图' && x.vision === true) ||
-    (attrFilter === '可推理' && x.reasoning === true));
-  $('#attrChips').innerHTML = ['全部', '可识图', '可推理'].map(f =>
-    `<button class="btn sm ghost" style="${f === attrFilter ? 'outline:1px solid var(--accent)' : ''}"
-      onclick="setAttrFilter('${f}')">${f} · ${f === '全部' ? freeAll.length : freeAll.filter(x => f === '可识图' ? x.vision === true : x.reasoning === true).length}</button>`).join('');
-  $('#freeTable tbody').innerHTML = rows.map(x => `<tr>
-    <td><b>${x.provider}</b></td>
-    <td><code>${x.model}</code>${x.model_name && x.model_name !== x.model ? ` · ${x.model_name}` : ''}</td>
-    <td>${attrBadges(x)}</td>
-    <td>${x.category === 'free' ? '<span class="badge" style="background:var(--ok-bg);color:var(--ok-fg)">完全免费</span>'
-        : '<span class="badge" style="background:rgba(251,191,36,.15);color:#fcd34d">免费额度</span>'}</td>
-    <td>${x.signup_url ? `<a href="${x.signup_url}" target="_blank">接入 ↗</a>` : '—'}</td>
-  </tr>`).join('');
+async function delKey(pid) {
+  if (!confirm('删除渠道 ' + pid + ' 的 Key？其模型将不再出现在网关目录。')) return;
+  const r = await api('/api/keys/' + pid, {method: 'DELETE'});
+  r.ok ? toast(pid + ' 渠道 Key 已删除') : toast(r.error || '删除失败', false);
+  loadChannelKeys();
 }
 
 // -- 网关 --

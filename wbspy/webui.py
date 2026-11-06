@@ -40,7 +40,6 @@ from .document import parse_auth
 from .gateway import create_app
 from .login_session import GEMINI_CALLBACK_CODES, LoginSessionManager
 from .pool import AccountPool
-from .providers import category_stats, free_model_index, provider_rows
 from .usage import LEDGER
 from .store import (load_accounts, remove_account, list_snapshots,
                     load_config, save_config)
@@ -437,25 +436,12 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
     def api_models():
         return _ok(pool.models())
 
-    # -- 免费可调用 API（吸收 dsh-xdpool「聚合渠道」页）--------------------------
+    # -- 我的模型（已入库账号实际可调用的索引）------------------------------------
 
-    @app.get("/api/providers")
-    def api_providers():
-        return _ok({"stats": category_stats(), "providers": provider_rows()})
-
-    @app.get("/api/free-models")
-    def api_free_models():
-        mine = pool.models()
-        return _ok({
-            "mine": mine,
-            "embeddings": [
-                {"id": f"{d.region}:{m['id']}", "name": m["name"], "region": d.region}
-                for d in pool.healthy() for m in (
-                    {"id": "bge-m3", "name": "BGE-M3"},
-                    {"id": "hunyuan-embedding", "name": "Hunyuan Embedding"})
-            ],
-            "free": free_model_index(),
-        })
+    @app.get("/api/my-models")
+    def api_my_models():
+        """逐账号的可用模型索引（缓存 5 分钟）；前端合并出统一目录。"""
+        return _ok(pool.models_by_account())
 
     # -- 用量账本 ----------------------------------------------------------------
 
@@ -501,10 +487,17 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
     @app.post("/api/keys")
     async def api_keys_save(request: Request):
         from . import aggregate
+        from .providers import load_providers
         body = await request.json()
-        pid = str(body.get("provider", "")).strip()
+        pid = str(body.get("provider", "")).strip().lower()
         if not pid:
             return _err("缺少 provider")
+        known = {p.get("id") for p in load_providers()}
+        if pid not in known:                     # 防手误存成永不生效的孤儿 key
+            import difflib
+            near = difflib.get_close_matches(pid, [x for x in known if x], n=3)
+            return _err(f"渠道 ID「{pid}」不存在"
+                        + (f"，是不是想填：{'、'.join(near)}？" if near else ""))
         aggregate.save_key(pid, str(body.get("key") or ""),
                            {"account_id": body.get("account_id")} if body.get("account_id") else None)
         app.state.model_cached_at = 0.0     # 目录即时刷新
