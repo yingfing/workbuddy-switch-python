@@ -191,3 +191,36 @@ class TestAggregateFailover(unittest.TestCase):
         target = rows[0]
         cands = aggregate._candidates(target["route_model"])
         self.assertEqual(cands[0]["route_model"], target["route_model"])
+
+
+class TestChannelName(unittest.TestCase):
+    """domain → 渠道友好名识别（账号库「渠道」列的数据源）。"""
+
+    def _doc(self, domain):
+        return parse_auth({
+            "account": {"uid": "u-1", "nickname": "n"},
+            "auth": {"accessToken": "t", "domain": domain},
+        })
+
+    def test_workbuddy_variants(self):
+        self.assertEqual(self._doc("www.codebuddy.cn").channel_name, "WorkBuddy 国内版")
+        self.assertEqual(self._doc("www.workbuddy.ai").channel_name, "WorkBuddy 国际版")
+
+    def test_third_party_channels(self):
+        cases = {
+            "api.trae.com.cn": "TRAE", "api.trae.cn": "TRAE",
+            "qoder.cn": "Qoder 国内版", "qoder.com": "Qoder 国际版",
+            "lobsterai-server.youdao.com": "LobsterAI",
+            "zcode.z.ai": "ZCode", "api.cline.bot": "Cline",
+            "codearts.huaweicloud.com": "CodeArts",
+            "account.minimax.cn": "MiniMax Code",
+            "account.xfinfr.com": "Loomy",
+            "googleapis.com": "Gemini Code Assist",
+            "api.raccoon.sensetime.com": "Raccoon",
+        }
+        for domain, want in cases.items():
+            self.assertEqual(self._doc(domain).channel_name, want, domain)
+
+    def test_unknown_domain_shown_raw(self):
+        self.assertEqual(self._doc("some-new-vendor.com").channel_name,
+                         "some-new-vendor.com")

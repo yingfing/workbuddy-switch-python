@@ -92,6 +92,7 @@ class AccountPool:
         now = time.time()
         return [{
             "uid": d.uid[:12], "label": d.label(), "region": d.region,
+            "channel": d.channel_name,
             "api_ready": d.api_ready,
             "token_expires_at": d.token_expires_at,
             "dead": self.dead_until.get(_key(d), 0) > now,

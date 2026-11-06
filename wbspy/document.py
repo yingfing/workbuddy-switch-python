@@ -143,6 +143,34 @@ class Document:
         return workbuddy_origin(self.domain)
 
     @property
+    def channel_name(self) -> str:
+        """凭据所属渠道的友好名（按 domain 子串识别，与渠道注册表对齐）。"""
+        d = (self.domain or "").lower()
+        if not d:
+            return "WorkBuddy 账号"
+        # 顺序敏感：codebuddy.cn 先于通用 workbuddy 匹配
+        for needle, name in (
+            ("codebuddy.cn", "WorkBuddy 国内版"),
+            ("workbuddy.ai", "WorkBuddy 国际版"),
+            ("trae", "TRAE"),
+            ("qoder", "Qoder 国内版" if d.endswith(".cn") or ".cn" in d else "Qoder 国际版"),
+            ("lobsterai", "LobsterAI"),
+            ("youdao.com", "LobsterAI"),
+            ("zcode", "ZCode"),
+            ("z.ai", "ZCode"),
+            ("cline", "Cline"),
+            ("huaweicloud", "CodeArts"),
+            ("minimax", "MiniMax Code"),
+            ("xfinfr", "Loomy"),
+            ("googleapis", "Gemini Code Assist"),
+            ("raccoon", "Raccoon"),
+            ("sensetime", "Raccoon"),
+        ):
+            if needle in d:
+                return name
+        return d                                  # 未知域名原样展示，好排查
+
+    @property
     def token_expired(self) -> bool:
         return bool(self.token_expires_at and self.token_expires_at <= time.time() * 1000)
 

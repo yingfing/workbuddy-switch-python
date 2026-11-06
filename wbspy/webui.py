@@ -155,6 +155,7 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             "uid": d.uid, "label": d.label(), "region": d.region,
             "api_ready": d.api_ready, "protected": d.protected_token,
             "expires_at": d.token_expires_at, "domain": d.domain,
+            "channel": d.channel_name,
         } for d in load_accounts()])
 
     @app.delete("/api/accounts/{uid}")

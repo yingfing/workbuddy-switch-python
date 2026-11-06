@@ -139,7 +139,7 @@ a{color:var(--accent);text-decoration:none}
     <div class="card">
       <h2>账号库 <span class="tag" id="accCount"></span></h2>
       <table id="accTable"><thead><tr>
-        <th>状态</th><th>账号</th><th>地区</th><th>API</th><th>操作</th>
+        <th>状态</th><th>账号</th><th>渠道</th><th>地区</th><th>API</th><th>操作</th>
       </tr></thead><tbody></tbody></table>
       <div class="empty" id="accEmpty" hidden>账号库为空，去「登录」页添加账号</div>
     </div>
@@ -364,7 +364,7 @@ async function loadAccounts() {
   $('#accTable tbody').innerHTML = list.map(a => `<tr>
     <td><span class="dot ${a.api_ready ? 'g' : (a.protected ? 'y' : 'r')}"></span>${
       a.api_ready ? '可用' : (a.protected ? '加密凭据' : '已过期')}</td>
-    <td>${a.label}</td><td>${a.region === 'global' ? '国际版' : '国内版'}</td>
+    <td>${a.label}</td><td>${a.channel || a.domain || '—'}</td><td>${a.region === 'global' ? '国际版' : '国内版'}</td>
     <td>${a.api_ready ? '✓' : '—'}</td>
     <td><button class="btn sm bad" onclick="rmAccount('${a.uid}','${a.domain || ''}')">移除</button></td>
   </tr>`).join('');
