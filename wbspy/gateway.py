@@ -117,12 +117,18 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     def models(authorization: str = Header("")) -> dict:
         now = time.time()
         if now - app.state.model_cached_at > MODEL_TTL_SEC:
-            # 账号池模型：id 是路由键保持不动，名字/地区作为扩展字段一并下发
-            rows = [{"id": m["id"], "object": "model", "owned_by": "wbspy",
-                     **m.get("wbspy", {}),
-                     "name": m.get("name") or m["id"].split(":", 1)[-1],
-                     "region": m.get("region")}
-                    for m in pool.models()]
+            # 账号池模型：id 是路由键保持不动，名字/地区/计费倍率作为扩展字段一并下发；
+            # 按官方倍率升序（限时免费 0 最前），无倍率的排后面
+            pool_rows = [{"id": m["id"], "object": "model", "owned_by": "wbspy",
+                          **m.get("wbspy", {}),
+                          "name": m.get("name") or m["id"].split(":", 1)[-1],
+                          "region": m.get("region"),
+                          **({"credit_multiplier": m["credit_multiplier"]}
+                             if "credit_multiplier" in m else {})}
+                         for m in pool.models()]
+            pool_rows.sort(key=lambda r: (r.get("credit_multiplier") is None,
+                                          r.get("credit_multiplier") or 0))
+            rows = pool_rows
             # 聚合渠道只暴露「当前真的可调用」的：未配置 key 的厂商不进目录
             rows += [{"id": m["id"], "object": "model", "owned_by": m["owned_by"], **m["wbspy"]}
                      for m in aggregate.models() if m["wbspy"].get("configured")]

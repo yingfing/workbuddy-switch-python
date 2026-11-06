@@ -714,8 +714,13 @@ class WorkBuddyClient:
             if allowed_ids is not None and mid not in allowed_ids:
                 continue
             seen.add(mid)
-            out.append({"id": mid, "name": str(row.get("display_name") or row.get("name") or mid)[:80],
-                        "region": self.doc.region})
+            entry = {"id": mid,
+                     "name": str(row.get("display_name") or row.get("name") or mid)[:80],
+                     "region": self.doc.region}
+            cm = row.get("credit_multiplier")   # 官方计费倍率（0 = 限时免费）
+            if isinstance(cm, (int, float)):
+                entry["credit_multiplier"] = cm
+            out.append(entry)
         return out
 
     def models(self) -> list[dict]:

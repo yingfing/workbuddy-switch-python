@@ -451,6 +451,30 @@ class TestGatewayModels(unittest.TestCase):
         self.assertEqual(row["region"], "cn")
         self.assertEqual(row["id"], "workbuddy:fast-model")
 
+    def test_credit_multiplier_passthrough_and_sort(self):
+        """官方计费倍率透传进目录并按倍率升序（限时免费 0 最前）。"""
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.gateway import create_app
+        from wbspy.pool import AccountPool
+        fake_pool = [
+            {"id": "workbuddy:balanced-model", "name": "均衡", "region": "cn",
+             "credit_multiplier": 0.5},
+            {"id": "workbuddy:hy4free", "name": "Hy4", "region": "cn",
+             "credit_multiplier": 0},
+            {"id": "workbuddy:auto", "name": "Auto", "region": "cn"},
+        ]
+        pool = AccountPool([])
+        app = create_app(pool, api_key="")
+        with patch("wbspy.gateway.aggregate.models", return_value=[]), \
+             patch.object(pool, "models", return_value=fake_pool):
+            rows = TestClient(app).get("/v1/models").json()["data"]
+        ids = [r["id"] for r in rows]
+        self.assertEqual(ids, ["workbuddy:hy4free", "workbuddy:balanced-model",
+                               "workbuddy:auto"])      # 免费 → 倍率升序 → 无倍率殿后
+        self.assertEqual(rows[0]["credit_multiplier"], 0)
+
+
     def test_legacy_cn_prefix_still_routes(self):
         """旧客户端配置的 cn:/global: 前缀继续按账号池路由（不断）。"""
         from fastapi.testclient import TestClient

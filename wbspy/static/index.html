@@ -291,7 +291,7 @@ a{color:var(--accent);text-decoration:none}
     </div>
     <div class="card">
       <h2>模型目录</h2>
-      <table id="modelTable"><thead><tr><th>模型 ID</th><th>名称</th><th>地区</th></tr></thead><tbody></tbody></table>
+      <table id="modelTable"><thead><tr><th>模型 ID</th><th>名称</th><th>倍率</th><th>地区</th></tr></thead><tbody></tbody></table>
       <div class="empty" id="modelEmpty" hidden>暂无模型（需要已授权账号）</div>
     </div>
     <div class="card">
@@ -805,8 +805,13 @@ async function loadGateway() {
   const list = m.data || [];
   $('#modelEmpty').hidden = list.length > 0;
   $('#modelTable').style.display = list.length ? '' : 'none';
-  $('#modelTable tbody').innerHTML = list.map(m => `<tr>
-    <td><code>${m.id}</code></td><td>${m.name}</td><td>${m.region || '—'}</td></tr>`).join('');
+  $('#modelTable tbody').innerHTML = list.map(m => {
+    const cm = m.credit_multiplier;
+    const rate = cm === 0 ? '<span style="color:var(--bad);font-weight:600">限时免费</span>'
+      : (typeof cm === 'number' ? `${cm}x` : '—');
+    return `<tr>
+    <td><code>${m.id}</code></td><td>${m.name}</td><td>${rate}</td><td>${m.region || '—'}</td></tr>`;
+  }).join('');
 }
 
 async function gwKeySave() {
