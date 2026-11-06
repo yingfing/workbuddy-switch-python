@@ -434,6 +434,23 @@ class TestGatewayModels(unittest.TestCase):
         self.assertIn("prov/ok", ids)
         self.assertNotIn("prov/bad", ids)     # 调不动的模型不再「缝合」进目录
 
+    def test_pool_models_carry_name(self):
+        """账号池模型下发 name/region 扩展字段（客户端可读显示名）。"""
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.gateway import create_app
+        from wbspy.pool import AccountPool
+        app = create_app(AccountPool([]), api_key="")
+        fake_pool = [{"id": "cn:fast-model", "name": "快速", "region": "cn"}]
+        pool = AccountPool([])
+        app = create_app(pool, api_key="")
+        with patch("wbspy.gateway.aggregate.models", return_value=[]), \
+             patch.object(pool, "models", return_value=fake_pool):
+            row = TestClient(app).get("/v1/models").json()["data"][0]
+        self.assertEqual(row["name"], "快速")
+        self.assertEqual(row["region"], "cn")
+        self.assertEqual(row["id"], "cn:fast-model")
+
 
 class TestAutomationConfig(unittest.TestCase):
     """托管节奏配置：落盘 + 校验 + 自动生效。"""
