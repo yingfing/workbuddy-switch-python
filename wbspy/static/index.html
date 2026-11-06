@@ -199,6 +199,17 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{transition:none !important;animation:none !important}
 }
+
+/* -- 操作结果 toast：写操作成功后弹服务端确认，替代静默成功 -- */
+#toastBox{position:fixed;top:14px;right:14px;z-index:1200;display:flex;
+  flex-direction:column;gap:8px;pointer-events:none;max-width:min(360px,80vw)}
+.toast{pointer-events:auto;padding:10px 14px;border-radius:10px;font-size:13px;
+  background:var(--card);color:var(--fg);border:1px solid var(--ok);
+  box-shadow:0 8px 28px rgba(0,0,0,.22);animation:toastIn .25s ease;
+  transition:opacity .3s,transform .3s;word-break:break-all}
+.toast.bad{border-color:var(--bad)}
+.toast.out{opacity:0;transform:translateY(-8px)}
+@keyframes toastIn{from{opacity:0;transform:translateX(28px)}to{opacity:1;transform:none}}
 </style>
 </head>
 <body>
@@ -301,7 +312,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         </select>
         <input id="pollCustom" type="number" min="5" max="1440" placeholder="分钟（5~1440）" style="width:150px" hidden>
         <input id="pollDaily" type="time" value="09:00" hidden>
-        <button class="btn" onclick="pollSave()">💾 保存并生效</button>
+        <button class="btn" onclick="pollSave(this)">💾 保存并生效</button>
         <span class="tag">轮询模式：每轮查签到接口，未签自动补签，每天首轮全量托管；定点模式：每天该时刻跑一次全量托管</span>
       </div>
       <div class="row" style="margin-bottom:12px">
@@ -327,7 +338,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       <div class="row" style="margin-bottom:12px">
         <select id="snapRegion"><option value="cn">国内版</option><option value="global">国际版</option></select>
         <input id="snapName" placeholder="快照名（可留空自动命名）" style="width:220px">
-        <button class="btn" onclick="snapSave()">💾 保存当前登录</button>
+        <button class="btn" onclick="snapSave(this)">💾 保存当前登录</button>
         <button class="btn ghost" onclick="snapRestore()">↩ 恢复切换前</button>
       </div>
       <table id="snapTable"><thead><tr>
@@ -348,7 +359,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       <div class="kv"><span>API Key</span><span id="gwKey">—</span></div>
       <div class="row" style="margin-top:10px">
         <input id="gwKeyInput" placeholder="自定义访问密钥（留空恢复默认）" style="flex:1">
-        <button class="btn" onclick="gwKeySave()">🔑 保存密钥</button>
+        <button class="btn" onclick="gwKeySave(this)">🔑 保存密钥</button>
       </div>
       <span class="tag">客户端调用 /v1 需带密钥（Authorization: Bearer &lt;key&gt;）；内置默认 <code>workbuddy</code>，保存立即生效无需重启</span>
       <div class="kv"><span>对外网关</span><span><button class="btn sm" id="gwSwitch" onclick="gwSwitchToggle()">…</button></span></div>
@@ -356,7 +367,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       <div class="kv"><span>服务端口</span><span id="gwPortNow">—</span></div>
       <div class="row" style="margin-top:6px">
         <input id="gwPortInput" placeholder="新端口（1-65535，重启后生效）" style="flex:1">
-        <button class="btn" onclick="gwPortSave()">🔌 保存端口</button>
+        <button class="btn" onclick="gwPortSave(this)">🔌 保存端口</button>
       </div>
       <span class="tag">保存前自动试绑：端口被占用会拒绝保存；保存后按提示重启服务即切换到新端口</span>
       <div class="kv"><span>可用账号</span><span id="gwHealthy">—</span></div>
@@ -394,6 +405,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
 </div>
 
 <!-- 全局日志：悬浮按钮 + 侧滑抽屉 -->
+<div id="toastBox" aria-live="polite"></div>
 <button id="logFab" onclick="toggleLogDrawer()" title="运行日志">
   📜<span id="logBadge" hidden></span>
 </button>
@@ -427,6 +439,22 @@ themeBtn.onclick = () =>
   applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
 const api = (p, opt) => fetch(p + (p.includes('?') ? '&' : '?') + location.search.slice(1), opt).then(r => r.json());
 let pollTimer = null;
+
+// -- 操作结果提示：所有写操作成功后弹出（文案来自服务端响应，即落盘确认）--
+function toast(msg, ok = true) {
+  const el = document.createElement('div');
+  el.className = 'toast' + (ok ? '' : ' bad');
+  el.textContent = (ok ? '✓ ' : '✗ ') + msg;
+  $('#toastBox').appendChild(el);
+  setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 350); }, 3500);
+}
+/** 保存类按钮统一「处理中…」状态，防连点也给请求真实感。 */
+async function busy(btn, fn) {
+  if (!btn || btn.disabled) return;
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '处理中…';
+  try { await fn(); } finally { btn.disabled = false; btn.textContent = old; }
+}
 
 // -- 标签页 --
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
@@ -566,14 +594,16 @@ async function loadCredits(btn) {
 }
 async function rmAccount(uid, domain) {
   if (!confirm('确定移除该账号？')) return;
-  await api('/api/accounts/' + uid + (domain ? '?domain=' + encodeURIComponent(domain) : ''), {method: 'DELETE'});
+  const r = await api('/api/accounts/' + uid + (domain ? '?domain=' + encodeURIComponent(domain) : ''), {method: 'DELETE'});
+  r.ok ? toast('账号已移除，账号池已刷新') : toast(r.error || '移除失败', false);
   loadAccounts();
 }
 
 // -- 自动化 --
 async function autoRun() {
   const r = await api('/api/automation/run', {method: 'POST'});
-  if (!r.ok) alert(r.error);
+  if (!r.ok) return toast(r.error, false);
+  toast('托管已启动，本轮在后台执行，结果见运行日志');
   pollAuto();
 }
 async function autoToggle() {
@@ -582,8 +612,9 @@ async function autoToggle() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({enabled: $('#autoPoll').textContent.includes('关')})
   });
-  if (!r.ok) return alert(r.error);
+  if (!r.ok) return toast(r.error, false);
   pollAuto();
+  toast('自动签到托管已' + (r.data.enabled ? '开启（config 已保存）' : '关闭'), true);
 }
 function pollModeUi() {
   const daily = $('#pollMode').value === 'daily';
@@ -595,7 +626,7 @@ function pollModeUi() {
 function pollPresetUi() {
   $('#pollCustom').hidden = $('#pollPreset').value !== 'custom';
 }
-async function pollSave() {
+async function pollSave(btn) {
   const mode = $('#pollMode').value;
   const body = {mode, notify_url: $('#pollNotify').value.trim()};
   if (mode === 'daily') {
@@ -606,13 +637,19 @@ async function pollSave() {
     if (!mins || mins < 5 || mins > 1440) return alert('自定义间隔需在 5 ~ 1440 分钟之间');
     body.interval_minutes = mins;
   }
-  const r = await api('/api/automation/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(body)
+  await busy(btn, async () => {
+    const r = await api('/api/automation/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) return toast(r.error, false);
+    pollAuto();
+    const desc = r.data.mode === 'daily'
+      ? `每天 ${r.data.daily_at} 定点`
+      : `每 ${r.data.interval_minutes} 分钟轮询`;
+    toast(`托管节奏已保存并生效：${desc}` + (r.data.notify_url ? '，推送已配置' : ''));
   });
-  if (!r.ok) return alert(r.error);
-  pollAuto();
 }
 async function serviceRestart() {
   if (!confirm('重启服务？进行中的请求会中断，页面将在几秒后自动重连。')) return;
@@ -739,11 +776,14 @@ async function loadSnapshots() {
     <td><button class="btn sm" onclick="snapSwitch('${s.name}')">切换</button></td>
   </tr>`).join('');
 }
-async function snapSave() {
-  const r = await api('/api/switch/save', {method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name: $('#snapName').value, region: $('#snapRegion').value})});
-  r.ok ? loadSnapshots() : alert(r.error);
+async function snapSave(btn) {
+  await busy(btn, async () => {
+    const r = await api('/api/switch/save', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: $('#snapName').value, region: $('#snapRegion').value})});
+    r.ok ? toast('快照已保存：' + ($('#snapName').value || '（默认名）')) : toast(r.error, false);
+    loadSnapshots();
+  });
 }
 async function snapSwitch(name) {
   if (!confirm('切换桌面客户端登录到「' + name + '」？（当前登录会自动备份）')) return;
@@ -821,7 +861,7 @@ function renderProv() {
     <td><div class="row" style="gap:6px">
       <input id="key-${x.id}" placeholder="${x.auth_kind === 'none' ? '免 Key 直接用' : x.key_hint || '粘贴 API Key'}"
              style="width:170px;font-size:11.5px;padding:5px 8px" ${x.auth_kind === 'none' ? 'disabled' : ''}>
-      <button class="btn sm" onclick="saveKey('${x.id}')" ${x.auth_kind === 'none' ? 'disabled' : ''}>存</button>
+      <button class="btn sm" onclick="saveKey('${x.id}',this)" ${x.auth_kind === 'none' ? 'disabled' : ''}>存</button>
       ${x.configured ? '<span class="dot g" title="已配置，模型已在 /v1/models"></span>' : ''}
     </div></td>
     <td>${x.signup_url ? `<a href="${x.signup_url}" target="_blank">打开 ↗</a>` : '—'}</td>
@@ -829,12 +869,15 @@ function renderProv() {
   document.querySelectorAll('#provChips [data-f]').forEach(b =>
     b.style.opacity = b.dataset.f === provFilter ? 1 : .55);
 }
-async function saveKey(pid) {
-  const input = document.getElementById('key-' + pid);
-  const r = await api('/api/keys', {method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({provider: pid, key: input.value.trim()})});
-  if (r.ok) { loadFree(); } else alert(r.error);
+async function saveKey(pid, btn) {
+  await busy(btn, async () => {
+    const input = document.getElementById('key-' + pid);
+    const r = await api('/api/keys', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider: pid, key: input.value.trim()})});
+    if (r.ok) { toast(pid + ' 渠道密钥已保存，模型目录已刷新'); loadFree(); }
+    else toast(r.error, false);
+  });
 }
 
 function renderFree() {
@@ -893,16 +936,21 @@ async function loadGateway() {
   }).join('');
 }
 
-async function gwKeySave() {
-  const v = $('#gwKeyInput').value.trim();
-  const r = await api('/api/settings/gateway-key', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({api_key: v})
+async function gwKeySave(btn) {
+  await busy(btn, async () => {
+    const v = $('#gwKeyInput').value.trim();
+    const r = await api('/api/settings/gateway-key', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({api_key: v})
+    });
+    if (!r.ok) return toast(r.error, false);
+    $('#gwKeyInput').value = '';
+    toast(r.data.is_default
+      ? `访问密钥已恢复内置默认（${r.data.key}），立即生效`
+      : `访问密钥已保存并生效：${r.data.key.slice(0, 2) + '•••' + r.data.key.slice(-2)}`);
+    gwLoad();                                    // 回读服务端状态刷新显示
   });
-  if (!r.ok) return alert(r.error);
-  $('#gwKeyInput').value = '';
-  gwLoad();
 }
 
 let gwState = {enabled: true, port: ''};
@@ -919,31 +967,39 @@ async function gwSwitchToggle() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({enabled: !gwState.enabled})
   });
-  if (!r.ok) return alert(r.error);
+  if (!r.ok) return toast(r.error, false);
   gwState.enabled = !!r.data.enabled;
   paintGwSwitch();
+  toast(gwState.enabled
+    ? '对外网关已开启，/v1 恢复服务（服务端已确认）'
+    : '对外网关已关闭，客户端调用 /v1 将返回 404（服务端已确认）');
 }
 
-async function gwPortSave() {
-  const v = $('#gwPortInput').value.trim();
-  if (!v) return;
-  const r = await api('/api/settings/gateway', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({port: v})
-  });
-  if (!r.ok) return alert(r.error);
-  $('#gwPortInput').value = '';
-  if (r.data.restart_required) {
-    if (confirm(`端口已保存为 ${r.data.port}，重启服务后生效。现在就重启吗？`)) {
-      await api('/api/system/restart', {method: 'POST'});
-      setTimeout(() => {
-        location.href = location.origin.replace(/:\d+$/, ':' + r.data.port) + '/';
-      }, 4000);
-      return;
+async function gwPortSave(btn) {
+  await busy(btn, async () => {
+    const v = $('#gwPortInput').value.trim();
+    if (!v) return toast('先填一个端口号（1-65535）', false);
+    const r = await api('/api/settings/gateway', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({port: v})
+    });
+    if (!r.ok) return toast(r.error, false);
+    $('#gwPortInput').value = '';
+    if (r.data.restart_required) {
+      if (confirm(`服务端已保存端口 ${r.data.port}。重启服务后生效，现在就重启吗？`)) {
+        await api('/api/system/restart', {method: 'POST'});
+        setTimeout(() => {
+          location.href = location.origin.replace(/:\d+$/, ':' + r.data.port) + '/';
+        }, 4000);
+        return;
+      }
+      toast(`端口 ${r.data.port} 已保存，重启服务后生效`, true);
+    } else {
+      toast(`端口 ${r.data.port} 与当前监听一致，已生效`, true);
     }
-  }
-  gwLoad();
+    gwLoad();
+  });
 }
 
 loadChannels();
