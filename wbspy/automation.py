@@ -12,8 +12,9 @@
 
 调度：`run_once` 单账号一轮（每项独立重试）；`loop` 固定间隔；`schedule`
 每日定点（读 config.json automation.daily_at）；Web 端用 `poll_worker`——
-每 2 小时查一次签到接口，未签且开关开则补签，每天首轮顺带跑一次全量托管；
-每轮结果可推送 webhook（automation.notify_url，POST JSON）。
+interval 模式每 N 分钟查签到接口、未签且开关开则补签（automation.
+interval_minutes，默认 120），daily 模式每天定点全量托管；每轮结果可推送
+webhook（automation.notify_url，POST JSON）。
 """
 
 from __future__ import annotations
@@ -258,7 +259,22 @@ def schedule(documents: list[Document],
 
 # -- Web 端签到轮询 ---------------------------------------------------------------
 
-POLL_INTERVAL = 2 * 3600                               # 每 2 小时查一次签到接口
+DEFAULT_POLL_MINUTES = 120                             # 默认每 2 小时
+
+
+def _poll_cfg() -> dict:
+    """读取托管配置（config automation），非法值兜底并 clamp。"""
+    cfg = (load_config().get("automation") or {})
+    mode = "daily" if cfg.get("mode") == "daily" else "interval"
+    try:
+        minutes = int(cfg.get("interval_minutes") or DEFAULT_POLL_MINUTES)
+    except (TypeError, ValueError):
+        minutes = DEFAULT_POLL_MINUTES
+    minutes = max(5, min(1440, minutes))               # 5 分钟 ~ 24 小时
+    daily_at = str(cfg.get("daily_at") or "09:00")
+    if ":" not in daily_at:
+        daily_at = "09:00"
+    return {"mode": mode, "interval_minutes": minutes, "daily_at": daily_at}
 
 
 def checkin_sweep(documents: list[Document],
@@ -306,23 +322,42 @@ def _poll_round(accounts: list[Document], last_full_day: str | None,
 
 
 def poll_worker(log: Callable[[str], None], stop) -> None:  # pragma: no cover
-    """Web 端自动签到轮询线程：每 2 小时查一次签到接口，未签则补签；
-    每天首轮顺带跑一次全量托管（任务/抽奖/旅行等）。
+    """Web 端自动签到线程（双模式，网页保存配置后由服务端重启线程生效）：
+
+    - interval：每 N 分钟查一次签到接口，未签则补签；每天首轮全量托管
+    - daily：每天定点（automation.daily_at）跑一次全量托管
 
     到点现场加载账号库（新增账号自动纳入）。stop 为 threading.Event，
-    关闭开关时 set 立即唤醒退出。
+    关闭开关或重配节奏时 set 立即唤醒退出。
     """
     from .store import load_accounts
     last_full_day: str | None = None
-    log("自动签到轮询：已启动，每 2 小时查一次签到接口。")
+    log("自动签到托管：已启动。")
     while not stop.is_set():
         try:
-            accounts = load_accounts()
-            if accounts:
-                last_full_day = _poll_round(accounts, last_full_day, log)
+            cfg = _poll_cfg()
+            if cfg["mode"] == "daily":
+                hh, mm = cfg["daily_at"].split(":")[:2]
+                wait = seconds_until(int(hh), int(mm))
+                log(f"每日定点托管：下一轮 {time.strftime('%m-%d %H:%M', time.localtime(time.time() + wait))}")
             else:
-                log("轮询：账号库为空，本轮跳过。")
+                accounts = load_accounts()
+                if accounts:
+                    last_full_day = _poll_round(accounts, last_full_day, log)
+                else:
+                    log("轮询：账号库为空，本轮跳过。")
+                wait = cfg["interval_minutes"] * 60
+                log(f"轮询间隔 {cfg['interval_minutes']} 分钟，"
+                    f"下一轮 {time.strftime('%H:%M', time.localtime(time.time() + wait))}")
+            if stop.wait(max(1, wait)):
+                return
+            if cfg["mode"] == "daily":                 # daily 到点：跑全量
+                accounts = load_accounts()
+                if accounts:
+                    run_all(accounts, log)
+                else:
+                    log("账号库为空，本轮跳过。")
+                stop.wait(60)                          # 避免整点重入
         except Exception as exc:
             log(f"轮询异常：{exc}")
-        if stop.wait(POLL_INTERVAL):
-            return
+            stop.wait(60)

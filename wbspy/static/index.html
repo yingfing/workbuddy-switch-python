@@ -183,7 +183,29 @@ a{color:var(--accent);text-decoration:none}
         <button class="btn" id="autoRun" onclick="autoRun()">▶ 立即跑一轮</button>
         <button class="btn ghost" id="autoPoll" onclick="autoToggle()">自动签到：关</button>
         <span class="pill" id="autoState"></span>
-        <span class="tag">开启后每 2 小时查询签到接口，未签自动补签；每天首轮顺带跑一次全量托管（服务重启自动恢复）</span>
+        <button class="btn ghost" onclick="serviceRestart()">⟳ 重启服务</button>
+        <span class="tag">开关与节奏落盘 config.json，服务重启自动恢复</span>
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <b>托管节奏：</b>
+        <select id="pollMode" onchange="pollModeUi()">
+          <option value="interval">固定间隔轮询</option>
+          <option value="daily">每天定点</option>
+        </select>
+        <select id="pollPreset" onchange="pollPresetUi()">
+          <option value="15">每 15 分钟</option>
+          <option value="30">每 30 分钟</option>
+          <option value="60">每 1 小时</option>
+          <option value="120" selected>每 2 小时</option>
+          <option value="240">每 4 小时</option>
+          <option value="360">每 6 小时</option>
+          <option value="720">每 12 小时</option>
+          <option value="custom">自定义…</option>
+        </select>
+        <input id="pollCustom" type="number" min="5" max="1440" placeholder="分钟（5~1440）" style="width:150px" hidden>
+        <input id="pollDaily" type="time" value="09:00" hidden>
+        <button class="btn" onclick="pollSave()">💾 保存并生效</button>
+        <span class="tag">轮询模式：每轮查签到接口，未签自动补签，每天首轮全量托管；定点模式：每天该时刻跑一次全量托管</span>
       </div>
       <div class="log" id="autoLog">暂无日志。</div>
     </div>
@@ -427,13 +449,57 @@ async function autoToggle() {
   if (!r.ok) return alert(r.error);
   pollAuto();
 }
+function pollModeUi() {
+  const daily = $('#pollMode').value === 'daily';
+  $('#pollPreset').hidden = daily;
+  $('#pollCustom').hidden = daily;
+  $('#pollDaily').hidden = !daily;
+  if (!daily) pollPresetUi();
+}
+function pollPresetUi() {
+  $('#pollCustom').hidden = $('#pollPreset').value !== 'custom';
+}
+async function pollSave() {
+  const mode = $('#pollMode').value;
+  const body = {mode};
+  if (mode === 'daily') {
+    body.daily_at = $('#pollDaily').value || '09:00';
+  } else {
+    const v = $('#pollPreset').value;
+    const mins = v === 'custom' ? parseInt($('#pollCustom').value) : parseInt(v);
+    if (!mins || mins < 5 || mins > 1440) return alert('自定义间隔需在 5 ~ 1440 分钟之间');
+    body.interval_minutes = mins;
+  }
+  const r = await api('/api/automation/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) return alert(r.error);
+  pollAuto();
+}
+async function serviceRestart() {
+  if (!confirm('重启服务？进行中的请求会中断，页面将在几秒后自动重连。')) return;
+  await api('/api/system/restart', {method: 'POST'});
+  setTimeout(() => location.reload(), 4000);
+}
 async function pollAuto() {
   const r = await api('/api/automation/status');
-  const pollH = Math.round((r.data.poll_minutes || 120) / 60);
   $('#autoState').textContent = r.data.running ? '运行中…'
-    : (r.data.enabled ? `轮询托管中（每 ${pollH} 小时查签到）` : '空闲');
+    : (r.data.enabled ? '托管中' : '空闲');
   $('#autoRun').disabled = r.data.running;
-  $('#autoPoll').textContent = r.data.enabled ? `自动签到：开（每 ${pollH} 小时轮询）` : '自动签到：关';
+  $('#autoPoll').textContent = r.data.enabled ? '自动签到：开' : '自动签到：关';
+  // 回填托管节奏（不覆盖用户正在编辑的值——仅首次加载时同步）
+  if (!window._pollCfgLoaded) {
+    $('#pollMode').value = r.data.mode || 'interval';
+    const mins = String(r.data.interval_minutes || 120);
+    const has = [...$('#pollPreset').options].some(o => o.value === mins);
+    if (has) { $('#pollPreset').value = mins; }
+    else { $('#pollPreset').value = 'custom'; $('#pollCustom').value = mins; }
+    $('#pollDaily').value = r.data.daily_at || '09:00';
+    pollModeUi();
+    window._pollCfgLoaded = true;
+  }
   if (r.data.log.length) $('#autoLog').textContent = r.data.log.join('\n');
   const hist = r.data.history || [];
   $('#autoHistEmpty').hidden = hist.length > 0;

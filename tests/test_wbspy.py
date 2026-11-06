@@ -412,6 +412,99 @@ class TestAutomationHistory(unittest.TestCase):
             self.assertIn("checkin", out["h1"])
 
 
+class TestAutomationConfig(unittest.TestCase):
+    """托管节奏配置：落盘 + 校验 + 自动生效。"""
+
+    def _client(self, tmp):
+        from pathlib import Path
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        from wbspy import store
+        cfg_path = Path(tmp) / "config.json"
+        ctx = (patch.object(store, "CONFIG_PATH", cfg_path),
+               patch("wbspy.webui.load_config", store.load_config),
+               patch("wbspy.webui.save_config", store.save_config),
+               patch("wbspy.webui.load_accounts", return_value=[]),
+               patch("wbspy.automation.load_config", store.load_config))
+        for p in ctx:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in ctx])
+        return (TestClient(create_web_app(AccountPool([]))), cfg_path)
+
+    def test_config_interval_saved(self):
+        import tempfile
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            c, cfg_path = self._client(tmp)
+            r = c.post("/api/automation/config",
+                       json={"mode": "interval", "interval_minutes": 30}).json()
+            self.assertTrue(r["data"]["saved"])
+            on_disk = _json.loads(cfg_path.read_text())["automation"]
+            self.assertEqual(on_disk["interval_minutes"], 30)
+            st = c.get("/api/automation/status").json()["data"]
+            self.assertEqual(st["interval_minutes"], 30)
+            self.assertEqual(st["mode"], "interval")
+
+    def test_config_rejects_out_of_range(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            c, _ = self._client(tmp)
+            self.assertEqual(c.post("/api/automation/config",
+                                    json={"mode": "interval",
+                                          "interval_minutes": 1}).status_code, 400)
+            self.assertEqual(c.post("/api/automation/config",
+                                    json={"mode": "interval",
+                                          "interval_minutes": 9999}).status_code, 400)
+            self.assertEqual(c.post("/api/automation/config",
+                                    json={"mode": "daily",
+                                          "daily_at": "25:00"}).status_code, 400)
+            self.assertEqual(c.post("/api/automation/config",
+                                    json={"mode": "daily",
+                                          "daily_at": "broken"}).status_code, 400)
+            self.assertEqual(c.post("/api/automation/config",
+                                    json={"mode": "xxx"}).status_code, 400)
+
+    def test_config_daily_saved_and_normalized(self):
+        import tempfile
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            c, cfg_path = self._client(tmp)
+            r = c.post("/api/automation/config",
+                       json={"mode": "daily", "daily_at": "8:5"}).json()
+            self.assertTrue(r["data"]["saved"])
+            on_disk = _json.loads(cfg_path.read_text())["automation"]
+            self.assertEqual(on_disk["daily_at"], "08:05")
+            st = c.get("/api/automation/status").json()["data"]
+            self.assertEqual(st["mode"], "daily")
+            self.assertEqual(st["daily_at"], "08:05")
+
+    def test_poll_cfg_defaults_and_clamp(self):
+        """automation._poll_cfg：无配置给默认，坏值兜底 clamp（5~1440）。"""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from wbspy import automation
+        from wbspy import store
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(store, "CONFIG_PATH", Path(tmp) / "config.json"), \
+                 patch.object(automation, "load_config", store.load_config):
+                self.assertEqual(automation._poll_cfg(),
+                                 {"mode": "interval", "interval_minutes": 120,
+                                  "daily_at": "09:00"})
+                store.save_config({"automation": {"interval_minutes": "abc"}})
+                self.assertEqual(automation._poll_cfg()["interval_minutes"], 120)
+                store.save_config({"automation": {"interval_minutes": 1}})
+                self.assertEqual(automation._poll_cfg()["interval_minutes"], 5)
+                store.save_config({"automation": {"interval_minutes": 99999}})
+                self.assertEqual(automation._poll_cfg()["interval_minutes"], 1440)
+                store.save_config({"automation": {"mode": "daily", "daily_at": "xx"}})
+                self.assertEqual(automation._poll_cfg(),
+                                 {"mode": "daily", "interval_minutes": 120,
+                                  "daily_at": "09:00"})
+
+
 class TestCheckinPoller(unittest.TestCase):
     """2 小时轮询签到：查签到接口→未签补签；每天首轮全量托管。"""
 

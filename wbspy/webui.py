@@ -13,6 +13,9 @@
     DELETE /api/accounts/{uid}          移除账号
     POST   /api/automation/run          后台跑一轮签到/旅行/任务
     GET    /api/automation/status       自动化日志与运行状态
+    POST   /api/automation/toggle       自动签到开关（持久化）
+    POST   /api/automation/config       托管节奏配置（保存即自动生效）
+    POST   /api/system/restart          重启服务进程
     GET    /api/snapshots               快照列表
     POST   /api/switch/save             保存当前桌面登录
     POST   /api/switch/switch           切换到快照
@@ -31,7 +34,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .automation import run_all, poll_worker, POLL_INTERVAL
+from .automation import run_all, poll_worker
 from .channels import CHANNELS, get_channel, methods_of
 from .document import parse_auth
 from .gateway import create_app
@@ -210,26 +213,100 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         threading.Thread(target=worker, daemon=True).start()
         return _ok({"started": True})
 
+    def _restart_poll() -> None:
+        """重启托管线程：旧线程 set 唤醒退出，起新线程立即按新配置跑。"""
+        app.state.auto_stop.set()
+        old = app.state.auto_thread
+        if old and old.is_alive():
+            old.join(timeout=3)
+        app.state.auto_thread = None
+        _start_poll()
+
     @app.post("/api/automation/toggle")
     async def automation_toggle(request: Request):
-        """网页自动签到轮询开关（状态写 config，服务重启自动恢复）。"""
+        """网页自动签到开关（状态写 config，服务重启自动恢复）。"""
         body = await request.json()
         enabled = bool(body.get("enabled"))
         cfg = load_config()
         cfg.setdefault("automation", {})["enabled"] = enabled
         save_config(cfg)
+        auto = cfg.get("automation") or {}
         if enabled:
             _start_poll()
-            _log(f"自动签到轮询：已开启（每 {POLL_INTERVAL // 3600} 小时查一次签到接口，未签自动补签）")
+            _log("自动签到托管：已开启（" + _mode_desc(auto) + "）")
         else:
             app.state.auto_stop.set()
             app.state.auto_thread = None
-            _log("自动签到轮询：已关闭")
+            _log("自动签到托管：已关闭")
         return _ok({"enabled": enabled})
+
+    @app.post("/api/automation/config")
+    async def automation_config(request: Request):
+        """保存托管节奏并自动重启线程——保存即生效，无需手动重启服务。"""
+        import re
+        body = await request.json()
+        mode = body.get("mode")
+        if mode not in ("interval", "daily"):
+            raise HTTPException(400, "mode 仅支持 interval（固定间隔）/ daily（每天定点）")
+        cfg = load_config()
+        auto = cfg.setdefault("automation", {})
+        auto["mode"] = mode
+        if mode == "interval":
+            try:
+                minutes = int(body.get("interval_minutes"))
+            except (TypeError, ValueError):
+                raise HTTPException(400, "interval_minutes 需为整数分钟")
+            if not 5 <= minutes <= 1440:
+                raise HTTPException(400, "间隔需在 5 ~ 1440 分钟之间")
+            auto["interval_minutes"] = minutes
+        else:
+            daily_at = str(body.get("daily_at") or "")
+            if not re.fullmatch(r"\d{1,2}:\d{1,2}", daily_at):
+                raise HTTPException(400, "时间格式应为 HH:MM")
+            h, m = (int(x) for x in daily_at.split(":"))
+            if not (0 <= h < 24 and 0 <= m < 60):
+                raise HTTPException(400, "时间超出 0:00-23:59 范围")
+            auto["daily_at"] = f"{h:02d}:{m:02d}"
+        save_config(cfg)
+        if auto.get("enabled"):
+            _restart_poll()
+            _log(f"托管节奏已保存并生效：{_mode_desc(auto)}")
+        return _ok({"saved": True, "mode": auto["mode"],
+                    "interval_minutes": auto.get("interval_minutes"),
+                    "daily_at": auto.get("daily_at")})
+
+    def _mode_desc(auto: dict) -> str:
+        if (auto.get("mode") or "interval") == "daily":
+            return f"每天 {str(auto.get('daily_at') or '09:00')} 定点托管"
+        try:
+            n = int(auto.get("interval_minutes") or 120)
+        except (TypeError, ValueError):
+            n = 120
+        return f"每 {n} 分钟轮询签到" + ("（每天首轮全量托管）" if n else "")
+
+    @app.post("/api/system/restart")
+    def system_restart():
+        """重启服务进程：os.execv 自替换，保持原启动参数与端口。"""
+        import os
+        import sys
+
+        def _do():
+            time.sleep(1.5)                            # 先把响应发回前端
+            try:
+                if getattr(sys, "frozen", False):      # PyInstaller exe
+                    os.execv(sys.executable, [sys.executable] + sys.argv[1:])
+                os.execv(sys.executable,
+                         [sys.executable, "-m", "wbspy"] + sys.argv[1:])
+            except Exception as exc:                   # pragma: no cover
+                _log(f"服务重启失败：{exc}")
+
+        threading.Thread(target=_do, daemon=True).start()
+        return _ok({"restarting": True})
 
     @app.get("/api/automation/status")
     def automation_status():
-        enabled = bool((load_config().get("automation") or {}).get("enabled"))
+        auto = load_config().get("automation") or {}
+        enabled = bool(auto.get("enabled"))
         history: list = []
         try:
             from .automation import HISTORY_PATH
@@ -250,7 +327,10 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             history = []
         return _ok({"running": app.state.auto_running,
                     "log": app.state.auto_log[-60:], "history": history,
-                    "enabled": enabled, "poll_minutes": POLL_INTERVAL // 60})
+                    "enabled": enabled,
+                    "mode": (auto.get("mode") or "interval"),
+                    "interval_minutes": (auto.get("interval_minutes") or 120),
+                    "daily_at": (auto.get("daily_at") or "09:00")})
 
     # -- 桌面切换 ---------------------------------------------------------------
 
