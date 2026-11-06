@@ -15,7 +15,7 @@ from .document import parse_auth
 from .login import login
 from .pool import AccountPool
 from .store import (load_accounts, load_config, remove_account, save_account,
-                    list_snapshots)
+                    save_config, list_snapshots)
 from .switch import restore_previous, save_current_account, switch_account
 from .upstream import WorkBuddyClient
 
@@ -272,7 +272,94 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("update", help="检查新版本（只提示链接，不自动升级）")
     p.set_defaults(fn=_cmd_update)
 
+    p = sub.add_parser("config", help="查看/修改配置：list | get/set/unset <点分键> [值]")
+    p.add_argument("action", choices=["list", "get", "set", "unset"])
+    p.add_argument("key", nargs="?", default="",
+                   help="点分路径，如 automation.notify_url、api_key")
+    p.add_argument("value", nargs="?", default="",
+                   help="值（set 用；自动识别数字/布尔/JSON）")
+    p.set_defaults(fn=_cmd_config)
+
     return parser
+
+
+def _cfg_dig(cfg: dict, path: str):
+    """按点分路径取值，返回 (value, found)。"""
+    cur = cfg
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None, False
+        cur = cur[part]
+    return cur, True
+
+
+def _cfg_parse_value(raw: str, key: str):
+    """值类型推断：布尔/整数/浮点/JSON/字符串（api_key 等密钥键强制字符串）。"""
+    if key.split(".")[-1] in ("api_key", "notify_url", "daily_at", "mode"):
+        return raw
+    low = raw.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    if raw.startswith(("{", "[")):
+        import json as _json
+        try:
+            return _json.loads(raw)
+        except ValueError:
+            pass
+    return raw
+
+
+def _cmd_config(args) -> int:
+    """配置读写：wbspy config list / get api_key / set automation.notify_url <url> / unset …"""
+    import json as _json
+    cfg = load_config()
+    if args.action == "list":
+        print(_json.dumps(cfg, ensure_ascii=False, indent=2))
+        return 0
+    key = args.key.strip()
+    if not key:
+        print("缺少键名，例：wbspy config get api_key", file=sys.stderr)
+        return 1
+    if args.action == "get":
+        val, found = _cfg_dig(cfg, key)
+        if not found:
+            print(f"未设置：{key}（未配置时走代码内置默认）")
+            return 1
+        print(val if isinstance(val, str) else
+              _json.dumps(val, ensure_ascii=False, indent=2))
+        return 0
+    if args.action == "unset":
+        parent, ok = _cfg_dig(cfg, key.rsplit(".", 1)[0]) if "." in key else (cfg, True)
+        leaf = key.rsplit(".", 1)[-1]
+        if ok and isinstance(parent, dict) and leaf in parent:
+            del parent[leaf]
+            save_config(cfg)
+            print(f"已清除 {key}")
+            return 0
+        print(f"{key} 本来就没设置", file=sys.stderr)
+        return 1
+    # set
+    if args.value == "":
+        print("缺少值：wbspy config set <键> <值>", file=_sys.stderr)
+        return 1
+    parts = key.split(".")
+    cur = cfg
+    for part in parts[:-1]:
+        cur = cur.setdefault(part, {})
+    cur[parts[-1]] = _cfg_parse_value(args.value, key)
+    save_config(cfg)
+    val, _ = _cfg_dig(cfg, key)
+    print(f"已保存 {key} = {_json.dumps(val, ensure_ascii=False)}")
+    print("网页端 /api/* 的配置即时生效；网关密钥等启动期配置重启服务后生效。")
+    return 0
 
 
 def _cmd_update(_args) -> int:

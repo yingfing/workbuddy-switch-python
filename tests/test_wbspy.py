@@ -534,6 +534,35 @@ class TestGatewayKey(unittest.TestCase):
                                     json={"api_key": "ab"}).status_code, 400)
 
 
+    def test_config_subcommand_roundtrip(self):
+        """wbspy config 子命令：set 类型推断/密钥键强制字符串/get/unset。"""
+        import tempfile
+        import json as _json
+        import argparse as _ap
+        from unittest.mock import patch
+        from pathlib import Path
+        from wbspy import store
+        from wbspy.cli import _cmd_config
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            with patch.object(store, "CONFIG_PATH", cfg_path):
+                def run(*a):
+                    args = _ap.Namespace(action=a[0],
+                                         key=a[1] if len(a) > 1 else "",
+                                         value=a[2] if len(a) > 2 else "")
+                    return _cmd_config(args)
+                run("set", "automation.notify_url", "https://x.example/push")
+                run("set", "automation.interval_minutes", "45")
+                run("set", "api_key", "88888888")        # 纯数字也必须是字符串
+                on_disk = _json.loads(cfg_path.read_text())
+                self.assertEqual(on_disk["automation"]["interval_minutes"], 45)
+                self.assertIsInstance(on_disk["api_key"], str)
+                self.assertEqual(on_disk["api_key"], "88888888")
+                run("unset", "automation.notify_url")
+                self.assertNotIn("notify_url",
+                                 _json.loads(cfg_path.read_text())["automation"])
+
+
 class TestAutomationConfig(unittest.TestCase):
     """托管节奏配置：落盘 + 校验 + 自动生效。"""
 
