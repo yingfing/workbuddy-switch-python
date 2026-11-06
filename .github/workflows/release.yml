@@ -46,7 +46,7 @@ jobs:
             name: bin-windows
           - os: ubuntu-22.04      # glibc 2.35，兼容 22.04+ 的 x86_64 发行版
             name: bin-linux
-          - os: macos-14          # Apple Silicon
+          - os: macos-15          # Apple Silicon（macos-14 已于 2026-11-02 退役）
             name: bin-macos-arm64
           # macos-13（Intel）已移除：免费层 Intel runner 排队 24h 超时，
           # 连带整个 Release 被取消。Intel Mac 用户走 pip 安装。
