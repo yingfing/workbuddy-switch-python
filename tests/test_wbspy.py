@@ -274,6 +274,31 @@ class TestCreditsParse(unittest.TestCase):
         self.assertEqual(c["total"], 0)
         self.assertEqual(c["packages"], [])
 
+    def test_far_future_expiry_32bit_safe(self):
+        """32 位盒子（time_t 到 2038 年）上「永不过期」的 9999 日期会让
+        mktime 炸「timestamp out of range」——必须降级为无过期时间，
+        余额照常算出（用户实测：3 个账号余额列全是这条报错）。"""
+        from unittest.mock import patch
+        acc = self._account(ExpiredTime="9999-12-31 23:59:59")
+        monthly = {"PackageName": "月度包", "CapacityType": 4,
+                   "CycleCapacitySize": 2000, "CycleCapacityRemain": 1500}
+        with patch("wbspy.upstream.time.mktime",
+                   side_effect=OverflowError(
+                       "timestamp out of range for platform time_t")):
+            c = self._credits_of([acc, monthly])
+        self.assertEqual(c["total"], 2000)               # 余额不受影响
+        self.assertNotIn("nearest_expiry", c)            # 过期时间降级不显示
+        for p in c["packages"]:
+            self.assertNotIn("expires_at", p)
+
+    def test_parse_ms_overflow_returns_none(self):
+        from unittest.mock import patch
+        from wbspy.upstream import _parse_ms
+        with patch("wbspy.upstream.time.mktime",
+                   side_effect=OverflowError("out of range")):
+            self.assertIsNone(_parse_ms("9999-12-31 23:59:59"))
+            self.assertIsNone(_parse_ms("2040-01-01 00:00:00"))
+
 
 if __name__ == "__main__":
     unittest.main()

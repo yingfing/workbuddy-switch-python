@@ -75,18 +75,24 @@ NOT_FOUND = {"__not_found__": True}
 
 
 def _parse_ms(raw) -> float | None:
-    """账单接口的时间字段：毫秒时间戳或 'YYYY-MM-DD HH:MM:SS' 字符串。"""
+    """账单接口的时间字段：毫秒时间戳或 'YYYY-MM-DD HH:MM:SS' 字符串。
+
+    字符串日期超出平台 time_t 范围（32 位盒子上限 2038 年；上游对
+    「永不过期」常填 9999-12-31）时返回 None——按无过期时间处理，
+    绝不能让余额查询整个炸掉。
+    """
     if isinstance(raw, (int, float)) and raw > 1e12:
         return float(raw)
     if isinstance(raw, str) and raw:
         try:
             return time.mktime(time.strptime(raw, "%Y-%m-%d %H:%M:%S")) * 1000
+        except (ValueError, OverflowError, OSError):
+            pass
+        try:
+            v = float(raw)
+            return v * 1000 if v < 1e11 else v
         except ValueError:
-            try:
-                v = float(raw)
-                return v * 1000 if v < 1e11 else v
-            except ValueError:
-                return None
+            return None
     return None
 
 
