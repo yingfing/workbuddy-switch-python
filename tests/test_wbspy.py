@@ -433,6 +433,20 @@ class TestAutomationConfig(unittest.TestCase):
         self.addCleanup(lambda: [p.stop() for p in ctx])
         return (TestClient(create_web_app(AccountPool([]))), cfg_path)
 
+    def test_logs_endpoint_counts(self):
+        """/api/logs：悬浮面板数据源——最近日志行 + 累计行数（未读徽标依据）。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            c, _ = self._client(tmp)
+            r = c.get("/api/logs").json()["data"]
+            self.assertEqual(r["total"], 0)
+            self.assertEqual(r["log"], [])
+            c.post("/api/automation/toggle", json={"enabled": True})
+            c.post("/api/automation/toggle", json={"enabled": False})
+            r = c.get("/api/logs").json()["data"]
+            self.assertGreaterEqual(r["total"], 2)       # 开/关 + 轮询线程启动日志
+            self.assertTrue(r["log"])
+
     def test_config_interval_saved(self):
         import tempfile
         import json as _json

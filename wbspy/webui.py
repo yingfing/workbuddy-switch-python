@@ -173,12 +173,14 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
 
     app.state.auto_running = False
     app.state.auto_log: list[str] = []
+    app.state.auto_total = 0                             # 累计日志行数（未读徽标用）
     app.state.auto_thread = None
     app.state.auto_stop = threading.Event()
 
     def _log(line: str) -> None:
         app.state.auto_log.append(f"{time.strftime('%H:%M:%S')}  {line}")
         del app.state.auto_log[:-200]
+        app.state.auto_total += 1
 
     def _start_poll() -> None:
         """按 config.automation.enabled 启动自动签到轮询线程。"""
@@ -302,6 +304,11 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
 
         threading.Thread(target=_do, daemon=True).start()
         return _ok({"restarting": True})
+
+    @app.get("/api/logs")
+    def api_logs():
+        """全局运行日志（悬浮面板用）：最近日志行 + 累计行数（未读徽标依据）。"""
+        return _ok({"log": app.state.auto_log[-200:], "total": app.state.auto_total})
 
     @app.get("/api/automation/status")
     def automation_status():
