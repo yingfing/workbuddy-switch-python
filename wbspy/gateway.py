@@ -115,8 +115,9 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         if now - app.state.model_cached_at > MODEL_TTL_SEC:
             rows = [{"id": m["id"], "object": "model", "owned_by": "wbspy", **m.get("wbspy", {})}
                     for m in pool.models()]
+            # 聚合渠道只暴露「当前真的可调用」的：未配置 key 的厂商不进目录
             rows += [{"id": m["id"], "object": "model", "owned_by": m["owned_by"], **m["wbspy"]}
-                     for m in aggregate.models()]
+                     for m in aggregate.models() if m["wbspy"].get("configured")]
             app.state.model_cache = rows
             app.state.model_cached_at = now
         return {"object": "list", "data": app.state.model_cache}

@@ -412,6 +412,29 @@ class TestAutomationHistory(unittest.TestCase):
             self.assertIn("checkin", out["h1"])
 
 
+class TestGatewayModels(unittest.TestCase):
+    """`/v1/models` 只暴露当前真正可调用的模型。"""
+
+    def test_unconfigured_providers_hidden(self):
+        """未配置 key 的聚合厂商不进目录；已配置的正常列出。"""
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.gateway import create_app
+        from wbspy.pool import AccountPool
+        app = create_app(AccountPool([]), api_key="")
+        fake = [
+            {"id": "prov/ok", "object": "model", "owned_by": "wbspy:ok",
+             "wbspy": {"configured": True}},
+            {"id": "prov/bad", "object": "model", "owned_by": "wbspy:bad",
+             "wbspy": {"configured": False}},
+        ]
+        with patch("wbspy.gateway.aggregate.models", return_value=fake):
+            c = TestClient(app)
+            ids = [m["id"] for m in c.get("/v1/models").json()["data"]]
+        self.assertIn("prov/ok", ids)
+        self.assertNotIn("prov/bad", ids)     # 调不动的模型不再「缝合」进目录
+
+
 class TestAutomationConfig(unittest.TestCase):
     """托管节奏配置：落盘 + 校验 + 自动生效。"""
 
