@@ -602,6 +602,27 @@ class TestAutomationConfig(unittest.TestCase):
             self.assertEqual(c.post("/api/automation/config",
                                     json={"mode": "xxx"}).status_code, 400)
 
+    def test_notify_url_saved_and_cleared(self):
+        """webhook 推送地址随节奏配置一并保存；空值=清除；status 回读。"""
+        import tempfile
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            c, cfg_path = self._client(tmp)
+            r = c.post("/api/automation/config",
+                       json={"mode": "interval", "interval_minutes": 60,
+                             "notify_url": "https://sctapi.ftqq.com/x.send"}).json()["data"]
+            self.assertEqual(r["notify_url"], "https://sctapi.ftqq.com/x.send")
+            on_disk = _json.loads(cfg_path.read_text())["automation"]["notify_url"]
+            self.assertEqual(on_disk, "https://sctapi.ftqq.com/x.send")
+            st = c.get("/api/automation/status").json()["data"]
+            self.assertEqual(st["notify_url"], "https://sctapi.ftqq.com/x.send")
+            # 留空再保存 = 清除
+            r = c.post("/api/automation/config",
+                       json={"mode": "interval", "interval_minutes": 60,
+                             "notify_url": ""}).json()["data"]
+            self.assertEqual(r["notify_url"], "")
+            self.assertNotIn("notify_url", _json.loads(cfg_path.read_text())["automation"])
+
     def test_config_daily_saved_and_normalized(self):
         import tempfile
         import json as _json

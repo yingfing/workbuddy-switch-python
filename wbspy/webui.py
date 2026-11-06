@@ -269,13 +269,20 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             if not (0 <= h < 24 and 0 <= m < 60):
                 raise HTTPException(400, "时间超出 0:00-23:59 范围")
             auto["daily_at"] = f"{h:02d}:{m:02d}"
+        if "notify_url" in body:                     # webhook 推送地址一并保存（空=清除）
+            nu = str(body.get("notify_url") or "").strip()
+            if nu:
+                auto["notify_url"] = nu
+            else:
+                auto.pop("notify_url", None)
         save_config(cfg)
         if auto.get("enabled"):
             _restart_poll()
             _log(f"托管节奏已保存并生效：{_mode_desc(auto)}")
         return _ok({"saved": True, "mode": auto["mode"],
                     "interval_minutes": auto.get("interval_minutes"),
-                    "daily_at": auto.get("daily_at")})
+                    "daily_at": auto.get("daily_at"),
+                    "notify_url": auto.get("notify_url") or ""})
 
     def _mode_desc(auto: dict) -> str:
         if (auto.get("mode") or "interval") == "daily":
@@ -337,7 +344,8 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                     "enabled": enabled,
                     "mode": (auto.get("mode") or "interval"),
                     "interval_minutes": (auto.get("interval_minutes") or 120),
-                    "daily_at": (auto.get("daily_at") or "09:00")})
+                    "daily_at": (auto.get("daily_at") or "09:00"),
+                    "notify_url": (auto.get("notify_url") or "")})
 
     # -- 桌面切换 ---------------------------------------------------------------
 

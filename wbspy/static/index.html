@@ -240,6 +240,11 @@ a{color:var(--accent);text-decoration:none}
         <button class="btn" onclick="pollSave()">💾 保存并生效</button>
         <span class="tag">轮询模式：每轮查签到接口，未签自动补签，每天首轮全量托管；定点模式：每天该时刻跑一次全量托管</span>
       </div>
+      <div class="row" style="margin-bottom:12px">
+        <b>结果推送：</b>
+        <input id="pollNotify" placeholder="webhook 地址（每轮托管完 POST JSON，留空关闭）" style="flex:1">
+        <span class="tag">填 Server酱/企业微信/自建接口等，保存时一并生效</span>
+      </div>
       <div class="pill">实时与历史日志看右下角悬浮的 📜 按钮（任何页面都可查看）。</div>
     </div>
     <div class="card">
@@ -520,7 +525,7 @@ function pollPresetUi() {
 }
 async function pollSave() {
   const mode = $('#pollMode').value;
-  const body = {mode};
+  const body = {mode, notify_url: $('#pollNotify').value.trim()};
   if (mode === 'daily') {
     body.daily_at = $('#pollDaily').value || '09:00';
   } else {
@@ -571,6 +576,7 @@ async function pollAuto() {
     if (has) { $('#pollPreset').value = mins; }
     else { $('#pollPreset').value = 'custom'; $('#pollCustom').value = mins; }
     $('#pollDaily').value = r.data.daily_at || '09:00';
+    $('#pollNotify').value = r.data.notify_url || '';
     pollModeUi();
     window._pollCfgLoaded = true;
   }
