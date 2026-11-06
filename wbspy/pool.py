@@ -13,6 +13,7 @@ from __future__ import annotations
 import random
 import threading
 import time
+from typing import Callable
 
 from .document import Document
 from .upstream import UpstreamError, WorkBuddyClient
@@ -91,8 +92,17 @@ class AccountPool:
         self.cooldowns = CooldownTable()
         self.last_used: dict[tuple[str, str], float] = {}    # balanced 策略权重依据
         self.session_map: dict[str, tuple[tuple[str, str], float]] = {}  # 会话粘性
+        self.event_log: Callable[[str], None] | None = None  # 网页日志钩子（webui 接线）
         self._cursor = 0
         self._lock = threading.Lock()
+
+    def _emit(self, msg: str) -> None:
+        """关键调度事件（换号/凭据失效/续期）推给网页日志；未接线时静默。"""
+        try:
+            if self.event_log:
+                self.event_log(msg)
+        except Exception:
+            pass
 
     # -- 状态 -----------------------------------------------------------------
 
@@ -285,6 +295,10 @@ class AccountPool:
                 self.apply_error(doc, exc, model)
                 self._unbind(session, _key(doc))  # 粘住的号废了 → 解绑让对话重分配
                 if exc.kind in ("auth", "rate", "model"):
+                    if exc.kind == "auth":
+                        self._emit(f"「{doc.label()}」凭据被上游拒绝（401），已标记失效并换号重试")
+                    else:
+                        self._emit(f"「{doc.label()}」{model} 触发限流/不可用，已自动换号")
                     continue      # 换号重试
                 raise             # 渠道拒绝重试过 / 上游 5xx 不换号
 
@@ -358,8 +372,9 @@ class AccountPool:
                         fresh.token_expires_at = auth.get("expiresAt")
                         save_account(fresh)
                         self.refresh_documents([fresh])
-                    except Exception:
-                        pass                           # 刷新失败等下一轮 / 等用户重新授权
+                        self._emit(f"「{fresh.label()}」token 已自动续期")
+                    except Exception as exc:
+                        self._emit(f"「{doc.label()}」token 自动续期失败：{exc}（下轮重试，多次失败请重新登录）")
                 time.sleep(interval_sec)
 
         thread = threading.Thread(target=worker, daemon=True)

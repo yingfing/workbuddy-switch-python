@@ -215,8 +215,7 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
     # -- 自动化 ---------------------------------------------------------------
 
     app.state.auto_running = False
-    app.state.auto_log: list[str] = []
-    app.state.auto_total = 0                             # 累计日志行数（未读徽标用）
+    # auto_log / auto_total 已在 gateway.create_app 初始化（网关日志与自动化共用）
     app.state.auto_thread = None
     app.state.auto_stop = threading.Event()
 
@@ -224,6 +223,8 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         app.state.auto_log.append(f"{time.strftime('%H:%M:%S')}  {line}")
         del app.state.auto_log[:-200]
         app.state.auto_total += 1
+
+    pool.event_log = _log    # 调度事件（换号/凭据失效/token 续期）进网页日志
 
     def _start_poll() -> None:
         """按 config.automation.enabled 启动自动签到轮询线程。"""

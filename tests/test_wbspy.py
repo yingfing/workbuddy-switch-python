@@ -1215,3 +1215,82 @@ class TestAutomationToggle(unittest.TestCase):
                 self.assertTrue(cfg_path.exists())
                 on_disk = json.loads(cfg_path.read_text())["automation"]["enabled"]
                 self.assertTrue(on_disk)                 # 重启后能恢复
+
+
+class TestGatewayLogging(unittest.TestCase):
+    """网关日志接线：401 鉴权失败、对话成败、换号/续期事件进网页日志抽屉。"""
+
+    def test_auth_fail_and_chat_logged(self):
+        """密钥不匹配 401 与对话失败都写入 /api/logs。"""
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.gateway import create_app
+        from wbspy.pool import AccountPool
+        from wbspy.upstream import UpstreamError
+        app = create_app(AccountPool([]), api_key="secret")
+        c = TestClient(app, raise_server_exceptions=False)
+        # 密钥不匹配 → 401 + 日志
+        r = c.get("/v1/models", headers={"Authorization": "Bearer wrong"})
+        self.assertEqual(r.status_code, 401)
+        self.assertIn("鉴权失败", app.state.auto_log[-1])
+        # 对话失败 → 错误进日志
+        class _P(AccountPool):
+            def chat_failover(self, payload, session=None, lane="workbuddy"):
+                raise UpstreamError(503, "no_available_accounts", "无账号")
+        app2 = create_app(_P([]), api_key="")
+        c2 = TestClient(app2, raise_server_exceptions=False)
+        c2.post("/v1/chat/completions", json={"model": "auto",
+                                              "messages": [{"role": "user", "content": "hi"}]})
+        self.assertIn("对话失败", app2.state.auto_log[-1])
+        self.assertIn("no_available_accounts", app2.state.auto_log[-1])
+
+    def test_pool_emit_wired_to_webui_log(self):
+        """pool.event_log 钩子 → 网页日志；换号/auth 事件触发 _emit。"""
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool
+        from wbspy.upstream import UpstreamError
+        pool = AccountPool([])
+        events: list[str] = []
+        pool.event_log = events.append
+        # 两账号，第一个 401 换号到第二个
+        from wbspy.document import parse_auth
+        docs = [parse_auth({"account": {"uid": f"e{i}", "nickname": f"号{i}"},
+                            "auth": {"accessToken": "t",
+                                     "domain": "www.codebuddy.cn"}}) for i in range(2)]
+        pool2 = AccountPool(docs)
+        pool2.event_log = events.append
+        from unittest.mock import patch as _p
+        with _p("wbspy.pool._client_for") as MF:
+            c1, c2 = MagicMock(), MagicMock()
+            c1.chat.side_effect = UpstreamError(401, "upstream_auth_expired", "失效")
+            c2.chat.return_value = MagicMock()
+            MF.side_effect = lambda d: c1 if d.uid == "e0" else c2
+            pool3 = AccountPool(docs)
+            pool3.event_log = events.append
+            k1 = next(k for k in pool3.documents if pool3.documents[k].uid == "e1")
+            pool3.cooldowns.set(k1, "auto", 60)        # 冷却 e1，逼首轮选 e0
+            doc, _ = pool3.chat_failover({"model": "auto", "messages": []})
+            self.assertEqual(doc.uid, "e1")            # 换到第二个号
+        self.assertTrue(any("凭据被上游拒绝" in e for e in events), events)
+
+    def test_refresh_failure_emits(self):
+        """token 续期失败不再静默：记入事件日志。"""
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool
+        from wbspy.document import parse_auth
+        doc = parse_auth({"account": {"uid": "r1", "nickname": "续期号"},
+                          "auth": {"accessToken": "t", "refreshToken": "r",
+                                   "domain": "www.codebuddy.cn"}})
+        doc.token_expires_at = 0                        # 已过期，触发续期
+        pool = AccountPool([doc])
+        events: list[str] = []
+        pool.event_log = events.append
+        client = MagicMock()
+        client.refresh.side_effect = RuntimeError("refresh 炸了")
+        with patch.object(pool, "clients", {next(iter(pool.documents)): client}), \
+             patch("wbspy.pool.time.sleep", lambda *_: (_ for _ in ()).throw(StopIteration)):
+            try:
+                pool.start_auto_refresh(interval_sec=1)
+            except StopIteration:
+                pass
+        self.assertTrue(any("续期失败" in e for e in events), events)

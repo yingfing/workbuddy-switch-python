@@ -86,6 +86,15 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     # 关闭后 /v1/* 一律 404，/api/* 管理界面与 /healthz 不受影响
     app.state.gw_enabled = bool(
         (load_config().get("gateway") or {}).get("enabled", True))
+    # 网关运行日志（与自动化共用网页日志抽屉 /api/logs）
+    app.state.auto_log: list[str] = []
+    app.state.auto_total = 0
+
+    def _gw_log(msg: str) -> None:
+        app.state.auto_log.append(f"{time.strftime('%H:%M:%S')}  {msg}")
+        del app.state.auto_log[:-200]
+        app.state.auto_total += 1
+    app.state.gw_log = _gw_log
 
     # 统一鉴权中间件：只保护 /v1/*（对外 OpenAI 服务）；/api/* 是本机管理
     # 界面，不被网关密钥锁死（公网防护由 _public_guard / 反向代理负责）。
@@ -102,6 +111,8 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             presented = request.headers.get("authorization", "") or \
                         request.headers.get("x-wbspy-key", "")
             if presented not in (f"Bearer {key}", key):
+                _gw_log(f"鉴权失败 401：{request.client.host if request.client else '?'} "
+                        f"{request.method} {path}（密钥不匹配，请核对客户端配置的密钥）")
                 return JSONResponse(status_code=401,
                                     content={"error": {"message": "invalid api key",
                                                        "type": "invalid_api_key"}})
@@ -289,7 +300,9 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         try:
             doc, resp = pool.chat_failover(raw, session=session, lane=lane)
         except UpstreamError as exc:
+            _gw_log(f"对话失败：{model} → HTTP {exc.status} {exc.code}：{exc.message[:160]}")
             return _error(exc)
+        _gw_log(f"对话：{model} ← 「{doc.label()}」")
 
         if raw.get("stream"):
             def sse() -> Iterator[bytes]:
