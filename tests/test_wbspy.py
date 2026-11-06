@@ -303,3 +303,48 @@ class TestAutomationScope(unittest.TestCase):
         with patch.object(automation, "WorkBuddyClient", return_value=client):
             summary = automation.run_once(buddy, log=lambda *_: None)
             self.assertNotIn("skip", summary)
+
+
+class TestChannelIsolation(unittest.TestCase):
+    """渠道隔离：TRAE 等第三方凭据绝不打 WorkBuddy 上游（防无效请求/凭据误用）。"""
+
+    def _docs(self):
+        return [
+            parse_auth({"account": {"uid": "b1", "nickname": "莲"},
+                        "auth": {"accessToken": "t1", "domain": "www.codebuddy.cn"}}),
+            parse_auth({"account": {"uid": "g1", "nickname": "国际"},
+                        "auth": {"accessToken": "t2", "domain": "www.workbuddy.ai"}}),
+            parse_auth({"account": {"uid": "tr1", "nickname": "TRAE 号"},
+                        "auth": {"accessToken": "t3", "domain": "api.trae.com.cn"}}),
+        ]
+
+    def test_healthy_excludes_third_party(self):
+        from wbspy.pool import AccountPool
+        p = AccountPool(self._docs())
+        keys = [d.uid for d in p.healthy()]
+        self.assertIn("b1", keys)
+        self.assertIn("g1", keys)                   # 国际版照样进路由
+        self.assertNotIn("tr1", keys)               # TRAE 不进 WorkBuddy 路由
+
+    def test_models_and_chat_skip_third_party(self):
+        from unittest.mock import patch, MagicMock
+        from wbspy.pool import AccountPool
+        models_called = []
+        def fake_client(doc):
+            m = MagicMock()
+            m.models.side_effect = lambda: (models_called.append(doc.uid), [{"id": "m1"}])[1]
+            return m
+        with patch("wbspy.pool.WorkBuddyClient", side_effect=fake_client):
+            p = AccountPool(self._docs())
+            p.models()
+        self.assertIn("b1", models_called)
+        self.assertIn("g1", models_called)          # 国际版照常进目录
+        self.assertNotIn("tr1", models_called)      # models 目录不对 TRAE 账号发请求
+
+    def test_public_guard_blocks_and_allows(self):
+        from wbspy.cli import _public_guard
+        _public_guard("127.0.0.1", "")               # 回环放行
+        _public_guard("0.0.0.0", "some-key")         # 有 key 放行
+        _public_guard("0.0.0.0", "", allow_insecure=True)
+        with self.assertRaises(SystemExit):
+            _public_guard("0.0.0.0", "")             # 公网无 key 拒绝

@@ -138,6 +138,7 @@ def _cmd_gateway(args) -> int:
     config = load_config()
     api_key = args.api_key or os.environ.get("WBSPY_API_KEY", "") \
         or config.get("api_key", "")
+    _public_guard(args.host, api_key, getattr(args, "allow_insecure", False))
     from .pool import AccountPool as Pool
     from .gateway import run_gateway
     print(f"网关启动：http://{args.host}:{args.port}/v1  （账号 {len(accounts)} 个）")
@@ -145,11 +146,25 @@ def _cmd_gateway(args) -> int:
     return 0
 
 
+def _public_guard(host: str, api_key: str, allow_insecure: bool = False) -> None:
+    """公网/局域网绑定且未配 api_key 时拒绝启动（防止账号池被人白嫖）。"""
+    if api_key or allow_insecure or host in ("127.0.0.1", "localhost", "::1"):
+        return
+    import sys as _sys
+    print("拒绝启动：监听地址不是本机回环且未设置 api_key —— "
+          "任何能连到这个端口的人都可以直接用你的账号池和聚合渠道额度。", file=_sys.stderr)
+    print("  二选一：", file=_sys.stderr)
+    print("    1. 加 --api-key <你的密钥>（调用方需带 Authorization: Bearer <密钥>）", file=_sys.stderr)
+    print("    2. 确认有其他访问控制（如反向代理鉴权）时加 --allow-insecure 强行启动", file=_sys.stderr)
+    raise SystemExit(2)
+
+
 def _cmd_web(args) -> int:
     """Web 界面 + 网关同进程。"""
     config = load_config()
     api_key = args.api_key or os.environ.get("WBSPY_API_KEY", "") \
         or config.get("api_key", "")
+    _public_guard(args.host, api_key, getattr(args, "allow_insecure", False))
     pool = AccountPool(load_accounts())
     from .gateway import create_app  # noqa: F401  确保依赖就绪
     from .webui import run_web
@@ -223,12 +238,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8178)
     p.add_argument("--api-key", default="")
+    p.add_argument("--allow-insecure", action="store_true",
+                   help="公网/局域网绑定且无 api_key 时强行启动（不推荐）")
     p.set_defaults(fn=_cmd_gateway)
 
     p = sub.add_parser("web", help="Web 交互界面 + 网关（同端口）")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8178)
     p.add_argument("--api-key", default="")
+    p.add_argument("--allow-insecure", action="store_true",
+                   help="公网/局域网绑定且无 api_key 时强行启动（不推荐）")
     p.set_defaults(fn=_cmd_web)
 
     p = sub.add_parser("switch", help="桌面客户端账号切换")

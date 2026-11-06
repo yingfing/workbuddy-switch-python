@@ -46,25 +46,29 @@ def load_keys() -> dict[str, dict[str, Any]]:
     return {}
 
 
+_KEY_LOCK = __import__("threading").Lock()
+
+
 def save_key(provider_id: str, api_key: str, extra: dict | None = None) -> None:
-    keys = load_keys()
-    entry: dict[str, Any] = {}
-    if api_key:
-        entry["api_key"] = api_key
-    if extra:
-        entry["extra"] = {k: str(v) for k, v in extra.items() if v}
-    entry["updated_at"] = int(time.time())
-    if not entry:
-        keys.pop(provider_id, None)
-    else:
-        keys[provider_id] = entry
-    KEYS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    KEYS_PATH.write_text(json.dumps(keys, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        import os
-        os.chmod(KEYS_PATH, 0o600)                # 凭据文件仅本用户可读
-    except OSError:
-        pass
+    with _KEY_LOCK:                               # Web 并发填 key 时防止读改写互踩
+        keys = load_keys()
+        entry: dict[str, Any] = {}
+        if api_key:
+            entry["api_key"] = api_key
+        if extra:
+            entry["extra"] = {k: str(v) for k, v in extra.items() if v}
+        entry["updated_at"] = int(time.time())
+        if not entry:
+            keys.pop(provider_id, None)
+        else:
+            keys[provider_id] = entry
+        KEYS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        KEYS_PATH.write_text(json.dumps(keys, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            import os
+            os.chmod(KEYS_PATH, 0o600)                # 凭据文件仅本用户可读
+        except OSError:
+            pass
 
 
 def remove_key(provider_id: str) -> bool:

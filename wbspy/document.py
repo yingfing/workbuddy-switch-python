@@ -143,6 +143,11 @@ class Document:
         return workbuddy_origin(self.domain)
 
     @property
+    def is_workbuddy(self) -> bool:
+        """是否 WorkBuddy 系凭据（国内/国际版）——只有它们能调 WorkBuddy 上游。"""
+        return self.channel_name.startswith("WorkBuddy")
+
+    @property
     def channel_name(self) -> str:
         """凭据所属渠道的友好名（按 domain 子串识别，与渠道注册表对齐）。"""
         d = (self.domain or "").lower()
