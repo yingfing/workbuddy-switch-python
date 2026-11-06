@@ -441,7 +441,7 @@ class TestGatewayModels(unittest.TestCase):
         from wbspy.gateway import create_app
         from wbspy.pool import AccountPool
         app = create_app(AccountPool([]), api_key="")
-        fake_pool = [{"id": "cn:fast-model", "name": "快速", "region": "cn"}]
+        fake_pool = [{"id": "workbuddy:fast-model", "name": "快速", "region": "cn"}]
         pool = AccountPool([])
         app = create_app(pool, api_key="")
         with patch("wbspy.gateway.aggregate.models", return_value=[]), \
@@ -449,7 +449,25 @@ class TestGatewayModels(unittest.TestCase):
             row = TestClient(app).get("/v1/models").json()["data"][0]
         self.assertEqual(row["name"], "快速")
         self.assertEqual(row["region"], "cn")
-        self.assertEqual(row["id"], "cn:fast-model")
+        self.assertEqual(row["id"], "workbuddy:fast-model")
+
+    def test_legacy_cn_prefix_still_routes(self):
+        """旧客户端配置的 cn:/global: 前缀继续按账号池路由（不断）。"""
+        from fastapi.testclient import TestClient
+        from wbspy.gateway import create_app
+        from wbspy.pool import AccountPool
+
+        seen: list[str] = []
+
+        class _P(AccountPool):
+            def chat_failover(self, raw, *_a, **_k):
+                seen.append(raw["model"])
+                raise RuntimeError("stop-here")      # 到池即停，只验证前缀剥除
+
+        c = TestClient(create_app(_P([]), api_key=""), raise_server_exceptions=False)
+        for mid in ("cn:auto", "global:auto", "workbuddy:auto", "auto"):
+            c.post("/v1/chat/completions", json={"model": mid, "messages": []})
+            self.assertEqual(seen[-1], "auto", mid)
 
 
 class TestGatewayKey(unittest.TestCase):

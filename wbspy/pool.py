@@ -148,12 +148,14 @@ class AccountPool:
                 raise             # 渠道拒绝重试过 / 上游 5xx 不换号
 
     def models(self) -> list[dict]:
-        """聚合全部账号的模型目录（去重）。"""
+        """聚合全部账号的模型目录（去重）。统一 ``workbuddy:`` 前缀——
+        客户端里一眼可辨；区域信息在 region 字段（路由时本就不分区域，
+        cn/global 同名模型自然合并）。"""
         seen: dict[str, dict] = {}
         for doc in self.healthy():
             try:
                 for row in self.clients[_key(doc)].models():
-                    key = f"{'global' if doc.region == 'global' else 'cn'}:{row['id']}"
+                    key = f"workbuddy:{row['id']}"
                     seen.setdefault(key, {**row, "id": key})
             except UpstreamError:
                 continue

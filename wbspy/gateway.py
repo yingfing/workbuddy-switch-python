@@ -2,9 +2,10 @@
 
 统一端点，三类模型同池路由：
 
-* ``cn:*`` / ``global:*``        — WorkBuddy 账号池（多账号轮换容错）
+* ``workbuddy:*``               — WorkBuddy 账号池（多账号轮换容错）
 * ``<provider>/<model>``         — 76 家聚合渠道（按 key 路由，OpenAI 兼容透传）
-* 纯模型名（无前缀）              — 兼容写法，等价 ``cn:<model>``
+* 纯模型名（无前缀）              — 兼容写法，等价 ``workbuddy:<model>``
+* 兼容旧 id：``cn:*`` / ``global:*`` 仍按账号池路由（旧客户端配置不断）
 
 端点：
 
@@ -237,12 +238,12 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         model = raw["model"]
 
         # ── 路由一：聚合渠道 <provider>/<model> ─────────────────────────────
-        if "/" in model and not model.startswith(("cn:", "global:")):
+        if "/" in model and not model.startswith(("workbuddy:", "cn:", "global:")):
             return _aggregate_chat(raw)
 
         # ── 路由二：WorkBuddy 账号池 ────────────────────────────────────────
-        # 纯模型名等价 cn:<model>；区域前缀剥掉后由池按各账号可用性调度
-        if model.split(":", 1)[0] in ("cn", "global") and len(model) > 2:
+        # 纯模型名等价 workbuddy:<model>；区域/命名前缀剥掉后由池按各账号可用性调度
+        if model.split(":", 1)[0] in ("workbuddy", "cn", "global") and ":" in model:
             raw = {**raw, "model": model.split(":", 1)[1]}
         raw, _trimmed = trim_context(raw)
 
@@ -280,9 +281,12 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         except ValueError:
             raise HTTPException(400, "请求须为 JSON 对象。")
         model = raw.get("model", "")
-        if isinstance(model, str) and model.startswith("global:"):
+        if isinstance(model, str) and model.split(":", 1)[0] == "global" and ":" in model:
             raise HTTPException(400, "unsupported_region",
                                 "向量模型目前仅国内版可用，不接受 global: 前缀。")
+        if isinstance(model, str) and model.split(":", 1)[0] in ("workbuddy", "cn") \
+                and ":" in model:
+            raw = {**raw, "model": model.split(":", 1)[1]}   # 剥命名前缀再路由
         inputs = raw.get("input", [])
         inputs = [inputs] if isinstance(inputs, str) else list(inputs)
         doc = pool.pick(model)
