@@ -253,3 +253,27 @@ def schedule(documents: list[Document],
         except Exception as exc:
             log(f"本轮异常：{exc}")
         time.sleep(60)                                    # 避免整点重入
+
+
+def daily_worker(log: Callable[[str], None], stop) -> None:  # pragma: no cover
+    """Web 端每日定时托管线程：到点现场加载账号库再跑（新增账号自动纳入）。
+
+    stop 为 threading.Event，关闭开关时 set 立即唤醒退出。
+    """
+    from .store import load_accounts
+    while not stop.is_set():
+        try:
+            cfg = (load_config().get("automation") or {})
+            hh, mm = str(cfg.get("daily_at") or "09:00").split(":")[:2]
+            wait = seconds_until(int(hh), int(mm))
+            log(f"每日定时托管：下一轮 {time.strftime('%m-%d %H:%M', time.localtime(time.time() + wait))}")
+            if stop.wait(max(1, wait)):
+                return
+            accounts = load_accounts()
+            if accounts:
+                run_all(accounts, log)
+            else:
+                log("账号库为空，本轮跳过。")
+        except Exception as exc:
+            log(f"本轮异常：{exc}")
+        stop.wait(60)                                     # 避免整点重入

@@ -181,7 +181,9 @@ a{color:var(--accent);text-decoration:none}
       <h2>积分自动化 <span class="tag">签到 · 猫猫旅行 · 成长任务（仅国内版）</span></h2>
       <div class="row" style="margin-bottom:12px">
         <button class="btn" id="autoRun" onclick="autoRun()">▶ 立即跑一轮</button>
+        <button class="btn ghost" id="autoDaily" onclick="autoToggle()">每日定时：关</button>
         <span class="pill" id="autoState"></span>
+        <span class="tag">开启后每天定点自动执行（config automation.daily_at，默认 09:00；服务重启自动恢复）</span>
       </div>
       <div class="log" id="autoLog">暂无日志。</div>
     </div>
@@ -416,10 +418,22 @@ async function autoRun() {
   if (!r.ok) alert(r.error);
   pollAuto();
 }
+async function autoToggle() {
+  const r = await api('/api/automation/toggle', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled: $('#autoDaily').textContent.includes('关')})
+  });
+  if (!r.ok) return alert(r.error);
+  pollAuto();
+}
 async function pollAuto() {
   const r = await api('/api/automation/status');
-  $('#autoState').textContent = r.data.running ? '运行中…' : '空闲';
+  $('#autoState').textContent = r.data.running ? '运行中…'
+    : (r.data.enabled ? `定时托管中（每天 ${r.data.daily_at}）` : '空闲');
   $('#autoRun').disabled = r.data.running;
+  $('#autoDaily').textContent = r.data.enabled
+    ? `每日定时：开（${r.data.daily_at}）` : '每日定时：关';
   if (r.data.log.length) $('#autoLog').textContent = r.data.log.join('\n');
   const hist = r.data.history || [];
   $('#autoHistEmpty').hidden = hist.length > 0;

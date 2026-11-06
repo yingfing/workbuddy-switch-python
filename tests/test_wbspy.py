@@ -410,3 +410,32 @@ class TestAutomationHistory(unittest.TestCase):
             self.assertEqual(hist[0]["results"][0]["uid"], "h1")
             self.assertTrue(hist[0]["log"])             # 日志行也入档
             self.assertIn("checkin", out["h1"])
+
+
+class TestAutomationToggle(unittest.TestCase):
+    """网页每日定时开关：状态持久化 + 线程启停。"""
+
+    def test_toggle_persists_and_starts_thread(self):
+        import tempfile, os
+        from pathlib import Path
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        from wbspy import store
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            with patch.object(store, "CONFIG_PATH", cfg_path), \
+                 patch("wbspy.webui.load_config", store.load_config), \
+                 patch("wbspy.webui.save_config", store.save_config), \
+                 patch("wbspy.webui.load_accounts", return_value=[]), \
+                 patch("wbspy.automation.load_config", store.load_config):
+                c = TestClient(create_web_app(AccountPool([])))
+                st = c.get("/api/automation/status").json()["data"]
+                self.assertFalse(st["enabled"])
+                r = c.post("/api/automation/toggle",
+                           json={"enabled": True}).json()["data"]
+                self.assertTrue(r["enabled"])
+                self.assertTrue(cfg_path.exists())
+                on_disk = json.loads(cfg_path.read_text())["automation"]["enabled"]
+                self.assertTrue(on_disk)                 # 重启后能恢复
