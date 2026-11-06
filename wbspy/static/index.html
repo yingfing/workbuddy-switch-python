@@ -362,14 +362,22 @@ async function loadAccounts() {
   $('#accCount').textContent = list.length + ' 个账号';
   $('#accEmpty').hidden = list.length > 0;
   $('#accTable').style.display = list.length ? '' : 'none';
-  $('#accTable tbody').innerHTML = list.map(a => `<tr>
+  const qid = u => 'quota-' + String(u).replace(/[^a-zA-Z0-9-]/g, '');
+  const row = a => `<tr>
     <td><span class="dot ${a.api_ready ? 'g' : (a.protected ? 'y' : 'r')}"></span>${
       a.api_ready ? '可用' : (a.protected ? '加密凭据' : '已过期')}</td>
     <td>${a.label}</td><td>${a.channel || a.domain || '—'}</td><td>${a.region === 'global' ? '国际版' : '国内版'}</td>
     <td>${a.api_ready ? '✓' : '—'}</td>
-    <td id="quota-${a.uid.replace(/[^a-zA-Z0-9-]/g, '')}">—</td>
+    <td id="${qid(a.uid)}">—</td>
     <td><button class="btn sm bad" onclick="rmAccount('${a.uid}','${a.domain || ''}')">移除</button></td>
-  </tr>`).join('');
+  </tr>`;
+  // 按渠道分组：同渠道账号排在一起，组间插渠道标题行
+  const groups = {};
+  for (const a of list) (groups[a.channel || a.domain || '其他'] = groups[a.channel || a.domain || '其他'] || []).push(a);
+  $('#accTable tbody').innerHTML = Object.entries(groups).map(([ch, accs]) =>
+    `<tr><td colspan="7" style="background:var(--panel-2,#f6f6f6);font-weight:600;font-size:12px;padding:5px 8px">
+       ${ch} <span class="tag">${accs.length} 个</span></td></tr>`
+    + accs.map(row).join('')).join('');
 }
 async function loadCredits(btn) {
   const old = btn.textContent; btn.textContent = '查询中…'; btn.disabled = true;
