@@ -48,8 +48,8 @@ jobs:
             name: bin-linux
           - os: macos-14          # Apple Silicon
             name: bin-macos-arm64
-          - os: macos-13          # Intel
-            name: bin-macos-x86_64
+          # macos-13（Intel）已移除：免费层 Intel runner 排队 24h 超时，
+          # 连带整个 Release 被取消。Intel Mac 用户走 pip 安装。
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -160,7 +160,7 @@ jobs:
           | Windows | \`wbspy.exe\` | 下载后直接命令行运行：\`wbspy.exe web\`（无需安装 Python） |
           | Linux | \`wbspy-linux-x86_64.AppImage\` | \`chmod +x wbspy-linux-x86_64.AppImage && ./wbspy-linux-x86_64.AppImage web\`（需 glibc 2.35+） |
           | macOS (Apple Silicon) | \`wbspy-macos-arm64\` | \`chmod +x wbspy-macos-arm64 && ./wbspy-macos-arm64 web\` |
-          | macOS (Intel) | \`wbspy-macos-x86_64\` | \`chmod +x wbspy-macos-x86_64 && ./wbspy-macos-x86_64 web\` |
+          | macOS (Intel) | 无预编译包 | \`pip install . && wbspy web\`（需 Python 3.9+） |
           | pip（全平台） | \`wbspy-${TAG#v}-py3-none-any.whl\` 或源码 | \`pip install . && wbspy web\` |
           | Docker | 见 README | \`docker compose up -d\` |
 

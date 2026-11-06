@@ -20,7 +20,7 @@
 |---|---|---|
 | **Windows** | 下载 exe | 到 [Releases](https://github.com/yingfing/workbuddy-switch-python/releases/latest) 下载 `wbspy.exe`，直接运行 `wbspy.exe web` |
 | **Linux** | AppImage | `chmod +x wbspy-linux-x86_64.AppImage && ./wbspy-linux-x86_64.AppImage web` |
-| **macOS** | 单文件二进制 | `chmod +x wbspy-macos-arm64 && ./wbspy-macos-arm64 web`（Intel 选 `x86_64`） |
+| **macOS** | 单文件二进制 | `chmod +x wbspy-macos-arm64 && ./wbspy-macos-arm64 web`（Apple Silicon；Intel Mac 请用 pip 安装） |
 | **pip（全平台）** | 安装包 | `pip install . && wbspy web` |
 | **源码（全平台）** | 一次克隆到处运行 | `git clone https://github.com/yingfing/workbuddy-switch-python.git && cd workbuddy-switch-python && pip install -e . && wbspy web` |
 | **Docker** | 容器 | `docker compose up -d` |
