@@ -181,9 +181,9 @@ a{color:var(--accent);text-decoration:none}
       <h2>积分自动化 <span class="tag">签到 · 猫猫旅行 · 成长任务（仅国内版）</span></h2>
       <div class="row" style="margin-bottom:12px">
         <button class="btn" id="autoRun" onclick="autoRun()">▶ 立即跑一轮</button>
-        <button class="btn ghost" id="autoDaily" onclick="autoToggle()">每日定时：关</button>
+        <button class="btn ghost" id="autoPoll" onclick="autoToggle()">自动签到：关</button>
         <span class="pill" id="autoState"></span>
-        <span class="tag">开启后每天定点自动执行（config automation.daily_at，默认 09:00；服务重启自动恢复）</span>
+        <span class="tag">开启后每 2 小时查询签到接口，未签自动补签；每天首轮顺带跑一次全量托管（服务重启自动恢复）</span>
       </div>
       <div class="log" id="autoLog">暂无日志。</div>
     </div>
@@ -422,18 +422,18 @@ async function autoToggle() {
   const r = await api('/api/automation/toggle', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({enabled: $('#autoDaily').textContent.includes('关')})
+    body: JSON.stringify({enabled: $('#autoPoll').textContent.includes('关')})
   });
   if (!r.ok) return alert(r.error);
   pollAuto();
 }
 async function pollAuto() {
   const r = await api('/api/automation/status');
+  const pollH = Math.round((r.data.poll_minutes || 120) / 60);
   $('#autoState').textContent = r.data.running ? '运行中…'
-    : (r.data.enabled ? `定时托管中（每天 ${r.data.daily_at}）` : '空闲');
+    : (r.data.enabled ? `轮询托管中（每 ${pollH} 小时查签到）` : '空闲');
   $('#autoRun').disabled = r.data.running;
-  $('#autoDaily').textContent = r.data.enabled
-    ? `每日定时：开（${r.data.daily_at}）` : '每日定时：关';
+  $('#autoPoll').textContent = r.data.enabled ? `自动签到：开（每 ${pollH} 小时轮询）` : '自动签到：关';
   if (r.data.log.length) $('#autoLog').textContent = r.data.log.join('\n');
   const hist = r.data.history || [];
   $('#autoHistEmpty').hidden = hist.length > 0;

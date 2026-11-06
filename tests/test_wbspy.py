@@ -412,8 +412,81 @@ class TestAutomationHistory(unittest.TestCase):
             self.assertIn("checkin", out["h1"])
 
 
+class TestCheckinPoller(unittest.TestCase):
+    """2 小时轮询签到：查签到接口→未签补签；每天首轮全量托管。"""
+
+    def _doc(self, uid="p1", domain="www.codebuddy.cn", api_ready=True):
+        auth = {"domain": domain}
+        if api_ready:
+            auth["accessToken"] = "t"
+        else:                                        # 加密 token：无明文，不可直接调 API
+            auth["accessToken"] = {"$wbEncrypted": 1, "envelope": "x"}
+        return parse_auth({"account": {"uid": uid, "nickname": "轮询号"}, "auth": auth})
+
+    def test_sweep_checks_in_only_when_needed(self):
+        """已签不重复签；未签才补签。"""
+        from unittest.mock import patch, MagicMock
+        from wbspy import automation
+        doc = self._doc()
+        with patch.object(automation, "WorkBuddyClient") as MC:
+            client = MagicMock()
+            client.checkin_status.return_value = {"checked_in": True}
+            MC.return_value = client
+            out = automation.checkin_sweep([doc], log=lambda *_: None)
+            self.assertEqual(out, {})
+            client.checkin.assert_not_called()           # 已签：不打扰
+
+            client.checkin_status.return_value = {"checked_in": False}
+            client.checkin.return_value = {"credit": 100}
+            out = automation.checkin_sweep([doc], log=lambda *_: None)
+            self.assertEqual(out.get(doc.uid), "+100 积分")
+            client.checkin.assert_called_once()          # 未签：补签
+
+    def test_sweep_skips_other_channels_and_offline(self):
+        """非 WorkBuddy 渠道、无明文 token 的账号完全不发请求。"""
+        from unittest.mock import patch, MagicMock
+        from wbspy import automation
+        docs = [self._doc("p2", domain="api.trae.ai"), self._doc("p3", api_ready=False)]
+        with patch.object(automation, "WorkBuddyClient") as MC:
+            out = automation.checkin_sweep(docs, log=lambda *_: None)
+            self.assertEqual(out, {})
+            MC.assert_not_called()
+
+    def test_sweep_error_does_not_break_others(self):
+        """单账号查询失败不挡其他账号补签。"""
+        from unittest.mock import patch, MagicMock
+        from wbspy import automation
+        d1, d2 = self._doc("p4"), self._doc("p5")
+        with patch.object(automation, "WorkBuddyClient") as MC:
+            c1, c2 = MagicMock(), MagicMock()
+            c1.checkin_status.side_effect = RuntimeError("网络炸了")
+            c2.checkin_status.return_value = {"checked_in": False}
+            c2.checkin.return_value = {"credit": 5}
+            MC.side_effect = lambda d: c1 if d.uid == "p4" else c2
+            logs = []
+            out = automation.checkin_sweep([d1, d2], log=logs.append)
+            self.assertIn("失败", out["p4"])
+            self.assertEqual(out["p5"], "+5 积分")
+
+    def test_poll_round_full_once_per_day(self):
+        """每天首轮全量托管，同日其余轮只做签到兜底。"""
+        from unittest.mock import patch
+        from wbspy import automation
+        docs = [self._doc("p6")]
+        calls = []
+        with patch.object(automation, "run_all", lambda a, l: calls.append("full")), \
+             patch.object(automation, "checkin_sweep",
+                          lambda a, l: calls.append("sweep")):
+            day = automation._poll_round(docs, None, log=lambda *_: None)
+            self.assertEqual(calls, ["full"])            # 首轮：全量
+            self.assertEqual(day, automation.time.strftime("%Y-%m-%d"))
+            day2 = automation._poll_round(docs, day, log=lambda *_: None)
+            self.assertEqual(calls, ["full", "sweep"])   # 同日第二轮：只 sweep
+            self.assertEqual(day2, day)
+
+
 class TestAutomationToggle(unittest.TestCase):
-    """网页每日定时开关：状态持久化 + 线程启停。"""
+    """网页自动签到轮询开关：状态持久化 + 线程启停。"""
 
     def test_toggle_persists_and_starts_thread(self):
         import tempfile, os

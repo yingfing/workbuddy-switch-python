@@ -31,7 +31,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .automation import run_all, daily_worker
+from .automation import run_all, poll_worker, POLL_INTERVAL
 from .channels import CHANNELS, get_channel, methods_of
 from .document import parse_auth
 from .gateway import create_app
@@ -173,21 +173,21 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     app.state.auto_thread = None
     app.state.auto_stop = threading.Event()
 
-    def _start_daily() -> None:
-        """按 config.automation.enabled 启动每日定时托管线程。"""
+    def _log(line: str) -> None:
+        app.state.auto_log.append(f"{time.strftime('%H:%M:%S')}  {line}")
+        del app.state.auto_log[:-200]
+
+    def _start_poll() -> None:
+        """按 config.automation.enabled 启动自动签到轮询线程。"""
         if app.state.auto_thread and app.state.auto_thread.is_alive():
             return
         app.state.auto_stop = threading.Event()
         app.state.auto_thread = threading.Thread(
-            target=daily_worker, args=(_log, app.state.auto_stop), daemon=True)
+            target=poll_worker, args=(_log, app.state.auto_stop), daemon=True)
         app.state.auto_thread.start()
 
     if (load_config().get("automation") or {}).get("enabled"):
-        _start_daily()                                   # 服务重启后恢复之前的开关状态
-
-    def _log(line: str) -> None:
-        app.state.auto_log.append(f"{time.strftime('%H:%M:%S')}  {line}")
-        del app.state.auto_log[:-200]
+        _start_poll()                                    # 服务重启后恢复之前的开关状态
 
     @app.post("/api/automation/run")
     def automation_run():
@@ -212,26 +212,24 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
 
     @app.post("/api/automation/toggle")
     async def automation_toggle(request: Request):
-        """网页每日定时签到开关（状态写 config，服务重启自动恢复）。"""
+        """网页自动签到轮询开关（状态写 config，服务重启自动恢复）。"""
         body = await request.json()
         enabled = bool(body.get("enabled"))
         cfg = load_config()
         cfg.setdefault("automation", {})["enabled"] = enabled
         save_config(cfg)
         if enabled:
-            _start_daily()
-            _log("每日定时托管：已开启（每天 " +
-                 str((cfg.get("automation") or {}).get("daily_at") or "09:00") + " 自动执行）")
+            _start_poll()
+            _log(f"自动签到轮询：已开启（每 {POLL_INTERVAL // 3600} 小时查一次签到接口，未签自动补签）")
         else:
             app.state.auto_stop.set()
             app.state.auto_thread = None
-            _log("每日定时托管：已关闭")
+            _log("自动签到轮询：已关闭")
         return _ok({"enabled": enabled})
 
     @app.get("/api/automation/status")
     def automation_status():
         enabled = bool((load_config().get("automation") or {}).get("enabled"))
-        daily_at = str((load_config().get("automation") or {}).get("daily_at") or "09:00")
         history: list = []
         try:
             from .automation import HISTORY_PATH
@@ -252,7 +250,7 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             history = []
         return _ok({"running": app.state.auto_running,
                     "log": app.state.auto_log[-60:], "history": history,
-                    "enabled": enabled, "daily_at": daily_at})
+                    "enabled": enabled, "poll_minutes": POLL_INTERVAL // 60})
 
     # -- 桌面切换 ---------------------------------------------------------------
 

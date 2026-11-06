@@ -11,8 +11,9 @@
 7. 补签卡：heatmap 昨日断签且卡有余 → makeup-cards/use
 
 调度：`run_once` 单账号一轮（每项独立重试）；`loop` 固定间隔；`schedule`
-每日定点（读 config.json automation.daily_at）；每轮结果可推送 webhook
-（automation.notify_url，POST JSON）。
+每日定点（读 config.json automation.daily_at）；Web 端用 `poll_worker`——
+每 2 小时查一次签到接口，未签且开关开则补签，每天首轮顺带跑一次全量托管；
+每轮结果可推送 webhook（automation.notify_url，POST JSON）。
 """
 
 from __future__ import annotations
@@ -255,25 +256,73 @@ def schedule(documents: list[Document],
         time.sleep(60)                                    # 避免整点重入
 
 
-def daily_worker(log: Callable[[str], None], stop) -> None:  # pragma: no cover
-    """Web 端每日定时托管线程：到点现场加载账号库再跑（新增账号自动纳入）。
+# -- Web 端签到轮询 ---------------------------------------------------------------
 
-    stop 为 threading.Event，关闭开关时 set 立即唤醒退出。
+POLL_INTERVAL = 2 * 3600                               # 每 2 小时查一次签到接口
+
+
+def checkin_sweep(documents: list[Document],
+                  log: Callable[[str], None] = print) -> dict[str, str]:
+    """签到兜底：只查签到接口，未签的补签，已签的不打扰。
+
+    返回 uid -> 结果描述（仅含发生补签或出错的账号）。
+    """
+    out: dict[str, str] = {}
+    acted = False
+    for doc in documents:
+        if "checkin" not in doc.capabilities or not doc.api_ready:
+            continue
+        try:
+            client = WorkBuddyClient(doc)
+            if client.checkin_status().get("checked_in"):
+                continue
+            r = client.checkin()
+            got = f"+{r.get('credit')} 积分" if not r.get("already") else "补签成功"
+            out[doc.uid] = got
+            log(f"· {doc.label()}：轮询补签 {got}")
+            acted = True
+        except Exception as exc:
+            out[doc.uid] = f"失败：{exc}"
+            log(f"· {doc.label()}：签到查询失败 - {exc}")
+            acted = True
+    if not acted:
+        log("轮询签到：全部账号今日已签，无需补签。")
+    return out
+
+
+def _poll_round(accounts: list[Document], last_full_day: str | None,
+                log: Callable[[str], None] = print) -> str | None:
+    """轮询一轮：每天首轮跑全量托管（幂等），其余轮只做签到兜底。
+
+    返回新的 last_full_day（全量托管的执行日期）。
+    """
+    today = time.strftime("%Y-%m-%d")
+    if last_full_day != today:
+        log(f"今日首轮：全量托管（{today}）——")
+        run_all(accounts, log)
+        return today
+    checkin_sweep(accounts, log)
+    return last_full_day
+
+
+def poll_worker(log: Callable[[str], None], stop) -> None:  # pragma: no cover
+    """Web 端自动签到轮询线程：每 2 小时查一次签到接口，未签则补签；
+    每天首轮顺带跑一次全量托管（任务/抽奖/旅行等）。
+
+    到点现场加载账号库（新增账号自动纳入）。stop 为 threading.Event，
+    关闭开关时 set 立即唤醒退出。
     """
     from .store import load_accounts
+    last_full_day: str | None = None
+    log("自动签到轮询：已启动，每 2 小时查一次签到接口。")
     while not stop.is_set():
         try:
-            cfg = (load_config().get("automation") or {})
-            hh, mm = str(cfg.get("daily_at") or "09:00").split(":")[:2]
-            wait = seconds_until(int(hh), int(mm))
-            log(f"每日定时托管：下一轮 {time.strftime('%m-%d %H:%M', time.localtime(time.time() + wait))}")
-            if stop.wait(max(1, wait)):
-                return
             accounts = load_accounts()
             if accounts:
-                run_all(accounts, log)
+                last_full_day = _poll_round(accounts, last_full_day, log)
             else:
-                log("账号库为空，本轮跳过。")
+                log("轮询：账号库为空，本轮跳过。")
         except Exception as exc:
-            log(f"本轮异常：{exc}")
-        stop.wait(60)                                     # 避免整点重入
+            log(f"轮询异常：{exc}")
+        if stop.wait(POLL_INTERVAL):
+            return
