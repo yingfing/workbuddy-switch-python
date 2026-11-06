@@ -143,19 +143,56 @@ def _resolve_api_key(explicit: str, config: dict, allow_insecure: bool = False) 
             or config.get("api_key", "") or DEFAULT_API_KEY)
 
 
+def _effective_port(explicit: int | None, config: dict) -> int:
+    """服务端口解析：命令行 --port → config web.port（网页设置卡可改）→ 8178。"""
+    if explicit:
+        return explicit
+    try:
+        return int((config.get("web") or {}).get("port") or 8178)
+    except (TypeError, ValueError):
+        return 8178
+
+
+def _ensure_port_free(port: int) -> None:
+    """启动前试绑目标端口：被占用/无权限时打印中文指引后退出（exit 1）。
+
+    不靠 uvicorn 的英文报错裸退——端口冲突是最常见的启动失败，值得一步到位。
+    """
+    import socket
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("0.0.0.0", port))
+    except OSError as exc:
+        import sys as _sys
+        reason = ("需要管理员权限（<1024 是特权端口）" if isinstance(exc, PermissionError)
+                  else "已被其他程序占用")
+        print(f"启动失败：端口 {port} {reason}。", file=_sys.stderr)
+        print("  可以：", file=_sys.stderr)
+        print(f"    1. 查占用者：ss -tlnp | grep :{port}", file=_sys.stderr)
+        print("    2. 临时换端口：wbspy web --port <其他端口>", file=_sys.stderr)
+        print('    3. 永久改端口：网页「网关」设置卡里改（重启生效），'
+              '或编辑 ~/.wbspy/config.json 加 "web": {"port": 8178}', file=_sys.stderr)
+        raise SystemExit(1)
+    finally:
+        probe.close()
+
+
 def _cmd_gateway(args) -> int:
     accounts = load_accounts()
     if not accounts:
         print("账号库为空，先 wbspy login。")
         return 1
     config = load_config()
+    port = _effective_port(getattr(args, "port", None), config)
     api_key = _resolve_api_key(args.api_key, config,
                                getattr(args, "allow_insecure", False))
     _public_guard(args.host, api_key, getattr(args, "allow_insecure", False))
+    _ensure_port_free(port)
     from .pool import AccountPool as Pool
     from .gateway import run_gateway
-    print(f"网关启动：http://{args.host}:{args.port}/v1  （账号 {len(accounts)} 个）")
-    run_gateway(Pool(accounts), host=args.host, port=args.port, api_key=api_key)
+    print(f"网关启动：http://{args.host}:{port}/v1  （账号 {len(accounts)} 个）")
+    run_gateway(Pool(accounts), host=args.host, port=port, api_key=api_key)
     return 0
 
 
@@ -175,16 +212,20 @@ def _public_guard(host: str, api_key: str, allow_insecure: bool = False) -> None
 def _cmd_web(args) -> int:
     """Web 界面 + 网关同进程。"""
     config = load_config()
+    port = _effective_port(getattr(args, "port", None), config)
     api_key = _resolve_api_key(args.api_key, config,
                                getattr(args, "allow_insecure", False))
     _public_guard(args.host, api_key, getattr(args, "allow_insecure", False))
+    _ensure_port_free(port)
     pool = AccountPool(load_accounts())
     from .gateway import create_app  # noqa: F401  确保依赖就绪
     from .webui import run_web
-    print(f"Web 界面：http://{args.host}:{args.port}/   （界面 + 网关同端口）")
+    src = ("命令行" if getattr(args, "port", None)
+           else ("config web.port" if (config.get("web") or {}).get("port") else "默认"))
+    print(f"Web 界面：http://{args.host}:{port}/   （界面 + 网关同端口，端口来源：{src}）")
     if not pool.documents:
         print("提示：账号库为空，先在网页「登录」页添加账号。")
-    run_web(pool, host=args.host, port=args.port, api_key=api_key)
+    run_web(pool, host=args.host, port=port, api_key=api_key)
     return 0
 
 
@@ -249,7 +290,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("gateway", help="启动本机 OpenAI 兼容网关")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8178)
+    p.add_argument("--port", type=int, default=None,
+                   help="缺省读 config web.port，再缺省 8178")
     p.add_argument("--api-key", default="")
     p.add_argument("--allow-insecure", action="store_true",
                    help="公网/局域网绑定且无 api_key 时强行启动（不推荐）")
@@ -257,7 +299,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("web", help="Web 交互界面 + 网关（同端口）")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8178)
+    p.add_argument("--port", type=int, default=None,
+                   help="缺省读 config web.port（网页可改），再缺省 8178")
     p.add_argument("--api-key", default="")
     p.add_argument("--allow-insecure", action="store_true",
                    help="公网/局域网绑定且无 api_key 时强行启动（不推荐）")

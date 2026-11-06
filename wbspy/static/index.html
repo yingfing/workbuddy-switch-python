@@ -351,6 +351,14 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         <button class="btn" onclick="gwKeySave()">🔑 保存密钥</button>
       </div>
       <span class="tag">客户端调用 /v1 需带密钥（Authorization: Bearer &lt;key&gt;）；内置默认 <code>workbuddy</code>，保存立即生效无需重启</span>
+      <div class="kv"><span>对外网关</span><span><button class="btn sm" id="gwSwitch" onclick="gwSwitchToggle()">…</button></span></div>
+      <span class="tag">关闭后 /v1 一律返回 404（客户端无法调用），管理界面不受影响；立即生效无需重启</span>
+      <div class="kv"><span>服务端口</span><span id="gwPortNow">—</span></div>
+      <div class="row" style="margin-top:6px">
+        <input id="gwPortInput" placeholder="新端口（1-65535，重启后生效）" style="flex:1">
+        <button class="btn" onclick="gwPortSave()">🔌 保存端口</button>
+      </div>
+      <span class="tag">保存前自动试绑：端口被占用会拒绝保存；保存后按提示重启服务即切换到新端口</span>
       <div class="kv"><span>可用账号</span><span id="gwHealthy">—</span></div>
     </div>
     <div class="card">
@@ -865,6 +873,13 @@ async function loadGateway() {
   $('#gwUrl').textContent = location.origin + '/v1';
   const k = await api('/api/settings/gateway-key');
   $('#gwKey').textContent = k.data.is_default ? `${k.data.default}（内置默认）` : k.data.key;
+  const gs = await api('/api/settings/gateway');
+  gwState.enabled = !!gs.data.enabled;
+  gwState.port = gs.data.port || '';
+  $('#gwPortNow').textContent = gs.data.current_port
+    ? `${gs.data.current_port}（当前监听）` + (gwState.port && +gwState.port !== gs.data.current_port ? ` → 待重启切到 ${gwState.port}` : '')
+    : '—';
+  paintGwSwitch();
   const m = await api('/api/models');
   const list = m.data || [];
   $('#modelEmpty').hidden = list.length > 0;
@@ -887,6 +902,47 @@ async function gwKeySave() {
   });
   if (!r.ok) return alert(r.error);
   $('#gwKeyInput').value = '';
+  gwLoad();
+}
+
+let gwState = {enabled: true, port: ''};
+
+function paintGwSwitch() {
+  const b = $('#gwSwitch');
+  b.textContent = gwState.enabled ? '🟢 开启中 · 点击关闭' : '⛔ 已关闭 · 点击开启';
+  b.classList.toggle('ghost', gwState.enabled);
+}
+
+async function gwSwitchToggle() {
+  const r = await api('/api/settings/gateway', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled: !gwState.enabled})
+  });
+  if (!r.ok) return alert(r.error);
+  gwState.enabled = !!r.data.enabled;
+  paintGwSwitch();
+}
+
+async function gwPortSave() {
+  const v = $('#gwPortInput').value.trim();
+  if (!v) return;
+  const r = await api('/api/settings/gateway', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({port: v})
+  });
+  if (!r.ok) return alert(r.error);
+  $('#gwPortInput').value = '';
+  if (r.data.restart_required) {
+    if (confirm(`端口已保存为 ${r.data.port}，重启服务后生效。现在就重启吗？`)) {
+      await api('/api/system/restart', {method: 'POST'});
+      setTimeout(() => {
+        location.href = location.origin.replace(/:\d+$/, ':' + r.data.port) + '/';
+      }, 4000);
+      return;
+    }
+  }
   gwLoad();
 }
 

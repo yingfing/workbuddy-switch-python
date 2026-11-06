@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from . import aggregate, convert
 from .context_budget import trim as trim_context
 from .pool import AccountPool
+from .store import load_config
 from .usage import LEDGER, estimate_tokens
 from .upstream import EMBEDDING_MODELS, UpstreamError
 
@@ -81,6 +82,10 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     app.state.model_cache: list[dict] = []
     app.state.model_cached_at = 0.0
     app.state.gw_key = api_key                    # 网页设置端点热更新直接改这里
+    # 对外网关开关（config gateway.enabled，网页端点热更新直接改这里）：
+    # 关闭后 /v1/* 一律 404，/api/* 管理界面与 /healthz 不受影响
+    app.state.gw_enabled = bool(
+        (load_config().get("gateway") or {}).get("enabled", True))
 
     # 统一鉴权中间件：只保护 /v1/*（对外 OpenAI 服务）；/api/* 是本机管理
     # 界面，不被网关密钥锁死（公网防护由 _public_guard / 反向代理负责）。
@@ -88,6 +93,10 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     @app.middleware("http")
     async def auth_middleware(request, call_next):
         path = request.url.path
+        if not app.state.gw_enabled and path.startswith("/v1"):
+            return JSONResponse(status_code=404,
+                                content={"error": {"message": "gateway is disabled",
+                                                   "type": "gateway_disabled"}})
         key = app.state.gw_key
         if key and path.startswith("/v1"):
             presented = request.headers.get("authorization", "") or \

@@ -581,6 +581,141 @@ class TestGatewayKey(unittest.TestCase):
                                     json={"api_key": "ab"}).status_code, 400)
 
 
+class TestGatewayToggle(unittest.TestCase):
+    """网关开关（gateway.enabled 热生效）+ 服务端口（试绑校验、config 落盘）。"""
+
+    def _client(self, cfg_path):
+        """起一个 config 重定向到临时目录的 web 测试客户端。"""
+        import json as _json
+        from pathlib import Path
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.webui import create_web_app
+        from wbspy.pool import AccountPool
+        from wbspy import store
+        ctx = (patch.object(store, "CONFIG_PATH", Path(cfg_path)),
+               patch("wbspy.webui.load_config", store.load_config),
+               patch("wbspy.webui.save_config", store.save_config),
+               patch("wbspy.webui.load_accounts", return_value=[]),
+               patch("wbspy.gateway.load_config", store.load_config))
+        for p in ctx:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in ctx])
+        app = create_web_app(AccountPool([]), api_key="", port=8178)
+        return _json, TestClient(app)
+
+    def test_default_on_and_toggle_hot(self):
+        """默认开启；网页关闭 → /v1 立即 404；再开 → 恢复；config 落盘。"""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            _, c = self._client(cfg_path)
+            self.assertEqual(c.get("/v1/models").status_code, 200)             # 默认开
+            r = c.post("/api/settings/gateway",
+                       json={"enabled": False}).json()["data"]
+            self.assertFalse(r["enabled"])
+            self.assertEqual(c.get("/v1/models").status_code, 404)             # 热生效
+            self.assertEqual(c.get("/healthz").status_code, 200)               # 本机排障不受影响
+            self.assertEqual(c.get("/api/pool").status_code, 200)              # 管理界面不受影响
+            self.assertEqual(c.get("/v1/models").json()["error"]["type"],
+                             "gateway_disabled")
+            import json as _json
+            self.assertFalse(_json.loads(cfg_path.read_text())["gateway"]["enabled"])
+            r = c.post("/api/settings/gateway", json={"enabled": True}).json()["data"]
+            self.assertTrue(r["enabled"])
+            self.assertEqual(c.get("/v1/models").status_code, 200)
+
+    def test_start_disabled_by_config(self):
+        """config gateway.enabled=false 时启动，网关直接处于关闭态。"""
+        import tempfile
+        import json as _json
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            cfg_path.write_text(_json.dumps({"gateway": {"enabled": False}}))
+            _, c = self._client(cfg_path)
+            self.assertEqual(c.get("/v1/models").status_code, 404)
+            self.assertEqual(c.get("/api/pool").status_code, 200)
+
+    def test_port_save_validate_and_persist(self):
+        """端口：非法值 400；空闲端口落盘 web.port + restart_required；同端口免重启。"""
+        import socket
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            _, c = self._client(cfg_path)
+            self.assertEqual(c.post("/api/settings/gateway",
+                                    json={"port": "0"}).status_code, 400)
+            self.assertEqual(c.post("/api/settings/gateway",
+                                    json={"port": "99999"}).status_code, 400)
+            self.assertEqual(c.post("/api/settings/gateway",
+                                    json={"port": "abc"}).status_code, 400)
+            # 找一个系统空闲端口试保存
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", 0))
+            free = probe.getsockname()[1]
+            probe.close()
+            r = c.post("/api/settings/gateway",
+                       json={"port": str(free)}).json()["data"]
+            self.assertTrue(r["restart_required"])
+            self.assertEqual(r["port"], free)
+            import json as _json
+            self.assertEqual(_json.loads(cfg_path.read_text())["web"]["port"], free)
+            # 与当前监听端口相同：不要求重启
+            r = c.post("/api/settings/gateway",
+                       json={"port": "8178"}).json()["data"]
+            self.assertFalse(r["restart_required"])
+
+    def test_port_busy_rejected(self):
+        """保存被真实占用的端口 → 400，且不落盘。"""
+        import socket
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            _, c = self._client(cfg_path)
+            blocker = socket.socket()
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            blocker.bind(("127.0.0.1", 0))
+            busy = blocker.getsockname()[1]
+            blocker.listen(1)
+            try:
+                self.assertEqual(c.post("/api/settings/gateway",
+                                        json={"port": str(busy)}).status_code, 400)
+            finally:
+                blocker.close()
+            import json as _json
+            saved = _json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+            self.assertNotIn("web", saved)         # 占用端口拒绝落盘
+
+
+class TestRestartArgv(unittest.TestCase):
+    """重启 argv 重建：--port 用 config web.port 覆盖（网页改端口重启即生效）。"""
+
+    def test_rebuild_replaces_port_keeps_rest(self):
+        from wbspy.webui import rebuild_restart_argv
+        argv = ["web", "--host", "0.0.0.0", "--port", "8080", "--allow-insecure"]
+        out = rebuild_restart_argv(argv, 8080, {"web": {"port": 9090}})
+        self.assertEqual(out, ["web", "--host", "0.0.0.0", "--allow-insecure",
+                               "--port", "9090"])
+        # config 未配端口 → 保留当前端口
+        out = rebuild_restart_argv(argv, 8080, {})
+        self.assertEqual(out, ["web", "--host", "0.0.0.0", "--allow-insecure",
+                               "--port", "8080"])
+        # --port= 形式也能替换
+        out = rebuild_restart_argv(["web", "--port=8080"], 8080,
+                                   {"web": {"port": 9090}})
+        self.assertEqual(out, ["web", "--port", "9090"])
+
+    def test_effective_port_resolution(self):
+        from wbspy.cli import _effective_port
+        self.assertEqual(_effective_port(9999, {}), 9999)                  # 显式优先
+        self.assertEqual(_effective_port(None, {"web": {"port": 7777}}), 7777)
+        self.assertEqual(_effective_port(None, {}), 8178)                  # 默认
+        self.assertEqual(_effective_port(None, {"web": {"port": "xx"}}), 8178)
     def test_config_subcommand_roundtrip(self):
         """wbspy config 子命令：set 类型推断/密钥键强制字符串/get/unset。"""
         import tempfile

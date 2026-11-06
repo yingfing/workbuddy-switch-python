@@ -57,8 +57,52 @@ def _err(message: str, status: int = 400) -> JSONResponse:
     return JSONResponse(status_code=status, content={"ok": False, "error": str(message)})
 
 
-def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
+def rebuild_restart_argv(argv: list[str], current_port: int | None,
+                         config: dict) -> list[str]:
+    """重建重启命令行参数：把 --port 替换为 config web.port（缺省=当前端口）。
+
+    网页改端口后点重启即生效——即使 systemd unit 里写死了 --port，
+    重启时会用 config 里最近保存的值覆盖它（网页是最近一次的用户意图）。
+    其余参数（--host、--allow-insecure 等）原样保留。
+    """
+    try:
+        new_port = int((config.get("web") or {}).get("port") or current_port or 0)
+    except (TypeError, ValueError):
+        new_port = current_port or 0
+    out: list[str] = []
+    skip = False
+    for a in argv:
+        if skip:                                 # 旧 "--port <值>" 的值
+            skip = False
+            continue
+        if a == "--port":
+            skip = True
+            continue
+        if a.startswith("--port="):
+            continue
+        out.append(a)
+    if new_port:
+        out += ["--port", str(new_port)]
+    return out
+
+
+def port_bind_error(port: int) -> str | None:
+    """试绑 0.0.0.0:port，可绑返回 None，否则返回人话错误信息。"""
+    import socket
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("0.0.0.0", port))
+        return None
+    except PermissionError:
+        return f"端口 {port} 是特权端口（<1024），需要管理员权限"
+    except OSError:
+        return f"端口 {port} 已被其他程序占用"
+
+
+def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None) -> FastAPI:
     app = create_app(pool, api_key=api_key)     # 网关路由（/v1/*、/healthz）
+    app.state.web_port = port                   # 当前监听端口（重启 argv 重建用）
     sessions = LoginSessionManager()
     try:
         pool.start_auto_refresh()               # token 临期自动续期（后台线程）
@@ -295,17 +339,18 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
 
     @app.post("/api/system/restart")
     def system_restart():
-        """重启服务进程：os.execv 自替换，保持原启动参数与端口。"""
+        """重启服务进程：os.execv 自替换；端口取 config web.port（网页改端口重启即生效）。"""
         import os
         import sys
 
         def _do():
             time.sleep(1.5)                            # 先把响应发回前端
             try:
+                rest = rebuild_restart_argv(
+                    sys.argv[1:], getattr(app.state, "web_port", None), load_config())
                 if getattr(sys, "frozen", False):      # PyInstaller exe
-                    os.execv(sys.executable, [sys.executable] + sys.argv[1:])
-                os.execv(sys.executable,
-                         [sys.executable, "-m", "wbspy"] + sys.argv[1:])
+                    os.execv(sys.executable, [sys.executable] + rest)
+                os.execv(sys.executable, [sys.executable, "-m", "wbspy"] + rest)
             except Exception as exc:                   # pragma: no cover
                 _log(f"服务重启失败：{exc}")
 
@@ -501,10 +546,66 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         _log(f"网关访问密钥已更新（{'内置默认' if effective == DEFAULT_API_KEY else '自定义'}），立即生效。")
         return _ok({"key": effective, "is_default": effective == DEFAULT_API_KEY})
 
+    # -- 网关开关 + 服务端口（开关立即生效；端口保存前试绑校验，重启生效）--------
+
+    @app.get("/api/settings/gateway")
+    def gateway_settings_get():
+        cfg = load_config()
+        cur = getattr(app.state, "web_port", None)
+        return _ok({
+            "enabled": bool(getattr(app.state, "gw_enabled", True)),
+            "port": (cfg.get("web") or {}).get("port") or "",
+            "current_port": cur,
+        })
+
+    @app.post("/api/settings/gateway")
+    async def gateway_settings_set(request: Request):
+        """body: {enabled?: bool, port?: str|int}
+
+        enabled  → 写 config gateway.enabled 并热生效（/v1 立即 404 或恢复）；
+        port     → 校验 + 试绑检测（自己占着的当前端口除外）+ 落盘 config web.port，
+                   重启服务后生效（restart_required=true 提示前端引导重启）。
+        """
+        body = await request.json()
+        cfg = load_config()
+        cur = getattr(app.state, "web_port", None)
+        result = {"enabled": bool(getattr(app.state, "gw_enabled", True)),
+                  "port": (cfg.get("web") or {}).get("port") or "",
+                  "restart_required": False}
+
+        if "enabled" in body:
+            enabled = bool(body.get("enabled"))
+            cfg.setdefault("gateway", {})["enabled"] = enabled
+            app.state.gw_enabled = enabled
+            result["enabled"] = enabled
+            if enabled:
+                _log("对外网关（/v1）：已开启，立即生效。")
+            else:
+                _log("对外网关（/v1）：已关闭，客户端调用将返回 404（管理界面不受影响）。")
+
+        if "port" in body and str(body.get("port") or "").strip():
+            raw = str(body.get("port")).strip()
+            if not raw.isdigit() or not 1 <= int(raw) <= 65535:
+                return _err("端口需为 1-65535 的整数")
+            new_port = int(raw)
+            if new_port != cur:
+                probe_err = port_bind_error(new_port)
+                if probe_err:
+                    return _err(probe_err + "，换个端口再保存")
+            cfg.setdefault("web", {})["port"] = new_port
+            result["port"] = new_port
+            result["restart_required"] = new_port != cur
+            _log(f"服务端口已保存为 {new_port}"
+                 + ("，重启服务后生效。" if new_port != cur else "（与当前端口相同）。"))
+
+        save_config(cfg)
+        return _ok(result)
+
     return app
 
 
 def run_web(pool: AccountPool, host: str = "127.0.0.1", port: int = 8178,
             api_key: str = "") -> None:
     import uvicorn
-    uvicorn.run(create_web_app(pool, api_key), host=host, port=port, log_level="warning")
+    uvicorn.run(create_web_app(pool, api_key, port=port), host=host, port=port,
+                log_level="warning")
