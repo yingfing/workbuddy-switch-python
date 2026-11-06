@@ -263,8 +263,18 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             raw = {**raw, "model": model.split(":", 1)[1]}
         raw, _trimmed = trim_context(raw)
 
+        # 会话键：客户端可显式传 x-wbspy-session；缺省用「system+首条消息」
+        # 指纹——同一段对话续发时前缀稳定，粘住同一账号保护上游 prompt 缓存
+        session = request.headers.get("x-wbspy-session") or None
+        if not session:
+            msgs = raw.get("messages")
+            if isinstance(msgs, list) and msgs:
+                import hashlib
+                seed = json.dumps(msgs[:2], ensure_ascii=False, default=str)[:2000]
+                session = "auto:" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+
         try:
-            doc, resp = pool.chat_failover(raw)
+            doc, resp = pool.chat_failover(raw, session=session)
         except UpstreamError as exc:
             return _error(exc)
 

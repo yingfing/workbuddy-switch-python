@@ -610,6 +610,121 @@ class TestGatewayKey(unittest.TestCase):
                                  _json.loads(cfg_path.read_text())["automation"])
 
 
+class TestPoolStrategies(unittest.TestCase):
+    """多账号调度：xdpool 四策略——sticky/排队等待/分配可配/付费行退路。"""
+
+    def _pool(self, n=3, region="cn"):
+        from wbspy.document import parse_auth
+        from wbspy.pool import AccountPool
+        docs = [parse_auth({"account": {"uid": f"u{i}", "nickname": f"号{i}"},
+                            "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}})
+                for i in range(n)]
+        return AccountPool(docs)
+
+    def _mock_client(self, pool, uid, resp=None):
+        from unittest.mock import MagicMock
+        k = next(k for k in pool.clients if k[1] == uid)
+        c = MagicMock()
+        c.chat.return_value = resp if resp is not None else MagicMock()
+        pool.clients[k] = c
+        return k, c
+
+    def _distribution(self, name):
+        from unittest.mock import patch
+        from wbspy import store
+        return patch.object(store, "load_config",
+                            return_value={"gateway": {"distribution": name}})
+
+    def test_sticky_session_binds_and_releases(self):
+        """同会话粘同一账号；账号失效后解绑重新分配。"""
+        from wbspy.upstream import UpstreamError
+        pool = self._pool()
+        with self._distribution("round-robin"):
+            a = pool.pick("auto", session="s1")
+            b = pool.pick("auto", session="s1")
+            self.assertIs(a, b)                       # 粘住
+            k = next(k for k in pool.documents if pool.documents[k] is a)
+            pool.apply_error(a, UpstreamError(401, "upstream_auth_expired", "失效"), "auto")
+            self.assertNotEqual(pool.session_map.get("s1", (None,))[0], k)  # 解绑
+            c = pool.pick("auto", session="s1")
+            self.assertIsNot(c, a)                    # 换新号并重新绑定
+            self.assertIs(c, pool.pick("auto", session="s1"))
+
+    def test_distribution_priority_vs_roundrobin(self):
+        """priority 永远先用第一个号；round-robin 轮换。"""
+        pool = self._pool(3)
+        with self._distribution("priority"):
+            picks = {id(pool.pick("auto")) for _ in range(4)}
+            self.assertEqual(len(picks), 1)           # 永远同一个
+        with self._distribution("round-robin"):
+            picks = [id(pool.pick("auto")) for _ in range(3)]
+            self.assertEqual(len(set(picks)), 3)      # 三个号都轮到
+
+    def test_balanced_returns_usable_account(self):
+        """balanced 加权随机不崩且只返回可用账号。"""
+        pool = self._pool(3)
+        with self._distribution("balanced"):
+            for _ in range(10):
+                doc = pool.pick("auto")
+                self.assertIsNotNone(doc)
+                pool.last_used[next(k for k in pool.clients
+                                    if pool.clients[k].doc is doc)] = 0  # 模拟刚用过
+
+    def test_wait_for_cooling_then_succeed(self):
+        """全池冷却 → 等最短冷却（sleep 模拟时间流逝）→ 解冻后成功。"""
+        from unittest.mock import patch
+        from wbspy.upstream import UpstreamError
+        pool = self._pool(1)
+        k, _client = self._mock_client(pool, "u0")
+        with self._distribution("round-robin"):
+            pool.apply_error(pool.healthy("auto")[0],
+                             UpstreamError(429, "upstream_rate_limit", "限流"), "auto")
+            sleeps: list[float] = []
+
+            def fake_sleep(sec):
+                sleeps.append(sec)
+                pool.cooldowns._until.clear()         # 模拟冷却到期
+
+            with patch("wbspy.pool.time.sleep", fake_sleep):
+                doc, _ = pool.chat_failover({"model": "auto", "messages": []})
+            self.assertIsNotNone(doc)
+            self.assertTrue(sleeps and sleeps[0] <= 91)   # 只等冷却时长，不超上限
+
+    def test_fallback_row_on_free_row_cooldown(self):
+        """免费行 hy3 全冷却 → 自动降级用付费行 hy3-x 发请求。"""
+        from unittest.mock import patch
+        from wbspy.upstream import UpstreamError
+        pool = self._pool(1)
+        k, client = self._mock_client(pool, "u0")
+        with self._distribution("round-robin"):
+            pool.apply_error(pool.healthy("hy3")[0],
+                             UpstreamError(429, "upstream_rate_limit", "限流"), "hy3")
+            # hy3 冷却中 → chat_failover 自动降级以付费行 hy3-x 发出
+            doc, _ = pool.chat_failover({"model": "hy3", "messages": []})
+            sent = client.chat.call_args[0][0]
+            self.assertEqual(sent["model"], "hy3-x")
+
+    def test_session_passthrough_from_gateway(self):
+        """网关从 x-wbspy-session 头或消息指纹生成会话键并传入 failover。"""
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.gateway import create_app
+        from wbspy.pool import AccountPool
+        seen: list = []
+
+        class _P(AccountPool):
+            def chat_failover(self, payload, session=None):
+                seen.append(session)
+                raise UpstreamError(503, "no_available_accounts", "无账号")
+
+        c = TestClient(create_app(_P([]), api_key=""), raise_server_exceptions=False)
+        body = {"model": "auto", "messages": [{"role": "user", "content": "hi"}]}
+        c.post("/v1/chat/completions", json=body)      # 无头 → 指纹
+        self.assertTrue(seen[-1] and seen[-1].startswith("auto:"))
+        c.post("/v1/chat/completions", json=body, headers={"x-wbspy-session": "abc"})
+        self.assertEqual(seen[-1], "abc")              # 显式头优先
+
+
 class TestAutomationConfig(unittest.TestCase):
     """托管节奏配置：落盘 + 校验 + 自动生效。"""
 

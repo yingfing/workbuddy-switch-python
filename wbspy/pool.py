@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import random
 import threading
 import time
 
@@ -17,6 +18,14 @@ from .document import Document
 from .upstream import UpstreamError, WorkBuddyClient
 
 DEFAULT_MODEL_COOLDOWN = 60
+
+# -- 调度策略常量（对齐 dsh-xdpool 的池策略）-----------------------------------
+SESSION_TTL = 2 * 3600          # 会话粘性映射保质期：2 小时无活动即解绑
+MAX_COOLING_WAIT = 90           # 全账号冷却时排队等待上限（秒），超过仍 503
+DISTRIBUTIONS = ("round-robin", "priority", "balanced")
+# 免费行 → 同名付费行退路：上游按「行」分别限流，免费行被 429 冷却时
+# 付费行通常还通（对齐 xdpool 的行映射）
+FALLBACK_ROWS = {"hy3": "hy3-x", "deepseek-v4.1-flash": "deepseek-v4.1-flash-sg"}
 
 
 def _key(doc: Document) -> tuple[str, str]:
@@ -62,6 +71,8 @@ class AccountPool:
         self.clients = {k: WorkBuddyClient(doc) for k, doc in self.documents.items()}
         self.dead_until: dict[tuple[str, str], float] = {}   # 凭据失效账号的复活时间
         self.cooldowns = CooldownTable()
+        self.last_used: dict[tuple[str, str], float] = {}    # balanced 策略权重依据
+        self.session_map: dict[str, tuple[tuple[str, str], float]] = {}  # 会话粘性
         self._cursor = 0
         self._lock = threading.Lock()
 
@@ -79,14 +90,98 @@ class AccountPool:
     def healthy(self, model: str = "*") -> list[Document]:
         now = time.time()
         self.cooldowns.sweep()
-        out = []
-        for k, doc in self.documents.items():
-            if "chat" not in doc.capabilities or not doc.api_ready or self.dead_until.get(k, 0) > now:
-                continue                     # 渠道未声明 chat 能力 → 不进 WorkBuddy 上游路由
-            if model != "*" and self.cooldowns.get(k, model) > now:
-                continue
-            out.append(doc)
-        return out
+        return [d for k, d in self.documents.items() if self._is_usable(d, model, now)]
+
+    def _is_usable(self, doc: Document, model: str, now: float | None = None) -> bool:
+        """账号此刻能否接「model」的活：chat 能力 + 凭据就绪 + 未死亡 + 该模型未冷却。"""
+        now = now if now is not None else time.time()
+        k = _key(doc)
+        if "chat" not in doc.capabilities or not doc.api_ready or self.dead_until.get(k, 0) > now:
+            return False                 # 渠道未声明 chat 能力 / 死亡 → 不进 WorkBuddy 上游路由
+        if model != "*" and self.cooldowns.get(k, model) > now:
+            return False
+        return True
+
+    def _distribution(self) -> str:
+        """账号分配策略（config gateway.distribution，热读支持网页/CLI 改后生效）。"""
+        try:
+            from .store import load_config
+            v = str((load_config().get("gateway") or {}).get("distribution") or "round-robin")
+        except Exception:
+            v = "round-robin"
+        return v if v in DISTRIBUTIONS else "round-robin"
+
+    def _sweep_sessions(self, now: float) -> None:
+        for s in [s for s, (_, at) in self.session_map.items() if now - at > SESSION_TTL]:
+            del self.session_map[s]
+
+    def _unbind(self, session: str | None, k: tuple[str, str]) -> None:
+        """会话绑定的账号失败时解除粘性，让该对话下次重新分配。"""
+        if session and self.session_map.get(session, (None,))[0] == k:
+            self.session_map.pop(session, None)
+
+    def pick(self, model: str, exclude: set | None = None,
+             session: str | None = None) -> Document | None:
+        """按分配策略选择健康账号；session 给定时优先粘住上次用的号。"""
+        exclude = exclude or set()
+        now = time.time()
+        self.cooldowns.sweep()
+
+        # -- sticky：会话粘住上次成功服务的账号（保护上游 prompt 缓存） --------
+        if session:
+            self._sweep_sessions(now)
+            bound = self.session_map.get(session)
+            if bound:
+                k = bound[0]
+                doc = self.documents.get(k)
+                if doc is not None and k not in exclude and self._is_usable(doc, model, now):
+                    self.session_map[session] = (k, now)
+                    self.last_used[k] = now
+                    return doc
+                self.session_map.pop(session, None)   # 号废了/被排除 → 重新分配
+
+        candidates = [d for d in self.documents.values()
+                      if _key(d) not in exclude and self._is_usable(d, model, now)]
+        if not candidates:
+            return None
+
+        strategy = self._distribution()
+        if strategy == "priority":
+            doc = candidates[0]                       # 按入库顺序，用完一个再换下一个
+        elif strategy == "balanced":
+            # 随机加权、偏向闲置久的：距上次使用越久权重越高
+            weights = [1.0 + now - self.last_used.get(_key(d), 0) for d in candidates]
+            doc = random.choices(candidates, weights=weights)[0]
+        else:                                         # round-robin（默认）
+            with self._lock:
+                self._cursor = (self._cursor + 1) % len(candidates)
+                doc = candidates[self._cursor]
+
+        k = _key(doc)
+        self.last_used[k] = now
+        if session:
+            self.session_map[session] = (k, now)      # 绑定会话
+        return doc
+
+    def _shortest_cooling(self, model: str) -> float | None:
+        """该模型全池冷却时，距离最早解冻还剩多少秒（只算活着能刷新的号）。"""
+        now = time.time()
+        waits = [self.cooldowns.get(_key(d), model) - now
+                 for d in self.documents.values()
+                 if "chat" in d.capabilities and d.api_ready
+                 and self.dead_until.get(_key(d), 0) <= now]
+        waits = [w for w in waits if w > 0]
+        return min(waits) if waits else None
+
+    def apply_error(self, doc: Document, error: UpstreamError, model: str) -> None:
+        """按错误类型记账冷却 / 死亡。死亡时解绑其全部会话粘性。"""
+        k = _key(doc)
+        if error.kind == "auth":
+            self.dead_until[k] = time.time() + 300   # 5 分钟后允许刷新重试
+            for s in [s for s, (bk, _) in self.session_map.items() if bk == k]:
+                del self.session_map[s]
+        elif error.kind in ("rate", "model", "channel"):
+            self.cooldowns.set(k, model, error.retry_after or DEFAULT_MODEL_COOLDOWN)
 
     def status(self) -> list[dict]:
         now = time.time()
@@ -102,37 +197,47 @@ class AccountPool:
 
     # -- 调度 -----------------------------------------------------------------
 
-    def pick(self, model: str, exclude: set | None = None) -> Document | None:
-        """轮换选择下一个健康账号。"""
-        exclude = exclude or set()
-        candidates = [d for d in self.healthy(model) if _key(d) not in exclude]
-        if not candidates:
-            return None
-        with self._lock:
-            self._cursor = (self._cursor + 1) % len(candidates)
-            return candidates[self._cursor]
-
-    def apply_error(self, doc: Document, error: UpstreamError, model: str) -> None:
-        """按错误类型记账冷却 / 死亡。"""
-        k = _key(doc)
-        if error.kind == "auth":
-            self.dead_until[k] = time.time() + 300   # 5 分钟后允许刷新重试
-        elif error.kind in ("rate", "model", "channel"):
-            self.cooldowns.set(k, model, error.retry_after or DEFAULT_MODEL_COOLDOWN)
+    # （pick / apply_error 已合并到上方健康判定的统一实现）
 
     # -- 请求 -----------------------------------------------------------------
 
-    def chat_failover(self, payload: dict):
+    def chat_failover(self, payload: dict, session: str | None = None):
         """带自动换号的对话。返回 (document, response)。
 
         生成器场景下 response 由调用方负责 close()。
+        换号之外的两层兜底（对齐 dsh-xdpool）：
+        * 免费行全冷却 → 试同名付费行（FALLBACK_ROWS）
+        * 全池冷却 → 等最早的冷却结束再试一次（≤ MAX_COOLING_WAIT 秒）
         """
         model = str(payload.get("model", ""))
         tried: set = set()
         last_error: UpstreamError | None = None
+        waited = False
         while True:
-            doc = self.pick(model, exclude=tried)
+            doc = self.pick(model, exclude=tried, session=session)
             if doc is None:
+                # 兜底一：免费行冷却时降级试付费行（换行名重试，客户端无感）
+                fb = FALLBACK_ROWS.get(model)
+                if fb:
+                    alt = self.pick(fb, exclude=tried, session=None)
+                    if alt is not None:
+                        try:
+                            return alt, self.clients[_key(alt)].chat({**payload, "model": fb})
+                        except UpstreamError as exc:
+                            last_error = exc
+                            self.apply_error(alt, exc, fb)
+                            self._unbind(session, _key(alt))
+                            if exc.kind in ("auth", "rate", "model"):
+                                continue
+                            raise
+                # 兜底二：全池冷却 → 等最早的解冻（一次，≤90 秒）
+                if not waited:
+                    wait = self._shortest_cooling(model)
+                    if wait and wait <= MAX_COOLING_WAIT:
+                        waited = True
+                        time.sleep(wait + 0.5)
+                        tried.clear()             # 解冻的号重新参与竞争
+                        continue
                 if last_error:
                     raise last_error
                 raise UpstreamError(503, "no_available_accounts",
@@ -143,6 +248,7 @@ class AccountPool:
             except UpstreamError as exc:
                 last_error = exc
                 self.apply_error(doc, exc, model)
+                self._unbind(session, _key(doc))  # 粘住的号废了 → 解绑让对话重分配
                 if exc.kind in ("auth", "rate", "model"):
                     continue      # 换号重试
                 raise             # 渠道拒绝重试过 / 上游 5xx 不换号
