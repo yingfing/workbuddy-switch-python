@@ -266,9 +266,13 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         if "/" in model and not model.startswith(("workbuddy:", "cn:", "global:")):
             return _aggregate_chat(raw)
 
-        # ── 路由二：WorkBuddy 账号池 ────────────────────────────────────────
-        # 纯模型名等价 workbuddy:<model>；区域/命名前缀剥掉后由池按各账号可用性调度
-        if model.split(":", 1)[0] in ("workbuddy", "cn", "global") and ":" in model:
+        # ── 路由二：登录账号池（WorkBuddy 系 / Cline，按前缀选泳道）──────────
+        # 泳道内多账号轮换容错；纯模型名等价 workbuddy:<model>
+        lane = "workbuddy"
+        if model.startswith("cline:"):
+            lane = "cline"
+            raw = {**raw, "model": model.split(":", 1)[1]}
+        elif model.split(":", 1)[0] in ("workbuddy", "cn", "global") and ":" in model:
             raw = {**raw, "model": model.split(":", 1)[1]}
         raw, _trimmed = trim_context(raw)
 
@@ -283,7 +287,7 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                 session = "auto:" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
 
         try:
-            doc, resp = pool.chat_failover(raw, session=session)
+            doc, resp = pool.chat_failover(raw, session=session, lane=lane)
         except UpstreamError as exc:
             return _error(exc)
 
@@ -295,7 +299,7 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                             yield chunk
                 finally:
                     resp.close()
-                    LEDGER.record(model=model, provider="workbuddy", account=doc.uid[:12],
+                    LEDGER.record(model=model, provider=lane, account=doc.uid[:12],
                                   prompt_tokens=estimate_tokens(raw.get("messages", [])))
             return StreamingResponse(sse(), media_type="text/event-stream",
                                      headers={"X-Wbspy-Account": doc.uid[:12]})
@@ -303,7 +307,7 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         # 上游恒为流式（payload 强制 stream:true），非流式请求聚合为完整对象
         body = _sse_aggregate(resp, model)
         resp.close()
-        LEDGER.record(model=model, provider="workbuddy", account=doc.uid[:12],
+        LEDGER.record(model=model, provider=lane, account=doc.uid[:12],
                       prompt_tokens=estimate_tokens(raw.get("messages", [])),
                       completion_tokens=len(str(body.get("choices", [{}])[0]
                                                .get("message", {}).get("content") or "")) // 3)
@@ -328,7 +332,7 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         if doc is None:
             raise HTTPException(503, "账号池中没有可用账号。")
         try:
-            return pool.clients[doc.uid].embeddings(model, [str(i) for i in inputs])
+            return pool.client(doc).embeddings(model, [str(i) for i in inputs])
         except UpstreamError as exc:
             return _error(exc)
 

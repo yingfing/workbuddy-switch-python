@@ -841,3 +841,124 @@ class WorkBuddyClient:
         if not resp.ok:
             raise classify_business_error(resp.status_code, resp.text[:65536])
         return resp.json()
+
+
+CLINE_API = "https://api.cline.bot"
+CLINE_HEADERS = {"HTTP-Referer": "https://cline.bot", "X-Title": "Cline",
+                 "X-IS-MULTIROOT": "false", "X-CLIENT-TYPE": "cline-sdk"}
+
+
+class ClineClient:
+    """Cline 渠道客户端（协议对照 dsh-xdpool vendor/channel-pack/cline-adapter）。
+
+    登录凭据即调用凭据：Authorization 恒为 ``Bearer workos:<accessToken>``
+    （dsh 的 clineBearerValue：无前缀就补 ``workos:``）。/api/v1/* 是
+    OpenAI 兼容 wire——对话与模型目录直接透传，无需协议转换。
+    """
+
+    def __init__(self, document: Document, session: requests.Session | None = None):
+        self.doc = document
+        self.http = session or requests.Session()
+
+    def _headers(self, extra: dict | None = None) -> dict:
+        token = (self.doc.token or "").strip()
+        bearer = token if token.startswith("workos:") else f"workos:{token}"
+        return {"Authorization": f"Bearer {bearer}", "Accept": "application/json",
+                **CLINE_HEADERS, **(extra or {})}
+
+    def models(self) -> list[dict]:
+        if not self.doc.token:
+            raise UpstreamError(401, "credential_required", "请先完成网页登录授权。")
+        try:
+            resp = self.http.get(f"{CLINE_API}/api/v1/models", headers=self._headers(),
+                                 timeout=TIMEOUT, allow_redirects=False)
+        except requests.RequestException as exc:
+            raise UpstreamError(502, "upstream_transport_error", f"模型目录网络失败：{exc}") from exc
+        if resp.status_code in (401, 403):
+            raise UpstreamError(401, "upstream_auth_expired", "Cline 登录凭据已失效，请重新登录。")
+        if not resp.ok:
+            raise UpstreamError(502, "upstream_error", f"Cline 模型目录不可用（HTTP {resp.status_code}）。")
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise UpstreamError(502, "upstream_error", "Cline 模型目录响应无法解析。") from exc
+        rows = data.get("data") if isinstance(data, dict) else data
+        out: list[dict] = []
+        for raw in rows if isinstance(rows, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            mid = raw.get("id")
+            if not isinstance(mid, str) or not mid:
+                continue
+            out.append({"id": mid,
+                        "name": str(raw.get("display_name") or raw.get("name") or mid)[:80],
+                        "region": self.doc.region})
+        return out
+
+    def chat(self, payload: dict) -> requests.Response:
+        """发起点对话（OpenAI 兼容透传，强制流式以统一网关聚合路径）。"""
+        if not self.doc.token:
+            raise UpstreamError(401, "credential_required", "请先完成网页登录授权。")
+        if not isinstance(payload.get("messages"), list) or not payload.get("messages"):
+            raise UpstreamError(400, "invalid_request", "messages 不能为空。")
+        body = json.dumps({**payload, "stream": True}, ensure_ascii=False)
+        try:
+            resp = self.http.post(
+                f"{CLINE_API}/api/v1/chat/completions",
+                headers=self._headers({"Content-Type": "application/json"}),
+                data=body, timeout=STREAM_TIMEOUT, allow_redirects=False, stream=True,
+            )
+        except requests.RequestException as exc:
+            raise UpstreamError(502, "upstream_transport_error",
+                                "Cline 对话连接中断，结果和消耗尚未确认。") from exc
+        if resp.ok:
+            return resp
+        text = resp.text[:1024]
+        resp.close()
+        if resp.status_code in (401, 403):
+            raise UpstreamError(401, "upstream_auth_expired", "Cline 登录凭据已失效，请重新登录。")
+        if resp.status_code == 402:
+            raise UpstreamError(402, "upstream_quota",
+                                "Cline 额度已用尽（HTTP 402），等待不会恢复，请到 app.cline.bot 充值或换渠道。")
+        if resp.status_code == 429:
+            try:
+                retry = int(float(resp.headers.get("Retry-After") or 0))
+            except ValueError:
+                retry = 0
+            raise UpstreamError(429, "upstream_rate_limit",
+                                "Cline 限流或每日免费额度已达上限。", retry_after=retry)
+        raise UpstreamError(502, "upstream_error",
+                            f"Cline 对话失败（HTTP {resp.status_code}）：{text[:120]}")
+
+    def refresh(self) -> dict:
+        """用 refreshToken 续期（协议对照 clineRefreshBody：驼峰字段 + grantType）。"""
+        refresh = self.doc.refresh_token
+        if not refresh:
+            raise UpstreamError(401, "credential_required", "无刷新凭据，请重新网页授权。")
+        try:
+            resp = self.http.post(
+                f"{CLINE_API}/api/v1/auth/refresh",
+                headers=self._headers({"Content-Type": "application/json"}),
+                data=json.dumps({"refreshToken": refresh, "grantType": "refresh_token"}),
+                timeout=TIMEOUT, allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            raise UpstreamError(502, "upstream_transport_error", f"Cline 续期网络失败：{exc}") from exc
+        if resp.status_code in (401, 403):
+            raise UpstreamError(401, "upstream_auth_expired", "Cline 续期被拒绝，请重新登录。")
+        if not resp.ok:
+            raise UpstreamError(502, "upstream_error", f"Cline 续期失败（HTTP {resp.status_code}）。")
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise UpstreamError(502, "upstream_error", "Cline 续期响应无法解析。") from exc
+        node = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+        access = node.get("accessToken") or node.get("access_token") if isinstance(node, dict) else None
+        if not access:
+            raise UpstreamError(502, "upstream_error", "Cline 续期响应缺少 accessToken。")
+        out = {"accessToken": access}
+        for src, dst in (("refreshToken", "refreshToken"), ("refresh_token", "refreshToken"),
+                         ("expiresAt", "expiresAt"), ("expires_at", "expiresAt")):
+            if isinstance(node, dict) and node.get(src):
+                out[dst] = node[src]
+        return out

@@ -300,6 +300,67 @@ class TestCreditsParse(unittest.TestCase):
             self.assertIsNone(_parse_ms("2040-01-01 00:00:00"))
 
 
+class TestClineClient(unittest.TestCase):
+    """ClineClient：OpenAI 兼容直连 api.cline.bot（协议对照 dsh cline-adapter）。"""
+
+    def _client(self):
+        from wbspy.document import parse_auth
+        from wbspy.upstream import ClineClient
+        doc = parse_auth({"account": {"uid": "c1", "nickname": "T"},
+                          "auth": {"accessToken": "abc", "domain": "api.cline.bot"}})
+        return ClineClient(doc)
+
+    def test_bearer_gets_workos_prefix(self):
+        c = self._client()
+        h = c._headers()
+        self.assertEqual(h["Authorization"], "Bearer workos:abc")
+        self.assertEqual(h["X-CLIENT-TYPE"], "cline-sdk")
+        self.assertEqual(h["HTTP-Referer"], "https://cline.bot")
+
+    def test_models_parse(self):
+        from unittest.mock import MagicMock, patch
+        from wbspy.upstream import ClineClient
+        c = self._client()
+        resp = MagicMock(ok=True, status_code=200)
+        resp.json.return_value = {"data": [
+            {"id": "glm-5.2", "display_name": "GLM-5.2"},
+            {"id": "kimi-k2.6:free", "name": "Kimi K2.6 Free"},
+            {"id": "", "name": "坏行跳过"},
+            "非对象跳过",
+        ]}
+        with patch.object(c.http, "get", return_value=resp) as gi:
+            rows = c.models()
+        self.assertEqual([r["id"] for r in rows], ["glm-5.2", "kimi-k2.6:free"])
+        self.assertEqual(rows[0]["name"], "GLM-5.2")
+        self.assertIn("/api/v1/models", gi.call_args[0][0])
+
+    def test_chat_error_classify(self):
+        from unittest.mock import MagicMock, patch
+        from wbspy.upstream import ClineClient, UpstreamError
+        c = self._client()
+        payload = {"model": "glm-5.2", "messages": [{"role": "user", "content": "hi"}]}
+        for status, code in ((401, "upstream_auth_expired"), (402, "upstream_quota"),
+                             (429, "upstream_rate_limit"), (500, "upstream_error")):
+            resp = MagicMock(ok=False, status_code=status)
+            resp.text = "err"
+            with patch.object(c.http, "post", return_value=resp):
+                with self.assertRaises(UpstreamError) as cm:
+                    c.chat(payload)
+                self.assertEqual(cm.exception.code, code, status)
+
+    def test_chat_forces_stream_and_posts_openai_shape(self):
+        from unittest.mock import MagicMock, patch
+        from wbspy.upstream import ClineClient
+        c = self._client()
+        resp = MagicMock(ok=True, status_code=200)
+        with patch.object(c.http, "post", return_value=resp) as pi:
+            c.chat({"model": "glm-5.2", "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False})
+        body = json.loads(pi.call_args[1]["data"])
+        self.assertTrue(body["stream"])                  # 网关聚合路径统一要求流式
+        self.assertIn("/api/v1/chat/completions", pi.call_args[0][0])
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -359,12 +420,44 @@ class TestChannelIsolation(unittest.TestCase):
             m = MagicMock()
             m.models.side_effect = lambda: (models_called.append(doc.uid), [{"id": "m1"}])[1]
             return m
-        with patch("wbspy.pool.WorkBuddyClient", side_effect=fake_client):
+        with patch("wbspy.pool._client_for", side_effect=fake_client):
             p = AccountPool(self._docs())
             p.models()
         self.assertIn("b1", models_called)
         self.assertIn("g1", models_called)          # 国际版照常进目录
         self.assertNotIn("tr1", models_called)      # models 目录不对 TRAE 账号发请求
+
+    def test_cline_lane_isolation(self):
+        """Cline 泳道：cline 请求只落到 cline 账号，WorkBuddy 请求互不串。"""
+        from unittest.mock import patch, MagicMock
+        from wbspy.pool import AccountPool, _client_for, _lane_of
+        cline_doc = parse_auth({"account": {"uid": "c1", "nickname": "TextValue"},
+                                "auth": {"accessToken": "ct", "domain": "api.cline.bot"}})
+        wb_doc = self._docs()[0]
+        p = AccountPool([wb_doc, cline_doc])
+        self.assertEqual(_lane_of(cline_doc), "cline")
+        with patch("wbspy.pool._client_for", side_effect=lambda d: MagicMock(doc=d)):
+            p2 = AccountPool([wb_doc, cline_doc])
+            got_cline = p2.pick("*", lane="cline")
+            got_wb = p2.pick("*", lane="workbuddy")
+        self.assertEqual(got_cline.uid, "c1")
+        self.assertEqual(got_wb.uid, "b1")
+
+    def test_cline_models_prefixed(self):
+        """Cline 账号目录带 cline: 前缀进聚合目录与逐账号索引。"""
+        from unittest.mock import patch, MagicMock
+        from wbspy.pool import AccountPool
+        cline_doc = parse_auth({"account": {"uid": "c1", "nickname": "TextValue"},
+                                "auth": {"accessToken": "ct", "domain": "api.cline.bot"}})
+        fake = MagicMock()
+        fake.models.return_value = [{"id": "glm-5.2", "name": "GLM-5.2", "region": "cn"}]
+        with patch("wbspy.pool._client_for", return_value=fake):
+            p = AccountPool([cline_doc])
+            rows = p.models()
+        self.assertEqual([r["id"] for r in rows], ["cline:glm-5.2"])
+        by_acc = p.models_by_account()
+        self.assertEqual(by_acc[0]["count"], 1)
+        self.assertEqual(by_acc[0]["models"][0]["id"], "cline:glm-5.2")
 
     def test_public_guard_blocks_and_allows(self):
         from wbspy.cli import _public_guard
@@ -387,10 +480,18 @@ class TestCapabilities(unittest.TestCase):
 
     def test_third_party_empty(self):
         from wbspy.document import parse_auth
-        for domain in ("api.trae.com.cn", "api.cline.bot", "qoder.cn"):
+        for domain in ("api.trae.com.cn", "qoder.cn"):
             doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
                               "auth": {"accessToken": "t", "domain": domain}})
             self.assertEqual(doc.capabilities, frozenset(), domain)
+
+    def test_cline_capabilities(self):
+        """Cline 已接 OpenAI 兼容 API：chat/models/refresh 有、签到/余额无。"""
+        from wbspy.document import parse_auth
+        doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
+                          "auth": {"accessToken": "t", "domain": "api.cline.bot"}})
+        self.assertEqual(doc.capabilities,
+                         frozenset({"chat", "models", "refresh"}))
 
     def test_channel_names_come_from_registry(self):
         """channel_name 必须与注册表同名（单一事实来源）。"""
@@ -873,16 +974,17 @@ class TestPoolStrategies(unittest.TestCase):
         seen: list = []
 
         class _P(AccountPool):
-            def chat_failover(self, payload, session=None):
-                seen.append(session)
+            def chat_failover(self, payload, session=None, lane="workbuddy"):
+                seen.append((session, lane))
                 raise UpstreamError(503, "no_available_accounts", "无账号")
 
         c = TestClient(create_app(_P([]), api_key=""), raise_server_exceptions=False)
         body = {"model": "auto", "messages": [{"role": "user", "content": "hi"}]}
         c.post("/v1/chat/completions", json=body)      # 无头 → 指纹
-        self.assertTrue(seen[-1] and seen[-1].startswith("auto:"))
+        self.assertTrue(seen[-1][0] and seen[-1][0].startswith("auto:"))
+        self.assertEqual(seen[-1][1], "workbuddy")     # 默认走 WorkBuddy 泳道
         c.post("/v1/chat/completions", json=body, headers={"x-wbspy-session": "abc"})
-        self.assertEqual(seen[-1], "abc")              # 显式头优先
+        self.assertEqual(seen[-1][0], "abc")           # 显式头优先
 
 
 class TestAutomationConfig(unittest.TestCase):

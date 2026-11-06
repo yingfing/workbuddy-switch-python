@@ -27,6 +27,24 @@ DISTRIBUTIONS = ("round-robin", "priority", "balanced")
 # 付费行通常还通（对齐 xdpool 的行映射）
 FALLBACK_ROWS = {"hy3": "hy3-x", "deepseek-v4.1-flash": "deepseek-v4.1-flash-sg"}
 
+# 泳道：渠道分组。同一泳道的账号共享模型路由（请求按前缀选泳道，
+# 泳道内多账号轮换容错）；不同泳道的凭据绝不互相调用。
+LANE_CHANNELS = {"workbuddy": ("buddy", "workbuddy"), "cline": ("cline",)}
+
+
+def _lane_of(doc: Document) -> str:
+    """账号所属泳道（workbuddy / cline / 其他渠道原样）。"""
+    for lane, ids in LANE_CHANNELS.items():
+        if doc.channel_id in ids:
+            return lane
+    return doc.channel_id or "other"
+
+
+def _client_for(doc: Document):
+    """按渠道构造客户端：Cline 走 OpenAI 兼容 api.cline.bot，其余走 WorkBuddy。"""
+    from .upstream import ClineClient, WorkBuddyClient
+    return ClineClient(doc) if doc.channel_id == "cline" else WorkBuddyClient(doc)
+
 
 def _key(doc: Document) -> tuple[str, str]:
     """账号池内部键：(storage_scope, uid)。
@@ -68,7 +86,7 @@ class CooldownTable:
 class AccountPool:
     def __init__(self, documents: list[Document]):
         self.documents = {_key(d): d for d in documents}
-        self.clients = {k: WorkBuddyClient(doc) for k, doc in self.documents.items()}
+        self.clients = {k: _client_for(doc) for k, doc in self.documents.items()}
         self.dead_until: dict[tuple[str, str], float] = {}   # 凭据失效账号的复活时间
         self.cooldowns = CooldownTable()
         self.last_used: dict[tuple[str, str], float] = {}    # balanced 策略权重依据
@@ -83,21 +101,33 @@ class AccountPool:
             for doc in documents:
                 k = _key(doc)
                 self.documents[k] = doc
-                self.clients[k] = WorkBuddyClient(doc)
+                self.clients[k] = _client_for(doc)
                 if doc.api_ready:
                     self.dead_until.pop(k, None)
 
-    def healthy(self, model: str = "*") -> list[Document]:
+    def client(self, doc: Document):
+        """某账号的渠道客户端（网关/自动化按此取，不手拼 key）。"""
+        return self.clients[_key(doc)]
+
+    def healthy(self, model: str = "*", lane: str | None = None) -> list[Document]:
         now = time.time()
         self.cooldowns.sweep()
-        return [d for k, d in self.documents.items() if self._is_usable(d, model, now)]
+        return [d for k, d in self.documents.items()
+                if self._is_usable(d, model, now, lane=lane)]
 
-    def _is_usable(self, doc: Document, model: str, now: float | None = None) -> bool:
-        """账号此刻能否接「model」的活：chat 能力 + 凭据就绪 + 未死亡 + 该模型未冷却。"""
+    def _is_usable(self, doc: Document, model: str, now: float | None = None,
+                   lane: str | None = None) -> bool:
+        """账号此刻能否接「model」的活：chat 能力 + 凭据就绪 + 未死亡 + 该模型未冷却。
+
+        lane 给定时还要求账号属于该泳道——cline 的请求绝不能落到
+        workbuddy 账号上（凭据协议完全不同），反之亦然。
+        """
         now = now if now is not None else time.time()
         k = _key(doc)
         if "chat" not in doc.capabilities or not doc.api_ready or self.dead_until.get(k, 0) > now:
-            return False                 # 渠道未声明 chat 能力 / 死亡 → 不进 WorkBuddy 上游路由
+            return False                 # 渠道未声明 chat 能力 / 死亡 → 不进上游路由
+        if lane is not None and _lane_of(doc) != lane:
+            return False
         if model != "*" and self.cooldowns.get(k, model) > now:
             return False
         return True
@@ -121,8 +151,11 @@ class AccountPool:
             self.session_map.pop(session, None)
 
     def pick(self, model: str, exclude: set | None = None,
-             session: str | None = None) -> Document | None:
-        """按分配策略选择健康账号；session 给定时优先粘住上次用的号。"""
+             session: str | None = None, lane: str | None = "workbuddy") -> Document | None:
+        """按分配策略选择健康账号；session 给定时优先粘住上次用的号。
+
+        lane 限定泳道（workbuddy/cline）；None 表示不限（仅目录枚举用）。
+        """
         exclude = exclude or set()
         now = time.time()
         self.cooldowns.sweep()
@@ -134,14 +167,14 @@ class AccountPool:
             if bound:
                 k = bound[0]
                 doc = self.documents.get(k)
-                if doc is not None and k not in exclude and self._is_usable(doc, model, now):
+                if doc is not None and k not in exclude and self._is_usable(doc, model, now, lane=lane):
                     self.session_map[session] = (k, now)
                     self.last_used[k] = now
                     return doc
                 self.session_map.pop(session, None)   # 号废了/被排除 → 重新分配
 
         candidates = [d for d in self.documents.values()
-                      if _key(d) not in exclude and self._is_usable(d, model, now)]
+                      if _key(d) not in exclude and self._is_usable(d, model, now, lane=lane)]
         if not candidates:
             return None
 
@@ -163,12 +196,13 @@ class AccountPool:
             self.session_map[session] = (k, now)      # 绑定会话
         return doc
 
-    def _shortest_cooling(self, model: str) -> float | None:
-        """该模型全池冷却时，距离最早解冻还剩多少秒（只算活着能刷新的号）。"""
+    def _shortest_cooling(self, model: str, lane: str | None = "workbuddy") -> float | None:
+        """该模型全池冷却时，距离最早解冻还剩多少秒（只算泳道内活着的号）。"""
         now = time.time()
         waits = [self.cooldowns.get(_key(d), model) - now
                  for d in self.documents.values()
                  if "chat" in d.capabilities and d.api_ready
+                 and (lane is None or _lane_of(d) == lane)
                  and self.dead_until.get(_key(d), 0) <= now]
         waits = [w for w in waits if w > 0]
         return min(waits) if waits else None
@@ -201,11 +235,12 @@ class AccountPool:
 
     # -- 请求 -----------------------------------------------------------------
 
-    def chat_failover(self, payload: dict, session: str | None = None):
+    def chat_failover(self, payload: dict, session: str | None = None,
+                      lane: str = "workbuddy"):
         """带自动换号的对话。返回 (document, response)。
 
         生成器场景下 response 由调用方负责 close()。
-        换号之外的两层兜底（对齐 dsh-xdpool）：
+        换号之外的两层兜底（对齐 dsh-xdpool，仅 WorkBuddy 泳道适用）：
         * 免费行全冷却 → 试同名付费行（FALLBACK_ROWS）
         * 全池冷却 → 等最早的冷却结束再试一次（≤ MAX_COOLING_WAIT 秒）
         """
@@ -214,12 +249,12 @@ class AccountPool:
         last_error: UpstreamError | None = None
         waited = False
         while True:
-            doc = self.pick(model, exclude=tried, session=session)
+            doc = self.pick(model, exclude=tried, session=session, lane=lane)
             if doc is None:
                 # 兜底一：免费行冷却时降级试付费行（换行名重试，客户端无感）
-                fb = FALLBACK_ROWS.get(model)
+                fb = FALLBACK_ROWS.get(model) if lane == "workbuddy" else None
                 if fb:
-                    alt = self.pick(fb, exclude=tried, session=None)
+                    alt = self.pick(fb, exclude=tried, session=None, lane=lane)
                     if alt is not None:
                         try:
                             return alt, self.clients[_key(alt)].chat({**payload, "model": fb})
@@ -232,7 +267,7 @@ class AccountPool:
                             raise
                 # 兜底二：全池冷却 → 等最早的解冻（一次，≤90 秒）
                 if not waited:
-                    wait = self._shortest_cooling(model)
+                    wait = self._shortest_cooling(model, lane=lane)
                     if wait and wait <= MAX_COOLING_WAIT:
                         waited = True
                         time.sleep(wait + 0.5)
@@ -253,15 +288,20 @@ class AccountPool:
                     continue      # 换号重试
                 raise             # 渠道拒绝重试过 / 上游 5xx 不换号
 
+    @staticmethod
+    def _route_id(doc: Document, row_id: str) -> str:
+        """模型的对外调用 ID：WorkBuddy 系带 ``workbuddy:``，Cline 带 ``cline:``。"""
+        lane = _lane_of(doc)
+        return f"workbuddy:{row_id}" if lane == "workbuddy" else f"{lane}:{row_id}"
+
     def models(self) -> list[dict]:
-        """聚合全部账号的模型目录（去重）。统一 ``workbuddy:`` 前缀——
-        客户端里一眼可辨；区域信息在 region 字段（路由时本就不分区域，
-        cn/global 同名模型自然合并）。"""
+        """聚合全部账号的模型目录（去重，跨渠道）。统一 ``前缀:`` 命名——
+        客户端里一眼可辨路由来源；区域信息在 region 字段（WorkBuddy 泳道
+        路由时本就不分区域，cn/global 同名模型自然合并）。"""
         seen: dict[str, dict] = {}
-        for _doc, _rows in self._models_by_account_raw():
-            for row in _rows:
-                key = f"workbuddy:{row['id']}"
-                seen.setdefault(key, {**row, "id": key})
+        for _doc, rows in self._models_by_account_raw():
+            for row in rows:                      # rows 已带 workbuddy:/cline: 前缀
+                seen.setdefault(row["id"], row)
         return list(seen.values())
 
     def _models_by_account_raw(self, ttl: int = 300) -> list[tuple]:
@@ -271,11 +311,12 @@ class AccountPool:
         if cache is not None and now - getattr(self, "_mba_at", 0) < ttl:
             return cache
         out: list[tuple] = []
-        for doc in self.healthy():
+        for doc in self.healthy(lane=None):
             try:
-                out.append((doc, self.clients[_key(doc)].models()))
+                rows = self.clients[_key(doc)].models()
             except Exception:
-                out.append((doc, []))
+                rows = []
+            out.append((doc, [{**r, "id": self._route_id(doc, r["id"])} for r in rows]))
         self._mba_cache, self._mba_at = out, now
         return out
 
