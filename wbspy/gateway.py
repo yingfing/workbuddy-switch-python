@@ -79,16 +79,19 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     app = FastAPI(title="wbspy gateway", docs_url=None, redoc_url=None)
     app.state.model_cache: list[dict] = []
     app.state.model_cached_at = 0.0
+    app.state.gw_key = api_key                    # 网页设置端点热更新直接改这里
 
-    # 统一鉴权中间件：/v1/*（OpenAI）与 /api/*（管理）都受保护，
-    # / 与 /healthz 豁免。接受 Authorization: Bearer <key> 或 X-Wbspy-Key。
+    # 统一鉴权中间件：只保护 /v1/*（对外 OpenAI 服务）；/api/* 是本机管理
+    # 界面，不被网关密钥锁死（公网防护由 _public_guard / 反向代理负责）。
+    # 接受 Authorization: Bearer <key> 或 X-Wbspy-Key。
     @app.middleware("http")
     async def auth_middleware(request, call_next):
         path = request.url.path
-        if api_key and (path.startswith("/v1") or path.startswith("/api")):
+        key = app.state.gw_key
+        if key and path.startswith("/v1"):
             presented = request.headers.get("authorization", "") or \
                         request.headers.get("x-wbspy-key", "")
-            if presented not in (f"Bearer {api_key}", api_key):
+            if presented not in (f"Bearer {key}", key):
                 return JSONResponse(status_code=401,
                                     content={"error": {"message": "invalid api key",
                                                        "type": "invalid_api_key"}})

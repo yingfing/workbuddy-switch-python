@@ -464,6 +464,35 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         app.state.model_cached_at = 0.0
         return _ok({"removed": removed})
 
+    # -- 网关访问密钥（网页控制台可改，热生效）-----------------------------------
+
+    @app.get("/api/settings/gateway-key")
+    def gateway_key_get():
+        from .cli import DEFAULT_API_KEY
+        key = app.state.gw_key
+        return _ok({"key": key, "is_default": bool(key) and key == DEFAULT_API_KEY,
+                    "default": DEFAULT_API_KEY})
+
+    @app.post("/api/settings/gateway-key")
+    async def gateway_key_set(request: Request):
+        """修改 /v1 网关访问密钥：空值=恢复内置默认；落盘并立即生效。"""
+        from .cli import DEFAULT_API_KEY
+        body = await request.json()
+        new_key = str(body.get("api_key") or "").strip()
+        cfg = load_config()
+        if new_key == DEFAULT_API_KEY or not new_key:
+            cfg.pop("api_key", None)                 # 恢复默认：从 config 移除自定义值
+            effective = DEFAULT_API_KEY
+        else:
+            if len(new_key) < 4:
+                return _err("密钥至少 4 个字符")
+            cfg["api_key"] = new_key
+            effective = new_key
+        save_config(cfg)
+        app.state.gw_key = effective                 # /v1 校验热生效，无需重启
+        _log(f"网关访问密钥已更新（{'内置默认' if effective == DEFAULT_API_KEY else '自定义'}），立即生效。")
+        return _ok({"key": effective, "is_default": effective == DEFAULT_API_KEY})
+
     return app
 
 

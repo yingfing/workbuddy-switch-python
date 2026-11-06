@@ -276,7 +276,12 @@ a{color:var(--accent);text-decoration:none}
         <code>POST /v1/chat/completions</code>（流式，多账号自动换号容错） ·
         <code>GET /v1/models</code> · <code>POST /v1/embeddings</code></p>
       <div class="kv"><span>网关地址</span><span id="gwUrl">—</span></div>
-      <div class="kv"><span>API Key</span><span id="gwKey">未启用（仅本机回环）</span></div>
+      <div class="kv"><span>API Key</span><span id="gwKey">—</span></div>
+      <div class="row" style="margin-top:10px">
+        <input id="gwKeyInput" placeholder="自定义访问密钥（留空恢复默认）" style="flex:1">
+        <button class="btn" onclick="gwKeySave()">🔑 保存密钥</button>
+      </div>
+      <span class="tag">客户端调用 /v1 需带密钥（Authorization: Bearer &lt;key&gt;）；内置默认 <code>workbuddy</code>，保存立即生效无需重启</span>
       <div class="kv"><span>可用账号</span><span id="gwHealthy">—</span></div>
     </div>
     <div class="card">
@@ -788,12 +793,26 @@ async function loadGateway() {
   $('#gwHealthy').textContent = healthy + ' / ' + accs.length;
   $('#gwAddr').textContent = location.origin;
   $('#gwUrl').textContent = location.origin + '/v1';
+  const k = await api('/api/settings/gateway-key');
+  $('#gwKey').textContent = k.data.is_default ? `${k.data.default}（内置默认）` : k.data.key;
   const m = await api('/api/models');
   const list = m.data || [];
   $('#modelEmpty').hidden = list.length > 0;
   $('#modelTable').style.display = list.length ? '' : 'none';
   $('#modelTable tbody').innerHTML = list.map(m => `<tr>
     <td><code>${m.id}</code></td><td>${m.name}</td><td>${m.region || '—'}</td></tr>`).join('');
+}
+
+async function gwKeySave() {
+  const v = $('#gwKeyInput').value.trim();
+  const r = await api('/api/settings/gateway-key', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({api_key: v})
+  });
+  if (!r.ok) return alert(r.error);
+  $('#gwKeyInput').value = '';
+  gwLoad();
 }
 
 loadChannels();

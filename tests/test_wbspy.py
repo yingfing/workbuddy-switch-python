@@ -452,6 +452,88 @@ class TestGatewayModels(unittest.TestCase):
         self.assertEqual(row["id"], "cn:fast-model")
 
 
+class TestGatewayKey(unittest.TestCase):
+    """网关访问密钥：内置默认 workbuddy + 网页改密钥热生效。"""
+
+    def test_resolve_default_workbuddy(self):
+        """解析链：显式 > env > config > 内置默认 workbuddy；--allow-insecure 置空。"""
+        import os
+        from unittest.mock import patch
+        from wbspy.cli import _resolve_api_key, DEFAULT_API_KEY
+        self.assertEqual(_resolve_api_key("", {}, False), "workbuddy")   # 全空 → 默认
+        self.assertEqual(_resolve_api_key("", {}, False), DEFAULT_API_KEY)
+        self.assertEqual(_resolve_api_key("k1", {}, False), "k1")        # 显式优先
+        with patch.dict(os.environ, {"WBSPY_API_KEY": "envk"}):
+            self.assertEqual(_resolve_api_key("", {}, False), "envk")    # env 次之
+        self.assertEqual(_resolve_api_key("", {"api_key": "cfgk"}, False), "cfgk")
+        self.assertEqual(_resolve_api_key("", {}, True), "")             # 放行 = 不校验
+
+    def test_v1_protected_api_open(self):
+        """/v1 校验 Bearer；/api 管理端点不被网关密钥锁死。"""
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.gateway import create_app
+        from wbspy.webui import create_web_app
+        from wbspy.pool import AccountPool
+        app = create_app(AccountPool([]), api_key="workbuddy")
+        with patch("wbspy.gateway.aggregate.models", return_value=[]):
+            c = TestClient(app)
+            self.assertEqual(c.get("/v1/models").status_code, 401)                 # 无 key
+            self.assertEqual(c.get("/v1/models",
+                                   headers={"Authorization": "Bearer bad"}).status_code, 401)
+            self.assertEqual(c.get("/v1/models",
+                                   headers={"Authorization": "Bearer workbuddy"}).status_code, 200)
+            self.assertEqual(c.get("/v1/models",
+                                   headers={"X-Wbspy-Key": "workbuddy"}).status_code, 200)
+        # /api/* 管理界面不被网关密钥锁死（webui 端点验证）
+        w = TestClient(create_web_app(AccountPool([]), api_key="workbuddy"))
+        self.assertEqual(w.get("/api/pool").status_code, 200)
+
+    def test_webui_change_key_hot_reload(self):
+        """网页改密钥：落盘 config + 立即生效（旧 key 401、新 key 200）。"""
+        import tempfile
+        import json as _json
+        from pathlib import Path
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.webui import create_web_app
+        from wbspy.pool import AccountPool
+        from wbspy import store
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            ctx = (patch.object(store, "CONFIG_PATH", cfg_path),
+                   patch("wbspy.webui.load_config", store.load_config),
+                   patch("wbspy.webui.save_config", store.save_config),
+                   patch("wbspy.webui.load_accounts", return_value=[]))
+            for p in ctx:
+                p.start()
+            self.addCleanup(lambda: [p.stop() for p in ctx])
+            app = create_web_app(AccountPool([]), api_key="workbuddy")
+            c = TestClient(app)
+            r = c.get("/api/settings/gateway-key").json()["data"]
+            self.assertTrue(r["is_default"])                                       # 初始为默认
+            # 改成自定义密钥
+            r = c.post("/api/settings/gateway-key",
+                       json={"api_key": "my-secret"}).json()["data"]
+            self.assertEqual(r["key"], "my-secret")
+            self.assertFalse(r["is_default"])
+            self.assertEqual(_json.loads(cfg_path.read_text())["api_key"], "my-secret")
+            # /v1 热生效：旧默认 key 拒、新 key 过
+            self.assertEqual(c.get("/v1/models",
+                                   headers={"Authorization": "Bearer workbuddy"}).status_code, 401)
+            self.assertEqual(c.get("/v1/models",
+                                   headers={"Authorization": "Bearer my-secret"}).status_code, 200)
+            # 改回默认：config 里的自定义值被移除
+            r = c.post("/api/settings/gateway-key", json={"api_key": ""}).json()["data"]
+            self.assertTrue(r["is_default"])
+            self.assertNotIn("api_key", _json.loads(cfg_path.read_text()))
+            self.assertEqual(c.get("/v1/models",
+                                   headers={"Authorization": "Bearer workbuddy"}).status_code, 200)
+            # 太短的密钥拒绝（400）
+            self.assertEqual(c.post("/api/settings/gateway-key",
+                                    json={"api_key": "ab"}).status_code, 400)
+
+
 class TestAutomationConfig(unittest.TestCase):
     """托管节奏配置：落盘 + 校验 + 自动生效。"""
 

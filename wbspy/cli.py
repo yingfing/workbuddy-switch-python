@@ -130,14 +130,27 @@ def _cmd_chat(args) -> int:
     return 0
 
 
+DEFAULT_API_KEY = "workbuddy"
+
+
+def _resolve_api_key(explicit: str, config: dict, allow_insecure: bool = False) -> str:
+    """网关访问密钥解析：--api-key → WBSPY_API_KEY → config.api_key →
+    默认 ``workbuddy``（内置兜底，局域网开箱即用）。显式 --allow-insecure
+    表示完全放开校验（api_key 置空）。"""
+    if allow_insecure:
+        return ""
+    return (explicit or os.environ.get("WBSPY_API_KEY", "")
+            or config.get("api_key", "") or DEFAULT_API_KEY)
+
+
 def _cmd_gateway(args) -> int:
     accounts = load_accounts()
     if not accounts:
         print("账号库为空，先 wbspy login。")
         return 1
     config = load_config()
-    api_key = args.api_key or os.environ.get("WBSPY_API_KEY", "") \
-        or config.get("api_key", "")
+    api_key = _resolve_api_key(args.api_key, config,
+                               getattr(args, "allow_insecure", False))
     _public_guard(args.host, api_key, getattr(args, "allow_insecure", False))
     from .pool import AccountPool as Pool
     from .gateway import run_gateway
@@ -162,8 +175,8 @@ def _public_guard(host: str, api_key: str, allow_insecure: bool = False) -> None
 def _cmd_web(args) -> int:
     """Web 界面 + 网关同进程。"""
     config = load_config()
-    api_key = args.api_key or os.environ.get("WBSPY_API_KEY", "") \
-        or config.get("api_key", "")
+    api_key = _resolve_api_key(args.api_key, config,
+                               getattr(args, "allow_insecure", False))
     _public_guard(args.host, api_key, getattr(args, "allow_insecure", False))
     pool = AccountPool(load_accounts())
     from .gateway import create_app  # noqa: F401  确保依赖就绪
