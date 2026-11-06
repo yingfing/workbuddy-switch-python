@@ -53,8 +53,8 @@ def _retry(fn, label: str, log: Callable[[str], None], summary: dict,
 def run_once(doc: Document, log: Callable[[str], None] = print) -> dict:
     """对单个账号跑一轮全部积分动作。"""
     summary: dict[str, str] = {}
-    if doc.channel_name != "WorkBuddy 国内版" or not doc.api_ready:
-        summary["skip"] = f"非 WorkBuddy 国内版（{doc.channel_name}）或无明文 token，跳过活动"
+    if "checkin" not in doc.capabilities or not doc.api_ready:
+        summary["skip"] = f"渠道 {doc.channel_name} 未声明签到能力或无明文 token，跳过活动"
         return summary
     client = WorkBuddyClient(doc)
     log(f"· {doc.label()}：")

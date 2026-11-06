@@ -348,3 +348,32 @@ class TestChannelIsolation(unittest.TestCase):
         _public_guard("0.0.0.0", "", allow_insecure=True)
         with self.assertRaises(SystemExit):
             _public_guard("0.0.0.0", "")             # 公网无 key 拒绝
+
+
+class TestCapabilities(unittest.TestCase):
+    """能力声明：路由的唯一依据（结构性防止跨渠道误调用）。"""
+
+    def test_buddy_declares_all(self):
+        from wbspy.document import parse_auth
+        doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
+                          "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}})
+        self.assertEqual(doc.capabilities,
+                         frozenset({"chat", "models", "refresh", "checkin", "credits"}))
+
+    def test_third_party_empty(self):
+        from wbspy.document import parse_auth
+        for domain in ("api.trae.com.cn", "api.cline.bot", "qoder.cn"):
+            doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
+                              "auth": {"accessToken": "t", "domain": domain}})
+            self.assertEqual(doc.capabilities, frozenset(), domain)
+
+    def test_channel_names_come_from_registry(self):
+        """channel_name 必须与注册表同名（单一事实来源）。"""
+        from wbspy.channels import CHANNELS
+        from wbspy.document import parse_auth, _CHANNEL_DOMAIN_NEEDLES
+        for needle, cid in _CHANNEL_DOMAIN_NEEDLES:
+            cid = cid("qoder.cn") if callable(cid) else cid
+            self.assertIn(cid, CHANNELS, cid)
+        doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
+                          "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}})
+        self.assertEqual(doc.channel_name, CHANNELS["buddy"].name)

@@ -31,6 +31,8 @@ class Channel:
     unit: str = "credits"            # credits / dollars / tokens
     quota: bool = False              # 额度按百分比桶返回
     login_kind: str = "qr"           # method 的细分实现键
+    capabilities: tuple[str, ...] = ()   # 运行期能力声明：chat/models/refresh/checkin/credits
+                                             # pool 与网关路由前必查，杜绝拿 A 渠道凭据打 B 渠道接口
 
 
 CHANNELS: dict[str, Channel] = {c.id: c for c in (
@@ -38,11 +40,13 @@ CHANNELS: dict[str, Channel] = {c.id: c for c in (
     Channel("buddy", "WorkBuddy 国内版", "腾讯", "browser+local",
             origin="https://www.codebuddy.cn", auth_platform="workbuddy",
             note="DeepSeek · Kimi · GLM 免费线，每日赠送积分；桌面客户端可读本机快照",
-            credits_claim=True, credits_status=True, login_kind="workbuddy-state"),
+            credits_claim=True, credits_status=True, login_kind="workbuddy-state",
+            capabilities=("chat", "models", "refresh", "checkin", "credits")),
     Channel("workbuddy", "WorkBuddy 国际版", "腾讯", "browser+local",
             origin="https://www.workbuddy.ai", auth_platform="workbuddy-ai",
             note="独立端点与账号体系，积分与国内版不互通；后端没有每日签到接口",
-            credits_status=True, login_kind="workbuddy-state"),
+            credits_status=True, login_kind="workbuddy-state",
+            capabilities=("chat", "models", "refresh", "credits")),
     # --- 扫码直登（协议级二维码轮询，来自 dsh-xdpool channel pack）---
     Channel("raccoon", "Raccoon", "商汤", "qr",
             origin="https://api.raccoon.sensetime.com",

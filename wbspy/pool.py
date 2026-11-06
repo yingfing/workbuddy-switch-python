@@ -81,8 +81,8 @@ class AccountPool:
         self.cooldowns.sweep()
         out = []
         for k, doc in self.documents.items():
-            if not doc.is_workbuddy or not doc.api_ready or self.dead_until.get(k, 0) > now:
-                continue                     # 非 WorkBuddy 渠道凭据不进 WorkBuddy 上游路由
+            if "chat" not in doc.capabilities or not doc.api_ready or self.dead_until.get(k, 0) > now:
+                continue                     # 渠道未声明 chat 能力 → 不进 WorkBuddy 上游路由
             if model != "*" and self.cooldowns.get(k, model) > now:
                 continue
             out.append(doc)
@@ -169,8 +169,8 @@ class AccountPool:
             from .store import save_account
             while True:
                 for k, doc in list(self.documents.items()):
-                    if not doc.is_workbuddy or not doc.refresh_token or doc.protected_token:
-                        continue             # 非 WorkBuddy 凭据有各自续期协议，别拿去打 WorkBuddy 接口
+                    if "refresh" not in doc.capabilities or not doc.refresh_token or doc.protected_token:
+                        continue             # 渠道未声明 refresh 能力 → 不代为续期
                     exp = doc.token_expires_at or 0
                     if exp and exp > (time.time() + 600) * 1000:
                         continue                       # 还没临期

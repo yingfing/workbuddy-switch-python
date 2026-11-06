@@ -26,6 +26,32 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .channels import CHANNELS
+
+
+def _qoder_id(domain: str) -> str:
+    return "qodercn" if ".cn" in domain else "qoder"
+
+
+# domain 子串 → 渠道注册表 id（顺序敏感：具体域名先于宽泛子串）
+_CHANNEL_DOMAIN_NEEDLES: tuple[tuple[str, Any], ...] = (
+    ("codebuddy.cn", "buddy"),
+    ("workbuddy.ai", "workbuddy"),
+    ("trae", "trae"),
+    ("qoder", _qoder_id),
+    ("lobsterai", "lobsterai"),
+    ("youdao.com", "lobsterai"),
+    ("zcode", "zcode"),
+    ("z.ai", "zcode"),
+    ("cline", "cline"),
+    ("huaweicloud", "codearts"),
+    ("minimax", "minimax"),
+    ("xfinfr", "loomy"),
+    ("googleapis", "gemini"),
+    ("raccoon", "raccoon"),
+    ("sensetime", "raccoon"),
+)
+
 # ---------------------------------------------------------------------------
 # 区域 / 端点判定（对应原版 quota.mjs 的 apiOrigin / workBuddyOrigin）
 # ---------------------------------------------------------------------------
@@ -145,35 +171,37 @@ class Document:
     @property
     def is_workbuddy(self) -> bool:
         """是否 WorkBuddy 系凭据（国内/国际版）——只有它们能调 WorkBuddy 上游。"""
-        return self.channel_name.startswith("WorkBuddy")
+        return self.channel_id in ("buddy", "workbuddy")
+
+    @property
+    def channel_id(self) -> str | None:
+        """凭据所属渠道的注册表 id（domain 子串识别）。"""
+        d = (self.domain or "").lower()
+        if not d:
+            return "buddy"                       # 无域名的老快照视为 WorkBuddy 国内版
+        for needle, cid in _CHANNEL_DOMAIN_NEEDLES:
+            if needle in d:
+                return cid(d) if callable(cid) else cid
+        return None                              # 未知域名：能力视为空，展示用域名本身
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        """运行期能力声明（chat/models/refresh/checkin/credits），来自渠道注册表。
+
+        pool / 网关 / 自动化路由前必查——渠道不声明的能力绝不调用，
+        从结构上杜绝「拿 TRAE 凭据打 WorkBuddy 接口」这类误用。
+        """
+        ch = CHANNELS.get(self.channel_id or "")
+        return frozenset(ch.capabilities) if ch else frozenset()
 
     @property
     def channel_name(self) -> str:
-        """凭据所属渠道的友好名（按 domain 子串识别，与渠道注册表对齐）。"""
+        """凭据所属渠道的友好名（由 channel_id 查注册表，未知域名原样展示）。"""
+        ch = CHANNELS.get(self.channel_id or "")
+        if ch:
+            return ch.name
         d = (self.domain or "").lower()
-        if not d:
-            return "WorkBuddy 账号"
-        # 顺序敏感：codebuddy.cn 先于通用 workbuddy 匹配
-        for needle, name in (
-            ("codebuddy.cn", "WorkBuddy 国内版"),
-            ("workbuddy.ai", "WorkBuddy 国际版"),
-            ("trae", "TRAE"),
-            ("qoder", "Qoder 国内版" if d.endswith(".cn") or ".cn" in d else "Qoder 国际版"),
-            ("lobsterai", "LobsterAI"),
-            ("youdao.com", "LobsterAI"),
-            ("zcode", "ZCode"),
-            ("z.ai", "ZCode"),
-            ("cline", "Cline"),
-            ("huaweicloud", "CodeArts"),
-            ("minimax", "MiniMax Code"),
-            ("xfinfr", "Loomy"),
-            ("googleapis", "Gemini Code Assist"),
-            ("raccoon", "Raccoon"),
-            ("sensetime", "Raccoon"),
-        ):
-            if needle in d:
-                return name
-        return d                                  # 未知域名原样展示，好排查
+        return d or "WorkBuddy 账号"
 
     @property
     def token_expired(self) -> bool:

@@ -275,8 +275,8 @@ def create_web_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         for d in load_accounts():
             row = {"uid": d.uid, "label": d.label(), "channel": d.channel_name,
                    "region": d.region, "api_ready": d.api_ready}
-            if not d.is_workbuddy:
-                row.update(error="该渠道无 WorkBuddy 积分接口")
+            if "credits" not in d.capabilities:
+                row.update(error="该渠道未声明余额查询能力")
             elif not d.token:
                 row.update(error="加密凭据，请重新网页授权后查询")
             else:
