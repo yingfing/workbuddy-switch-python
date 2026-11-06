@@ -117,11 +117,21 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     def models(authorization: str = Header("")) -> dict:
         now = time.time()
         if now - app.state.model_cached_at > MODEL_TTL_SEC:
-            # 账号池模型：id 是路由键保持不动，名字/地区/计费倍率作为扩展字段一并下发；
-            # 按官方倍率升序（限时免费 0 最前），无倍率的排后面
+            # 账号池模型：id 是路由键保持不动；官方计费倍率直接拼进显示名
+            # （如「快速 0.15x」「Hy4（限时免费）」），任何客户端都可见；
+            # 排序按倍率升序，限时免费最前
+            def _with_rate(m: dict) -> str:
+                base = m.get("name") or m["id"].split(":", 1)[-1]
+                cm = m.get("credit_multiplier")
+                if cm == 0:
+                    return f"{base}（限时免费）"
+                if isinstance(cm, (int, float)):
+                    return f"{base} {cm:.2f}x"
+                return base
+
             pool_rows = [{"id": m["id"], "object": "model", "owned_by": "wbspy",
                           **m.get("wbspy", {}),
-                          "name": m.get("name") or m["id"].split(":", 1)[-1],
+                          "name": _with_rate(m),
                           "region": m.get("region"),
                           **({"credit_multiplier": m["credit_multiplier"]}
                              if "credit_multiplier" in m else {})}

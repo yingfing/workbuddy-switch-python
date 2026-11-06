@@ -473,6 +473,11 @@ class TestGatewayModels(unittest.TestCase):
         self.assertEqual(ids, ["workbuddy:hy4free", "workbuddy:balanced-model",
                                "workbuddy:auto"])      # 免费 → 倍率升序 → 无倍率殿后
         self.assertEqual(rows[0]["credit_multiplier"], 0)
+        # 倍率拼进显示名，任何客户端可见
+        names = {r["id"]: r["name"] for r in rows}
+        self.assertEqual(names["workbuddy:hy4free"], "Hy4（限时免费）")
+        self.assertEqual(names["workbuddy:balanced-model"], "均衡 0.50x")
+        self.assertEqual(names["workbuddy:auto"], "Auto")   # 无倍率不加后缀
 
 
     def test_legacy_cn_prefix_still_routes(self):
