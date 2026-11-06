@@ -277,3 +277,29 @@ class TestCreditsParse(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAutomationScope(unittest.TestCase):
+    """自动化只对 WorkBuddy 国内版账号生效（其他渠道跳过，不发无效请求）。"""
+
+    def test_third_party_account_skipped(self):
+        from unittest.mock import patch, MagicMock
+        from wbspy import automation
+        trae = parse_auth({"account": {"uid": "t", "nickname": "TRAE 号"},
+                           "auth": {"accessToken": "tt", "domain": "api.trae.com.cn"}})
+        with patch.object(automation, "WorkBuddyClient") as MockClient:
+            summary = automation.run_once(trae, log=lambda *_: None)
+            self.assertIn("skip", summary)
+            MockClient.assert_not_called()          # 一个上游请求都不该发
+
+    def test_buddy_account_runs(self):
+        from unittest.mock import patch, MagicMock
+        from wbspy import automation
+        buddy = parse_auth({"account": {"uid": "b", "nickname": "莲"},
+                            "auth": {"accessToken": "tt", "domain": "www.codebuddy.cn"}})
+        client = MagicMock()
+        client.buddy_ensure.return_value = ""
+        client.checkin.return_value = {"gotCredits": 100}
+        with patch.object(automation, "WorkBuddyClient", return_value=client):
+            summary = automation.run_once(buddy, log=lambda *_: None)
+            self.assertNotIn("skip", summary)
