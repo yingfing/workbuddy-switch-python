@@ -2,6 +2,15 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.11] — 2026-11-07
+
+### 修复
+- **Qoder 账号「目录不可用」**：所有非 Cline 渠道此前一律被塞进 WorkBuddyClient，Qoder 凭据打 WorkBuddy 目录端点必然失败。新增 QoderClient——模型目录逐条搬运原版 channel-pack 官方静态表（国际版 17 条 / 国内版 14 条，含计费倍率与上下文档位），`qoder:`/`qodercn:` 前缀进入目录与网关路由。
+- **对话诚实报错**：Qoder 加密推理（wasm COSY 签名协议）尚未接入，调用返回明确 501 指路 WorkBuddy/Cline，绝不误投 WorkBuddy 端点，也不触发换号/冷却。
+
+### 新增
+- **「我的模型」页 WorkBuddy 分组折叠**（此前只有 Cline 能折叠）；Qoder 分组自动出现（默认收起，标题注明「目录仅供查看」）；搜索命中自动展开对应分组。
+
 ## [0.2.10] — 2026-11-07
 
 ### 修复
