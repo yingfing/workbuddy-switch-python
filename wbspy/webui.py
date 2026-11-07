@@ -473,6 +473,58 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
     def api_pool():
         return _ok(pool.status())
 
+    @app.get("/api/health")
+    def api_health():
+        """面板首屏健康总览：哪里不行、怎么处理，一眼看完。
+
+        报警源（按严重度排）：凭据失效（池标死）> 渠道全灭 > 登录过期
+        （等自动续期）> 积分低于降级阈值。每条都带行动指引，打开页面
+        第一屏就知道「哪里不行、怎么搞」。
+        """
+        import time as _time
+        now = _time.time()
+        gw = (load_config().get("gateway") or {})
+        thr = gw.get("priority_threshold")
+        thr = float(thr) if isinstance(thr, (int, float)) and not isinstance(thr, bool) else 100.0
+        cache = gw.get("credits_cache") or {}
+        from .pool import _key
+        alerts: list[dict] = []
+        lanes: dict[str, dict] = {}
+        for d in load_accounts():
+            lane = d.channel_name or d.domain or "未知渠道"
+            st = lanes.setdefault(lane, {"total": 0, "alive": 0})
+            st["total"] += 1
+            if pool.dead_until.get(_key(d), 0) > now:
+                alerts.append({"level": "error", "title": f"「{d.label()}」凭据失效",
+                               "action": "到「账号池」页重新网页授权（扫码或浏览器均可）",
+                               "tab": "accounts"})
+            elif not d.api_ready:
+                alerts.append({"level": "warn", "title": f"「{d.label()}」登录已过期",
+                               "action": "等待自动续期（最长 5 分钟）；未恢复请重新网页授权",
+                               "tab": "accounts"})
+            else:
+                st["alive"] += 1
+                rec = cache.get(d.uid)
+                total = rec.get("total") if isinstance(rec, dict) else None
+                if thr > 0 and isinstance(total, (int, float)) and total < thr:
+                    alerts.append({
+                        "level": "warn",
+                        "title": f"「{d.label()}」积分 {int(total)} 低于降级阈值 {int(thr)}",
+                        "action": "到「积分自动化」页领取额度，或在账号池页调低阈值",
+                        "tab": "auto"})
+        for lane, st in lanes.items():
+            if st["total"] and not st["alive"]:
+                alerts.append({"level": "error",
+                               "title": f"{lane} 全部账号不可用（{st['total']} 个）",
+                               "action": "该渠道模型此刻无法调用；到「账号池」页重新授权",
+                               "tab": "accounts"})
+        rank = {"error": 0, "warn": 1}
+        alerts.sort(key=lambda a: rank.get(a.get("level"), 9))
+        return _ok({"healthy": not alerts,
+                    "total": sum(s["total"] for s in lanes.values()),
+                    "alive": sum(s["alive"] for s in lanes.values()),
+                    "lanes": lanes, "alerts": alerts})
+
     @app.get("/api/models")
     def api_models():
         return _ok(pool.models())

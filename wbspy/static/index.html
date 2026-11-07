@@ -232,6 +232,11 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
     <button id="themeBtn" title="切换主题">◐</button>
   </header>
 
+  <!-- 健康总览：常驻首屏，哪里不行怎么搞一眼看完（10s 轮询） -->
+  <div id="healthBar" class="card" style="padding:10px 14px;margin-bottom:12px;font-size:13px">
+    <span style="color:var(--dim)">健康状态加载中…</span>
+  </div>
+
   <nav id="tabs">
     <button data-tab="login" class="on">登录</button>
     <button data-tab="accounts">账号池</button>
@@ -532,6 +537,50 @@ async function busy(btn, fn) {
   btn.disabled = true; btn.textContent = '处理中…';
   try { await fn(); } finally { btn.disabled = false; btn.textContent = old; }
 }
+
+// -- 健康总览（首屏报警：哪里不行、怎么搞） --
+async function loadHealth() {
+  try {
+    const r = await api('/api/health');
+    const d = r.data || {};
+    const bar = $('#healthBar');
+    const alerts = d.alerts || [];
+    const laneBits = Object.entries(d.lanes || {})
+      .map(([n, s]) => `${n} ${s.alive}/${s.total}`)
+      .join(' · ');
+    if (!alerts.length) {
+      bar.style.background = 'var(--ok-bg)';
+      bar.innerHTML = `<b style="color:var(--ok-fg)">✓ 一切正常</b>
+        <span style="color:var(--dim);margin-left:10px">池内 ${d.alive}/${d.total} 个账号可用 —— ${laneBits}</span>`;
+      return;
+    }
+    const errs = alerts.filter(a => a.level === 'error').length;
+    const bg = errs ? 'var(--bad-bg)' : 'var(--warn-bg, rgba(255,212,38,.12))';
+    const fg = errs ? 'var(--bad-fg)' : 'var(--warn)';
+    bar.style.background = bg;
+    bar.innerHTML = `<b style="color:${fg};cursor:pointer" onclick="toggleHealthList()">⚠ ${errs ? errs + ' 个严重问题' : alerts.length + ' 个提醒'}需要处理（点击收起）</b>
+      <span style="color:var(--dim);margin-left:10px">${d.alive}/${d.total} 个账号可用 —— ${laneBits}</span>
+      <div id="healthList" style="margin-top:8px;display:grid;gap:6px">
+        ${alerts.map(a => `
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;
+                      padding:6px 10px;border-radius:6px;background:rgba(128,128,128,.08)">
+            <b style="color:${a.level === 'error' ? 'var(--bad-fg)' : 'var(--warn)'}">${a.title}</b>
+            <span style="color:var(--dim)">→ ${a.action}</span>
+            <button class="btn sm ghost" style="margin-left:auto" onclick="gotoTab('${a.tab || 'accounts'}')">去处理</button>
+          </div>`).join('')}
+      </div>`;
+  } catch (e) { /* 面板轮询失败不打扰用户 */ }
+}
+function toggleHealthList() {
+  const l = $('#healthList');
+  if (l) l.remove(); else loadHealth();          // 收起 / 重渲染展开
+}
+function gotoTab(t) {
+  const btn = document.querySelector(`#tabs button[data-tab="${t}"]`);
+  if (btn) btn.click();
+}
+setInterval(loadHealth, 10000);
+loadHealth();
 
 // -- 标签页 --
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {

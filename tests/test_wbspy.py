@@ -2892,3 +2892,102 @@ class TestLifesaverRefresh(unittest.TestCase):
                 "model": "auto", "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(r.status_code, 503)
         self.assertIn("账号页", r.json()["error"]["message"])
+
+
+class TestHealthPanel(unittest.TestCase):
+    """首屏健康总览 /api/health：哪里不行、怎么搞，一眼看完。
+    报警源：凭据失效（error）> 渠道全灭（error）> 登录过期（warn）
+    > 积分低于降级阈值（warn），每条带行动指引与跳转 tab。"""
+
+    def _pool(self, n=2):
+        from wbspy.pool import AccountPool
+        from wbspy.document import parse_auth
+        docs = [parse_auth({"account": {"uid": f"hp{i}", "nickname": f"号{i}"},
+                            "auth": {"accessToken": "t", "refreshToken": "rt",
+                                     "domain": "www.codebuddy.cn"}})
+                for i in range(n)]
+        return AccountPool(docs)
+
+    def _get(self, pool, docs, **gw):
+        from unittest.mock import patch
+        from wbspy.webui import create_web_app
+        from fastapi.testclient import TestClient
+        from wbspy import store
+        c = TestClient(create_web_app(pool, api_key=""))
+        cfg = {"gateway": gw}
+        with patch.object(store, "load_config", return_value=lambda: cfg or cfg) if False else \
+             patch("wbspy.webui.load_config", return_value=cfg), \
+             patch("wbspy.webui.load_accounts", return_value=docs):
+            r = c.get("/api/health")
+        self.assertEqual(r.status_code, 200)
+        return r.json()["data"]
+
+    def test_all_healthy(self):
+        pool = self._pool(2)
+        out = self._get(pool, list(pool.documents.values()))
+        self.assertTrue(out["healthy"])
+        self.assertEqual(out["alerts"], [])
+        self.assertEqual(out["alive"], 2)
+        self.assertIn("WorkBuddy 国内版", out["lanes"])  # 渠道分组计数可见
+
+    def test_dead_account_alerts_error_with_action(self):
+        from wbspy.pool import _key
+        pool = self._pool(2)
+        docs = list(pool.documents.values())
+        pool.dead_until[_key(docs[0])] = 9e12         # 标死
+        out = self._get(pool, docs)
+        self.assertFalse(out["healthy"])
+        dead = [a for a in out["alerts"] if "凭据失效" in a["title"]]
+        self.assertEqual(len(dead), 1)
+        self.assertEqual(dead[0]["level"], "error")
+        self.assertIn("重新网页授权", dead[0]["action"])
+        self.assertEqual(dead[0]["tab"], "accounts")
+        self.assertEqual(out["alive"], 1)
+
+    def test_expired_login_warns(self):
+        pool = self._pool(1)
+        docs = list(pool.documents.values())
+        docs[0].token_expires_at = 1                   # 本地判定过期
+        out = self._get(pool, docs)
+        # 单账号泳道全灭会同时触发「渠道全灭 error」——这是设计内行为
+        self.assertTrue(out["alerts"])
+        warn = [a for a in out["alerts"] if a["level"] == "warn"]
+        self.assertEqual(len(warn), 1)
+        self.assertIn("自动续期", warn[0]["action"])
+
+    def test_low_credits_below_threshold_warns(self):
+        pool = self._pool(1)
+        docs = list(pool.documents.values())
+        out = self._get(pool, docs, priority_threshold=100,
+                        credits_cache={docs[0].uid: {"total": 42, "at": 1}})
+        self.assertEqual(len(out["alerts"]), 1)
+        self.assertIn("低于降级阈值 100", out["alerts"][0]["title"])
+        self.assertEqual(out["alerts"][0]["tab"], "auto")
+
+    def test_lane_wipeout_error_ranks_first(self):
+        """渠道全灭 = error，全部 error 排在 warn 之前。"""
+        from wbspy.pool import _key
+        pool = self._pool(3)
+        docs = list(pool.documents.values())
+        for d in docs[:2]:
+            pool.dead_until[_key(d)] = 9e12            # 两号标死
+        out = self._get(pool, docs, priority_threshold=100,
+                        credits_cache={docs[2].uid: {"total": 10, "at": 1}})  # 活号低积分
+        levels = [a["level"] for a in out["alerts"]]
+        self.assertEqual(levels[-1], "warn")            # warn 殿后
+        self.assertEqual(levels[:-1], ["error", "error"])
+        self.assertEqual(out["alive"], 1)
+
+    def test_lane_wipeout_alert(self):
+        """渠道内全部账号不可用 → 单独一条「全部账号不可用」报警。"""
+        from wbspy.pool import _key
+        pool = self._pool(2)
+        docs = list(pool.documents.values())
+        for d in docs:
+            pool.dead_until[_key(d)] = 9e12
+        out = self._get(pool, docs)
+        wipe = [a for a in out["alerts"] if "全部账号不可用" in a["title"]]
+        self.assertEqual(len(wipe), 1)
+        self.assertEqual(wipe[0]["level"], "error")
+        self.assertIn("重新授权", wipe[0]["action"])
+        self.assertEqual(out["alive"], 0)
