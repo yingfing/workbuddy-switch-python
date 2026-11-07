@@ -1922,3 +1922,91 @@ class TestQoderLane(unittest.TestCase):
         self.assertEqual(r.status_code, 501)
         self.assertEqual(r.json()["error"]["type"], "qoder_infer_unsupported")
         self.assertIn("尚未在本版接入", r.json()["error"]["message"])
+
+
+class TestVisionSwitch(unittest.TestCase):
+    """WorkBuddy 视觉识别开关：目录声明 input 模态 + 图片透传/剥除。"""
+
+    def test_strip_images(self):
+        from wbspy.gateway import strip_images
+        img = {"type": "image_url", "image_url": {"url": "data:image/png;base64,xx"}}
+        payload = {"messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": [
+                {"type": "text", "text": "看图"}, img]},
+            {"role": "user", "content": "纯文本不动"},
+        ]}
+        out, n = strip_images(payload)
+        self.assertEqual(n, 1)
+        c = out["messages"][1]["content"]
+        self.assertEqual(c[0], {"type": "text", "text": "看图"})   # 原 text 保留
+        self.assertIn("图片已省略", c[1]["text"])                  # 占位接在后面
+        self.assertEqual(out["messages"][2]["content"], "纯文本不动")
+        self.assertEqual(out["messages"][0]["content"], "sys")
+        # 无图 → 原对象原样返回（零拷贝零改动）
+        same, n2 = strip_images({"messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(n2, 0)
+        self.assertEqual(same["messages"][0]["content"], "hi")
+
+    def _pool(self):
+        from wbspy.pool import AccountPool
+        return AccountPool([])
+
+    def test_catalog_declares_vision_by_default(self):
+        from unittest.mock import patch
+        pool = self._pool()
+        rows = [{"id": "workbuddy:hy3", "name": "Hy3", "region": "cn"},
+                {"id": "cline:claude-x", "name": "X", "region": "intl"}]
+        with patch.object(pool, "models", return_value=rows):
+            c, _app = _gw_client(pool)
+            _app.state.model_cached_at = 0
+            data = {m["id"]: m for m in c.get("/v1/models").json()["data"]}
+        self.assertEqual(data["workbuddy:hy3"].get("input"), ["text", "image"])
+        self.assertNotIn("input", data["cline:claude-x"])     # 越权代言不许
+
+    def test_vision_off_strips_images_and_hides_input(self):
+        from unittest.mock import MagicMock, patch
+        pool = self._pool()
+        rows = [{"id": "workbuddy:hy3", "name": "Hy3", "region": "cn"}]
+        with patch.object(pool, "models", return_value=rows):
+            c, app = _gw_client(pool)
+            app.state.gw_vision = False
+            app.state.model_cached_at = 0
+            data = c.get("/v1/models").json()["data"]
+            self.assertTrue(all("input" not in m for m in data))
+            # chat 链路：图片被剥成占位文字
+            client = MagicMock()
+            app.state.pool = pool
+            with patch.object(pool, "pick", return_value=None):
+                r = c.post("/v1/chat/completions", json={"model": "workbuddy:hy3",
+                            "messages": [{"role": "user", "content": [
+                                {"type": "text", "text": "hi"},
+                                {"type": "image_url", "image_url": {"url": "data:..."}}]}]})
+            self.assertEqual(r.status_code, 503)      # 无可用账号（池空）但不 500
+
+    def test_settings_toggle_vision(self):
+        """网页设置端点切视觉开关 → 落盘 + 目录声明即时跟随。"""
+        import json as _json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.webui import create_web_app
+        from wbspy import store
+        pool = self._pool()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with patch.object(pool, "models", return_value=[
+                {"id": "workbuddy:hy3", "name": "Hy3", "region": "cn"}]), \
+             patch.object(store, "CONFIG_PATH", Path(tmp.name) / "config.json"), \
+             patch("wbspy.webui.load_config", store.load_config), \
+             patch("wbspy.webui.save_config", lambda c: None):
+            app = create_web_app(pool, api_key="", port=8178)
+            app.state.model_cached_at = 0
+            c = TestClient(app, raise_server_exceptions=False)
+            r = c.post("/api/settings/gateway", json={"vision": False})
+            self.assertEqual(r.status_code, 200)
+            self.assertFalse(r.json()["data"]["vision"])
+            self.assertFalse(app.state.gw_vision)
+            data = c.get("/v1/models").json()["data"]
+            self.assertTrue(all("input" not in m for m in data))

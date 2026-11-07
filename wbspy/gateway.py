@@ -36,6 +36,36 @@ from .upstream import EMBEDDING_MODELS, UpstreamError
 MODEL_TTL_SEC = 300
 
 
+def strip_images(payload: dict) -> tuple[dict, int]:
+    """视觉透传关闭时剥掉消息里的图片 part，换文字占位（对齐原版
+    `[image unavailable]` 思路——宁可明说图没了，不发假占位骗模型）。
+
+    返回 (新 payload, 剥掉的图数)；content 为字符串或无图的消息零改动。
+    """
+    msgs = payload.get("messages")
+    if not isinstance(msgs, list):
+        return payload, 0
+    out: list = []
+    dropped = 0
+    for m in msgs:
+        c = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(c, list):
+            out.append(m)
+            continue
+        parts: list = []
+        changed = False
+        for p in c:
+            if isinstance(p, dict) and (p.get("type") in ("image_url", "image")
+                                        or isinstance(p.get("image_url"), (str, dict))):
+                dropped += 1
+                changed = True
+                parts.append({"type": "text", "text": "（图片已省略：网关视觉透传已关闭）"})
+            else:
+                parts.append(p)
+        out.append({**m, "content": parts} if changed else m)
+    return ({**payload, "messages": out}, dropped) if dropped else (payload, 0)
+
+
 def _sse_aggregate(resp, route_model: str) -> dict:
     """上游强制流式 → 聚合 SSE 块为完整 chat.completion（对齐参考实现）。"""
     content_parts: list[str] = []
@@ -90,6 +120,12 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     # 关闭后 /v1/models 只暴露账号池模型，目录清爽
     app.state.gw_aggregate = bool(
         (load_config().get("gateway") or {}).get("aggregate", True))
+    # 视觉透传开关（config gateway.vision，默认开）：开启时 /v1/models 目录行
+    # 带视觉能力声明（input: ["text","image"]，对齐原版 channel-pack 网关出站
+    # 约定，客户端据此放行传图），消息里的图片 part 原样透传上游；关闭时
+    # 目录不声明、图片 part 剥成文字占位（上游零图片流量）。
+    app.state.gw_vision = bool(
+        (load_config().get("gateway") or {}).get("vision", True))
     # 网关运行日志（与自动化共用网页日志抽屉 /api/logs）
     app.state.auto_log: list[str] = []
     app.state.auto_total = 0
@@ -279,12 +315,23 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                 return {"credit_multiplier": v} \
                     if isinstance(v, (int, float)) and not isinstance(v, bool) else {}
 
+            def _vision_field(m: dict) -> dict:
+                """视觉声明只给 WorkBuddy 系行（原版实测全表 supportsImages）；
+                Cline/Qoder 行模型混杂不越权代言。字段名对齐原版网关出站
+                （input: ["text","image"]），客户端按它放行传图。"""
+                if not getattr(app.state, "gw_vision", True):
+                    return {}
+                mid = str(m.get("id") or "")
+                if mid.startswith(("cline:", "qoder:", "qodercn:")):
+                    return {}
+                return {"input": ["text", "image"]}
+
             try:
                 pool_rows = [{"id": m["id"], "object": "model", "owned_by": "wbspy",
                               **m.get("wbspy", {}),
                               "name": _with_rate(m),
                               "region": m.get("region"),
-                              **_cm_field(m)}
+                              **_cm_field(m), **_vision_field(m)}
                              for m in pool.models()]
             except Exception as exc:
                 # 目录拉取失败不该 500 卡死客户端启动：用旧缓存顶上，没有则空目录
@@ -431,6 +478,10 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             raw = {**raw, "model": rest}
         elif sep and head in ("workbuddy", "cn", "global"):
             raw = {**raw, "model": rest}
+        # 视觉透传关闭 → 剥图（占位文字替代，上游零图片流量）
+        if not getattr(app.state, "gw_vision", True):
+            raw, _dropped = strip_images(raw)
+
         raw, _trimmed = trim_context(raw)
 
         # 会话键：客户端可显式传 x-wbspy-session；缺省用「system+首条消息」

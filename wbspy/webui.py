@@ -549,6 +549,7 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         return _ok({
             "enabled": bool(getattr(app.state, "gw_enabled", True)),
             "aggregate": bool(getattr(app.state, "gw_aggregate", True)),
+            "vision": bool(getattr(app.state, "gw_vision", True)),
             "port": (cfg.get("web") or {}).get("port") or "",
             "current_port": cur,
         })
@@ -567,6 +568,7 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         cur = getattr(app.state, "web_port", None)
         result = {"enabled": bool(getattr(app.state, "gw_enabled", True)),
                   "aggregate": bool(getattr(app.state, "gw_aggregate", True)),
+                  "vision": bool(getattr(app.state, "gw_vision", True)),
                   "port": (cfg.get("web") or {}).get("port") or "",
                   "restart_required": False}
 
@@ -588,6 +590,15 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
             result["aggregate"] = agg
             _log("聚合渠道模型：" + ("已纳入 /v1/models 目录。" if agg
                                      else "已从 /v1/models 目录移除。"))
+
+        if "vision" in body:
+            vis = bool(body.get("vision"))
+            cfg.setdefault("gateway", {})["vision"] = vis
+            app.state.gw_vision = vis
+            app.state.model_cached_at = 0            # 目录声明跟随开关，缓存作废
+            result["vision"] = vis
+            _log("视觉透传：" + ("已开启——客户端可传图，图片原样发往上游。" if vis
+                                 else "已关闭——图片在网关剥除（文字占位），上游零图片流量。"))
 
         if "port" in body and str(body.get("port") or "").strip():
             raw = str(body.get("port")).strip()

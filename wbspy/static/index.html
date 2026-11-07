@@ -412,6 +412,11 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       </div>
 
       <div class="gwSec">
+        <div class="gwTitle">视觉透传（识图） <button class="btn sm" id="visSwitch" onclick="visSwitchToggle()">…</button></div>
+        <div class="hint">开启后 WorkBuddy 泳道模型在目录里声明视觉能力（<code>input: ["text","image"]</code>），客户端可传图、图片原样发往上游；关闭后图片在网关剥成文字占位，上游零图片流量。立即生效。</div>
+      </div>
+
+      <div class="gwSec">
         <div class="gwTitle">服务端口 <span class="tag" id="gwPortNow">—</span></div>
         <div class="row">
           <input id="gwPortInput" placeholder="新端口（1-65535，重启后生效）" style="flex:1">
@@ -1068,12 +1073,14 @@ async function loadGateway() {
   const gs = await api('/api/settings/gateway');
   gwState.enabled = !!gs.data.enabled;
   gwState.aggregate = gs.data.aggregate !== false;
+  gwState.vision = gs.data.vision !== false;
   gwState.port = gs.data.port || '';
   $('#gwPortNow').textContent = gs.data.current_port
     ? `${gs.data.current_port}（当前监听）` + (gwState.port && +gwState.port !== gs.data.current_port ? ` → 待重启切到 ${gwState.port}` : '')
     : '—';
   paintGwSwitch();
   paintAggSwitch();
+  paintVisSwitch();
   const m = await api('/api/models');
   const list = m.data || [];
   $('#modelEmpty').hidden = list.length > 0;
@@ -1104,7 +1111,7 @@ async function gwKeySave(btn) {
   });
 }
 
-let gwState = {enabled: true, port: '', aggregate: true};
+let gwState = {enabled: true, port: '', aggregate: true, vision: true};
 
 // 只读字段一键复制（http 局域网降级 execCommand）
 async function copyField(id, btn) {
@@ -1139,6 +1146,24 @@ function paintAggSwitch() {
   const b = $('#aggSwitch');
   b.textContent = gwState.aggregate ? '纳入目录 · 点击关闭' : '已隐藏 · 点击开启';
   b.style.color = gwState.aggregate ? 'var(--ok)' : 'var(--dim)';
+}
+
+function paintVisSwitch() {
+  const b = $('#visSwitch');
+  b.textContent = gwState.vision ? '识图开启 · 点击关闭' : '识图关闭 · 点击开启';
+  b.style.color = gwState.vision ? 'var(--ok)' : 'var(--bad)';
+}
+
+async function visSwitchToggle() {
+  const r = await api('/api/settings/gateway', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({vision: !gwState.vision})});
+  if (!r.ok) return toast(r.error, false);
+  gwState.vision = !!r.data.vision;
+  paintVisSwitch();
+  toast(gwState.vision
+    ? '视觉透传已开启——客户端可传图（立即生效）'
+    : '视觉透传已关闭——图片在网关剥除（立即生效）');
 }
 
 async function aggSwitchToggle() {
