@@ -1,6 +1,8 @@
 [project]
 name = "wbspy"
-version = "0.2.12"
+# 版本号单一事实源在 wbspy/_version.py，构建时由 setuptools 自动读取；
+# 升版本只改 _version.py，勿在此处硬编码（CI 校验以此为准）。
+dynamic = ["version"]
 description = "WorkBuddy Switch Python 版：多账号切换、扫码登录、积分自动化、统一 OpenAI 网关"
 requires-python = ">=3.9"
 dependencies = ["requests>=2.31", "fastapi>=0.110", "uvicorn>=0.29"]
@@ -12,6 +14,8 @@ wbspy = "wbspy.cli:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+[tool.setuptools.dynamic]
+version = {attr = "wbspy._version.__version__"}
 [tool.setuptools.packages.find]
 include = ["wbspy*"]
 [tool.setuptools.package-data]

@@ -24,12 +24,13 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install build
-      - name: 校验 tag 与 pyproject 版本一致
+      - name: 校验 tag 与 _version.py 版本一致
         run: |
           TAG="${{ github.event.client_payload.tag || github.ref_name }}"
-          VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          VERSION=$(sed -n 's/^__version__ *= *"\([^"]*\)".*/\1/p' wbspy/_version.py | head -1)
+          [ -n "$VERSION" ] || { echo "无法从 wbspy/_version.py 读取版本号"; exit 1; }
           [ "v$VERSION" = "$TAG" ] || {
-            echo "tag $TAG 与 pyproject 版本 v$VERSION 不一致"; exit 1; }
+            echo "tag $TAG 与 _version.py 版本 v$VERSION 不一致"; exit 1; }
       - run: python -m build
       - uses: actions/upload-artifact@v4
         with:

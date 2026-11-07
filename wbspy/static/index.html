@@ -590,7 +590,7 @@ async function startLogin(channel, method) {
 }
 function closeModal() { clearInterval(pollTimer); $('#modal').classList.remove('on'); }
 
-// -- 更新检查（只提示，不自动升级） --
+// -- 更新检查（三层：Release / main 提交 / 幽灵版本；只提示，不自动升级） --
 async function checkUpdate(btn) {
   const old = btn.textContent;
   btn.textContent = '检查中…'; btn.disabled = true;
@@ -598,10 +598,22 @@ async function checkUpdate(btn) {
     const r = await api('/api/update/check');
     const d = r.data || r;
     if (!d.ok) { alert(d.error + '\n可手动打开发布页：' + d.url); return; }
-    if (!d.update_available) { alert('已是最新版本（v' + d.current + '）'); return; }
-    if (confirm('发现新版本：v' + d.current + ' → v' + d.latest + '\n\n' +
-                (d.notes || '').slice(0, 300) +
-                '\n\n是否打开发布页查看升级方式？')) {
+    if (!d.update_available && !d.ghost && d.main_sync !== 'ahead') {
+      alert('已是最新版本（v' + d.current + '）'); return;
+    }
+    let msg = d.update_available
+      ? '发现新版本：v' + d.current + ' → v' + d.latest + '\n\n' + (d.notes || '').slice(0, 300)
+      : 'Release 渠道已是最新（v' + d.latest + '）';
+    if (d.ghost) {
+      msg += '\n\n⚠ 你运行的 v' + d.current + ' 从未正式发布（幽灵版本），'
+           + '版本号可能只是开发中间态';
+    }
+    if (d.main_sync === 'ahead') {
+      msg += '\n\n⇣ main 分支已有新提交（尚未发版）：' + (d.local_commit || '?')
+           + ' → ' + (d.main_commit || '?')
+           + '\ngit 安装可执行 git pull && pip install -e . 立即更新';
+    }
+    if (confirm(msg + '\n\n是否打开发布页查看升级方式？')) {
       window.open(d.url, '_blank');
     }
   } finally {

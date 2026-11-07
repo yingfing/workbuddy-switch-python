@@ -427,7 +427,14 @@ def _cmd_update(_args) -> int:
         print("  Docker：  docker compose pull && docker compose up -d")
         print("升级后重启服务即可生效。")
     else:
-        print(f"✓ 已是最新版本（v{r['current']}）")
+        if r.get("ghost"):
+            print(f"⚠ 当前版本 v{r['current']} 从未在 GitHub 正式发布（可能是开发中间版）。")
+        if r.get("main_sync") == "ahead":
+            print(f"⇣ main 分支已有新提交（尚未发版）："
+                  f"{r.get('local_commit') or '?'} → {r.get('main_commit') or '?'}")
+            print("  git 安装可立即跟进：git pull && pip install -e .，重启服务生效。")
+        if not r.get("ghost") and r.get("main_sync") != "ahead":
+            print(f"✓ 已是最新版本（v{r['current']}）")
     return 0
 
 

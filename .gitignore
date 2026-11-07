@@ -4,3 +4,4 @@
 !pnpm*.yaml
 __pycache__/
 *.egg-info/
+build/

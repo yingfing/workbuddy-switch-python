@@ -8,4 +8,4 @@ OpenAI 兼容本机网关（账号池自动轮换容错）。
 Attribution License 约束（原项目 LICENSE「来源标注与许可」一节）。
 """
 
-__version__ = "0.2.4"
+from ._version import __version__  # noqa: F401 — 单一事实源见 _version.py
