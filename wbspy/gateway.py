@@ -213,6 +213,12 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     # 鉴权统一由上方 auth_middleware 处理（Bearer 或 X-Wbspy-Key）。
 
     def _error(exc: UpstreamError) -> JSONResponse:
+        # 上游账号凭据失效类错误绝不以 401/「密钥/凭据」字样透传——那是账号池
+        # 内部的问题（自动换号已失败），客户端只会误以为自己的中转密钥坏了。
+        if exc.kind == "auth":
+            exc = UpstreamError(503, "upstream_account_unavailable",
+                                "上游账号暂不可用（网关已自动换号仍未成功），请稍后重试。",
+                                retry_after=60)
         return JSONResponse(
             status_code=exc.status,
             content={"error": {"message": exc.message, "type": exc.code,

@@ -253,12 +253,14 @@ class AccountPool:
     def _should_failover(exc: "UpstreamError") -> bool:
         """该错误是否值得换号再试。
 
-        * 账号侧问题（凭据失效/限流/该号无此模型/额度尽）→ 一律换号；
+        * 账号侧问题（凭据失效/限流/额度尽）→ 换号；
         * 上游 5xx 与连接中断 → 也换号：可能只是单账号会话态引发的故障，
           换号循环有 tried 上限（每号只试一次），不会雪崩；
-        * 请求本身的问题（400 参数错、渠道审查拒绝且对策二已试过）→ 换号无意义，不重试。
+        * 404 模型不存在 → 不换号：同池账号模型集相同，一个号说没有其他号
+          大概率也没有，直接原样抛给客户端；
+        * 请求本身的问题（400 参数错、渠道审查拒绝且对策二已试过）→ 换号无意义。
         """
-        if exc.kind in ("auth", "rate", "model"):
+        if exc.kind in ("auth", "rate"):
             return True
         if exc.code == "upstream_quota":
             return True

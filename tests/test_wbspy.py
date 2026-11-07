@@ -1580,3 +1580,65 @@ class TestFailoverPolicy(unittest.TestCase):
             with self.assertRaises(UpstreamError):
                 pool.chat_failover({"model": "auto", "messages": []})
         self.assertEqual(called, ["g0"])     # 只试了第 1 个号，没有换号
+
+
+class TestFailoverBoundaries(unittest.TestCase):
+    """404 不换号（同池同模型）+ 上游凭据错误对外中性化。"""
+
+    def test_model_404_no_failover(self):
+        """同池账号模型集相同：一个号说没有 → 直接原样抛 404，不白打其他号。"""
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool, _key
+        from wbspy.document import parse_auth
+        from wbspy.upstream import UpstreamError
+        docs = [parse_auth({"account": {"uid": f"m{i}", "nickname": f"号{i}"},
+                            "auth": {"accessToken": "t",
+                                     "domain": "www.codebuddy.cn"}}) for i in range(2)]
+        called: list[str] = []
+        with patch("wbspy.pool._client_for") as MF:
+            def factory(d):
+                c = MagicMock()
+                def chat_side(payload, uid=d.uid):
+                    called.append(uid)
+                    raise UpstreamError(404, "model_not_available", "该账号暂不能使用所选模型",
+                                        upstream_status=404)
+                c.chat.side_effect = chat_side
+                return c
+            MF.side_effect = factory
+            pool = AccountPool(docs)
+            pool.pick = lambda model, exclude=None, session=None, lane="workbuddy": next(
+                (d for d in docs if _key(d) not in (exclude or set())), None)
+            with self.assertRaises(UpstreamError) as cm:
+                pool.chat_failover({"model": "workbuddy:nope", "messages": []})
+        self.assertEqual(cm.exception.kind, "model")
+        self.assertEqual(called, ["m0"])           # 只试 1 个号，原样抛给客户端
+
+    def test_auth_error_neutralized_for_clients(self):
+        """上游凭据失效全池换号失败后：对外 503 + 中性文案，绝不提「密钥/凭据」。"""
+        from unittest.mock import MagicMock, patch
+        from fastapi.testclient import TestClient
+        from wbspy.gateway import create_app
+        from wbspy.pool import AccountPool, _key
+        from wbspy.document import parse_auth
+        from wbspy.upstream import UpstreamError
+        docs = [parse_auth({"account": {"uid": f"n{i}", "nickname": f"号{i}"},
+                            "auth": {"accessToken": "t",
+                                     "domain": "www.codebuddy.cn"}}) for i in range(2)]
+        with patch("wbspy.pool._client_for") as MF:
+            def factory(d):
+                c = MagicMock()
+                c.chat.side_effect = UpstreamError(401, "upstream_auth_expired", "登录凭据已失效。")
+                return c
+            MF.side_effect = factory
+            pool = AccountPool(docs)
+            pool.pick = lambda model, exclude=None, session=None, lane="workbuddy": next(
+                (d for d in docs if _key(d) not in (exclude or set())), None)
+            app = create_app(pool, api_key="")
+            c = TestClient(app, raise_server_exceptions=False)
+            r = c.post("/v1/chat/completions",
+                       json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 503)                 # 不是 401
+        msg = r.json()["error"]["message"]
+        self.assertNotIn("凭据", msg)
+        self.assertNotIn("密钥", msg)
+        self.assertIn("稍后重试", msg)
