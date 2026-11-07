@@ -1642,3 +1642,55 @@ class TestFailoverBoundaries(unittest.TestCase):
         self.assertNotIn("凭据", msg)
         self.assertNotIn("密钥", msg)
         self.assertIn("稍后重试", msg)
+
+
+class TestGatewayCrashGuard(unittest.TestCase):
+    """路由内未捕获异常：调试日志必须留痕（此前 500 无日志的根因）；目录失败降级用缓存。"""
+
+    def _client(self, pool):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.gateway import create_app
+        from wbspy import store
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with patch.object(store, "CONFIG_PATH", Path(tmp.name) / "config.json"), \
+             patch("wbspy.gateway.load_config", store.load_config):
+            app = create_app(pool, api_key="")
+        return TestClient(app, raise_server_exceptions=False), app
+
+    def test_uncaught_exception_logged_and_500(self):
+        """路由抛非 UpstreamError：响应 500（中性文案）+ 调试日志/运行日志都留痕。"""
+        from unittest.mock import patch
+        from wbspy.pool import AccountPool
+        pool = AccountPool([])
+        with patch.object(pool, "chat_failover",
+                          side_effect=RuntimeError("内部炸了：Bad key")):
+            c, app = self._client(pool)
+            r = c.post("/v1/chat/completions",
+                       json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 500)
+        body = r.json()["error"]
+        self.assertEqual(body["type"], "internal_error")
+        self.assertNotIn("Bad key", body["message"])         # 异常详情不泄给客户端
+        e = app.state.req_log[-1]
+        self.assertEqual(e["status"], 500)
+        self.assertIn("内部炸了：Bad key", e["note"])         # 详情只在调试日志里
+        self.assertIn("网关内部异常 /v1/chat/completions", app.state.auto_log[-1])
+
+    def test_models_degrades_to_cache(self):
+        """目录刷新失败：沿用上次缓存（或空目录），绝不 500 卡死客户端启动。"""
+        from unittest.mock import patch
+        from wbspy.pool import AccountPool
+        pool = AccountPool([])
+        c, app = self._client(pool)
+        app.state.model_cache = [{"id": "workbuddy:auto", "object": "model",
+                                  "owned_by": "wbspy", "name": "Auto"}]
+        app.state.model_cached_at = 0                        # 强制走刷新分支
+        with patch.object(pool, "models", side_effect=RuntimeError("目录炸了")):
+            r = c.get("/v1/models")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["data"][0]["id"], "workbuddy:auto")   # 旧缓存顶上
+        self.assertTrue(any("目录刷新失败" in x for x in app.state.auto_log))

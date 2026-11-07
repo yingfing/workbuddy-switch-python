@@ -200,7 +200,20 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             # body 摘要必须在 call_next 之前取：流会被下游消费掉。
             digest = await _body_digest(request)
             t0 = time.time()
-            response = await call_next(request)
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                # 路由内未捕获异常：调试日志必须留痕（否则 500 无从排查）
+                note = f"✗ 网关内部异常：{type(exc).__name__}: {exc}"[:200]
+                _dbg({"ip": _client_ip(request), "method": request.method, "path": path,
+                      "status": 500, "ms": int((time.time() - t0) * 1000),
+                      "auth": _mask(presented),
+                      "ua": request.headers.get("user-agent", "")[:120],
+                      "body": digest, "note": note})
+                _gw_log(f"网关内部异常 {path}：{note}")
+                return JSONResponse(status_code=500,
+                                    content={"error": {"message": "网关内部错误，详情见网页日志。",
+                                                       "type": "internal_error"}})
             _dbg({"ip": _client_ip(request), "method": request.method, "path": path,
                   "status": response.status_code,
                   "ms": int((time.time() - t0) * 1000),
@@ -208,7 +221,16 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                   "ua": request.headers.get("user-agent", "")[:120],
                   "body": digest})
             return response
-        return await call_next(request)
+        try:
+            return await call_next(request)
+        except Exception as exc:                          # 未设密钥的 /v1 与 /api/* 同样兜底
+            note = f"✗ 网关内部异常：{type(exc).__name__}: {exc}"[:200]
+            _dbg({"ip": _client_ip(request), "method": request.method, "path": path,
+                  "status": 500, "auth": "（未带密钥）", "note": note})
+            _gw_log(f"网关内部异常 {path}：{note}")
+            return JSONResponse(status_code=500,
+                                content={"error": {"message": "网关内部错误，详情见网页日志。",
+                                                   "type": "internal_error"}})
 
     # 鉴权统一由上方 auth_middleware 处理（Bearer 或 X-Wbspy-Key）。
 
@@ -247,21 +269,31 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                     return f"{base} {cm:.2f}x"
                 return base
 
-            pool_rows = [{"id": m["id"], "object": "model", "owned_by": "wbspy",
-                          **m.get("wbspy", {}),
-                          "name": _with_rate(m),
-                          "region": m.get("region"),
-                          **({"credit_multiplier": m["credit_multiplier"]}
-                             if "credit_multiplier" in m else {})}
-                         for m in pool.models()]
-            pool_rows.sort(key=lambda r: (r.get("credit_multiplier") is None,
-                                          r.get("credit_multiplier") or 0))
-            rows = pool_rows
-            # 聚合渠道只暴露「当前真的可调用」的：未配置 key 的厂商不进目录
-            rows += [{"id": m["id"], "object": "model", "owned_by": m["owned_by"], **m["wbspy"]}
-                     for m in aggregate.models() if m["wbspy"].get("configured")]
-            app.state.model_cache = rows
-            app.state.model_cached_at = now
+            try:
+                pool_rows = [{"id": m["id"], "object": "model", "owned_by": "wbspy",
+                              **m.get("wbspy", {}),
+                              "name": _with_rate(m),
+                              "region": m.get("region"),
+                              **({"credit_multiplier": m["credit_multiplier"]}
+                                 if "credit_multiplier" in m else {})}
+                             for m in pool.models()]
+            except Exception as exc:
+                # 目录拉取失败不该 500 卡死客户端启动：用旧缓存顶上，没有则空目录
+                _gw_log(f"模型目录刷新失败（沿用缓存）：{type(exc).__name__}: {exc}")
+                pool_rows = None
+            if pool_rows is not None:
+                pool_rows.sort(key=lambda r: (r.get("credit_multiplier") is None,
+                                              r.get("credit_multiplier") or 0))
+                rows = pool_rows
+                # 聚合渠道只暴露「当前真的可调用」的：未配置 key 的厂商不进目录
+                try:
+                    rows += [{"id": m["id"], "object": "model", "owned_by": m["owned_by"],
+                              **m["wbspy"]}
+                             for m in aggregate.models() if m["wbspy"].get("configured")]
+                except Exception as exc:
+                    _gw_log(f"聚合渠道目录刷新失败（忽略）：{type(exc).__name__}: {exc}")
+                app.state.model_cache = rows
+                app.state.model_cached_at = now
         return {"object": "list", "data": app.state.model_cache}
 
     def _aggregate_chat(raw: dict) -> Any:
