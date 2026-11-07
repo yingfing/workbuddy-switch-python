@@ -1,6 +1,6 @@
 [project]
 name = "wbspy"
-version = "0.2.5"
+version = "0.2.6"
 description = "WorkBuddy Switch Python 版：多账号切换、扫码登录、积分自动化、统一 OpenAI 网关"
 requires-python = ">=3.9"
 dependencies = ["requests>=2.31", "fastapi>=0.110", "uvicorn>=0.29"]
