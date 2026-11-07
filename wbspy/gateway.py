@@ -422,14 +422,15 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         if "/" in model and not model.startswith(("workbuddy:", "cn:", "global:")):
             return _aggregate_chat(raw)
 
-        # ── 路由二：登录账号池（WorkBuddy 系 / Cline，按前缀选泳道）──────────
+        # ── 路由二：登录账号池（WorkBuddy 系 / Cline / Qoder，按前缀选泳道）──
         # 泳道内多账号轮换容错；纯模型名等价 workbuddy:<model>
         lane = "workbuddy"
-        if model.startswith("cline:"):
-            lane = "cline"
-            raw = {**raw, "model": model.split(":", 1)[1]}
-        elif model.split(":", 1)[0] in ("workbuddy", "cn", "global") and ":" in model:
-            raw = {**raw, "model": model.split(":", 1)[1]}
+        head, sep, rest = model.partition(":")
+        if sep and head in ("cline", "qoder", "qodercn"):
+            lane = head
+            raw = {**raw, "model": rest}
+        elif sep and head in ("workbuddy", "cn", "global"):
+            raw = {**raw, "model": rest}
         raw, _trimmed = trim_context(raw)
 
         # 会话键：客户端可显式传 x-wbspy-session；缺省用「system+首条消息」

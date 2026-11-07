@@ -267,16 +267,26 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       <h2>已入库账号可调用的模型 <span class="tag" id="mymStat">—</span></h2>
       <input id="mymSearch" class="inp" style="max-width:320px;margin-bottom:8px"
              placeholder="🔍 搜模型名或 ID（如 hy3 / claude / gemini）" oninput="_mymRender()">
-      <h3>账号池（WorkBuddy 系，模型 ID 带 <code>workbuddy:</code> 前缀）</h3>
-      <table id="mymTable"><thead><tr>
-        <th>调用 ID</th><th>名称</th><th>倍率 / 价格</th><th>可用账号</th>
-      </tr></thead><tbody id="mymTbody"></tbody></table>
+      <details open id="mymWbBox" style="margin-bottom:4px">
+        <summary><b>账号池（WorkBuddy 系，模型 ID 带 <code>workbuddy:</code> 前缀）</b>
+          <span class="tag" id="mymWbCount">—</span></summary>
+        <table id="mymTable"><thead><tr>
+          <th>调用 ID</th><th>名称</th><th>倍率 / 价格</th><th>可用账号</th>
+        </tr></thead><tbody id="mymTbody"></tbody></table>
+      </details>
       <details style="margin-top:12px" id="mymClineBox">
         <summary><b>Cline 渠道（国际，模型 ID 带 <code>cline:</code> 前缀）</b>
           <span class="tag" id="mymClineCount">—</span></summary>
         <table><thead><tr>
           <th>调用 ID</th><th>名称</th><th>倍率 / 价格</th><th>可用账号</th>
         </tr></thead><tbody id="mymClineTbody"></tbody></table>
+      </details>
+      <details style="margin-top:12px" id="mymQoderBox" hidden>
+        <summary><b>Qoder 渠道（模型 ID 带 <code>qoder:</code> 前缀，目录仅供查看——推理协议未接入）</b>
+          <span class="tag" id="mymQoderCount">—</span></summary>
+        <table><thead><tr>
+          <th>调用 ID</th><th>名称</th><th>倍率 / 价格</th><th>可用账号</th>
+        </tr></thead><tbody id="mymQoderTbody"></tbody></table>
       </details>
       <div class="empty" id="mymEmpty" hidden>账号池为空或目录未就绪 —— 先去「登录」页添加账号</div>
       <h2 style="margin-top:16px">逐账号明细</h2>
@@ -925,7 +935,12 @@ async function snapRestore() {
 }
 
 // -- 我的模型（已入库账号可调用索引）+ 聚合渠道密钥 --
-let _mymRows = [], _mymOk = 0, _mymAll = 0, _mymLaneOk = {workbuddy: 0, cline: 0};
+let _mymRows = [], _mymOk = 0, _mymAll = 0, _mymLaneOk = {workbuddy: 0, cline: 0, qoder: 0};
+// 泳道判定：cline: → Cline；qoder:/qodercn: → Qoder；其余（workbuddy:/cn:/global:/裸名）→ WorkBuddy
+const _laneOfId = id => { const h = String(id).split(':')[0];
+  return h === 'cline' ? 'cline' : h.startsWith('qoder') ? 'qoder' : 'workbuddy'; };
+const _laneOfAcc = a => a.channel_id === 'cline' ? 'cline'
+  : String(a.channel_id || '').startsWith('qoder') ? 'qoder' : 'workbuddy';
 async function loadFree() {
   const r = await api('/api/my-models');
   const accs = r.data || [];
@@ -934,17 +949,16 @@ async function loadFree() {
   $('#mymStat').textContent = _mymOk
     ? `${_mymOk} / ${_mymAll} 个账号可用`
     : '账号池为空';
-  // 分母按泳道分开算：WorkBuddy 系账号只能调 workbuddy: 模型，Cline 账号只能调 cline: 模型，
-  // 两个泳道的账号数不能相加混做分母（否则出现 3/4、1/4 这种错数）。
-  const laneOk = {workbuddy: 0, cline: 0};
-  for (const a of ok) laneOk[a.channel_id === 'cline' ? 'cline' : 'workbuddy']++;
+  // 分母按泳道分开算：各泳道账号只能调本泳道模型，账号数不能混做分母
+  const laneOk = {workbuddy: 0, cline: 0, qoder: 0};
+  for (const a of ok) laneOk[_laneOfAcc(a)]++;
   _mymLaneOk = laneOk;
-  // 统一索引：跨账号合并同名模型，标注可用账号数（id 已带 workbuddy:/cline: 泳道前缀）
+  // 统一索引：跨账号合并同名模型，标注可用账号数（id 已带泳道前缀）
   const uni = {};
   for (const a of ok) for (const m of a.models) {
     const u = uni[m.id] || (uni[m.id] = {id: m.id, name: m.name, cm: m.credit_multiplier,
                                         ip: m.input_price, op: m.output_price, n: 0,
-                                        lane: m.id.startsWith('cline:') ? 'cline' : 'workbuddy'});
+                                        lane: _laneOfId(m.id)});
     u.n++;
     if (u.cm === undefined && m.credit_multiplier !== undefined) u.cm = m.credit_multiplier;
   }
@@ -972,16 +986,26 @@ function _mymRender() {
     return `<tr><td><code>${m.id}</code></td><td>${m.name}</td>
       <td>${cm}</td><td>${m.n} / ${_mymLaneOk[m.lane] || 0}</td></tr>`;
   };
-  const wb = _mymRows.filter(m => !m.id.startsWith('cline:') && match(m));
-  const cl = _mymRows.filter(m => m.id.startsWith('cline:') && match(m));
-  const total = wb.length + cl.length;
-  $('#mymEmpty').hidden = total > 0;
-  $('#mymTable').style.display = wb.length ? '' : 'none';
-  $('#mymTbody').innerHTML = wb.map(cell).join('');
-  $('#mymClineBox').style.display = _mymRows.some(m => m.id.startsWith('cline:')) ? '' : 'none';
-  $('#mymClineCount').textContent = q ? `${cl.length} / ${_mymRows.filter(m => m.id.startsWith('cline:')).length} 条匹配` : `${cl.length} 个`;
-  $('#mymClineTbody').innerHTML = cl.map(cell).join('');
-  if (q) $('#mymClineBox').open = cl.length > 0;   // 搜索命中时自动展开
+  const byLane = {workbuddy: [], cline: [], qoder: []};
+  for (const m of _mymRows) if (match(m)) byLane[m.lane].push(m);
+  const count = lane => q
+    ? `${byLane[lane].length} / ${_mymRows.filter(m => m.lane === lane).length} 条匹配`
+    : `${byLane[lane].length} 个`;
+  $('#mymEmpty').hidden = _mymRows.length > 0;
+  $('#mymWbBox').style.display = byLane.workbuddy.length ? '' : 'none';
+  $('#mymWbCount').textContent = count('workbuddy');
+  $('#mymTbody').innerHTML = byLane.workbuddy.map(cell).join('');
+  $('#mymClineBox').style.display = _mymRows.some(m => m.lane === 'cline') ? '' : 'none';
+  $('#mymClineCount').textContent = count('cline');
+  $('#mymClineTbody').innerHTML = byLane.cline.map(cell).join('');
+  $('#mymQoderBox').hidden = !_mymRows.some(m => m.lane === 'qoder');
+  $('#mymQoderCount').textContent = count('qoder');
+  $('#mymQoderTbody').innerHTML = byLane.qoder.map(cell).join('');
+  if (q) {   // 搜索命中时自动展开对应分组
+    $('#mymWbBox').open = byLane.workbuddy.length > 0;
+    $('#mymClineBox').open = byLane.cline.length > 0;
+    $('#mymQoderBox').open = byLane.qoder.length > 0;
+  }
 }
 
 async function loadChannelKeys() {

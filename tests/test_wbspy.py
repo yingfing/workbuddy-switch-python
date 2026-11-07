@@ -481,10 +481,14 @@ class TestCapabilities(unittest.TestCase):
 
     def test_third_party_empty(self):
         from wbspy.document import parse_auth
-        for domain in ("api.trae.com.cn", "qoder.cn"):
+        for domain in ("api.trae.com.cn",):
             doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
                               "auth": {"accessToken": "t", "domain": domain}})
             self.assertEqual(doc.capabilities, frozenset(), domain)
+        # qoder 声明 chat/models（目录可见 + 对话明确 501），但无 refresh/credits
+        qd = parse_auth({"account": {"uid": "u", "nickname": "n"},
+                         "auth": {"accessToken": "t", "domain": "qoder.cn"}})
+        self.assertEqual(qd.capabilities, frozenset({"chat", "models"}))
 
     def test_cline_capabilities(self):
         """Cline 已接 OpenAI 兼容 API：chat/models/refresh 有、签到/余额无。"""
@@ -1855,3 +1859,66 @@ class TestGlobalLoginFlow(unittest.TestCase):
             self.assertTrue(ticket.qr_svg)
         except ImportError:
             self.assertEqual(ticket.qr_svg, "")
+
+
+class TestQoderLane(unittest.TestCase):
+    """Qoder 泳道：静态目录可见 + 推理未接入的明确 501（此前账号被塞进
+    WorkBuddyClient，目录必失败、模型页显示「目录不可用」）。"""
+
+    def _doc(self, channel_id="qoder"):
+        from wbspy.document import parse_auth
+        domain = "qoder.cn" if channel_id == "qodercn" else "qoder.com"
+        return parse_auth({"account": {"uid": "qd1", "nickname": "Q"},
+                           "auth": {"accessToken": "t", "domain": domain}})
+
+    def test_catalog_rows(self):
+        from wbspy.qoder import QoderClient
+        intl = QoderClient(self._doc("qoder")).models()
+        cn = QoderClient(self._doc("qodercn")).models()
+        self.assertEqual(len(intl), 17)
+        self.assertEqual(len(cn), 14)
+        self.assertEqual({r["id"] for r in intl},
+                         {"auto", "ultimate", "performance", "efficient", "smodel",
+                          "cmodel", "qmodel_38max", "qfmodel", "qmodel_latest",
+                          "qmodel", "kmodel_latest", "kmodel", "gmodel", "gfmodel",
+                          "dmodel", "dfmodel", "mmodel"})
+        self.assertIn("q37fmodel", {r["id"] for r in cn})          # CN 特有行
+        free = {r["id"] for r in intl if r["credit_multiplier"] == 0}
+        self.assertEqual(free, {"qfmodel"})                        # 0 = 免费（合法值）
+        self.assertTrue(all(r["context_window"] >= 200_000 for r in intl))
+
+    def test_client_for_routes_qoder(self):
+        from wbspy.pool import _client_for
+        from wbspy.qoder import QoderClient
+        self.assertIsInstance(_client_for(self._doc("qoder")), QoderClient)
+        self.assertIsInstance(_client_for(self._doc("qodercn")), QoderClient)
+
+    def test_chat_reports_unsupported_not_workbuddy(self):
+        """qoder: 模型对话 → 明确 501，绝不误投 WorkBuddy 端点，也不换号。"""
+        from unittest.mock import patch
+        from wbspy.pool import AccountPool
+        from wbspy.upstream import UpstreamError
+        doc = self._doc("qoder")
+        with patch("wbspy.store.save_account", lambda d: None):
+            pool = AccountPool([doc])
+        with self.assertRaises(UpstreamError) as cm:
+            pool.clients[(doc.storage_scope, doc.uid)].chat({"model": "auto"})
+        self.assertEqual(cm.exception.status, 501)
+        self.assertIn("尚未在本版接入", cm.exception.message)
+        # 501 非上游 ≥500（upstream_status=0）且 kind=server → 不冷却不换号
+        pool.apply_error(doc, cm.exception, "auto")
+        self.assertEqual(len(pool.cooldowns._until), 0)
+
+    def test_gateway_routes_qoder_lane(self):
+        """网关 qoder:auto → Qoder 泳道 → 501 透传明确文案。"""
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool
+        doc = self._doc("qoder")
+        with patch("wbspy.store.save_account", lambda d: None):
+            pool = AccountPool([doc])
+        c, _app = _gw_client(pool)
+        r = c.post("/v1/chat/completions", json={"model": "qoder:auto", "messages": [
+            {"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 501)
+        self.assertEqual(r.json()["error"]["type"], "qoder_infer_unsupported")
+        self.assertIn("尚未在本版接入", r.json()["error"]["message"])
