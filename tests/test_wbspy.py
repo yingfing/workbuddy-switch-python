@@ -458,6 +458,7 @@ class TestChannelIsolation(unittest.TestCase):
         by_acc = p.models_by_account()
         self.assertEqual(by_acc[0]["count"], 1)
         self.assertEqual(by_acc[0]["models"][0]["id"], "cline:glm-5.2")
+        self.assertEqual(by_acc[0]["channel_id"], "cline")   # 前端按泳道算分母用
 
     def test_public_guard_blocks_and_allows(self):
         from wbspy.cli import _public_guard

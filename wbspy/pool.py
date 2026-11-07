@@ -342,7 +342,8 @@ class AccountPool:
         """
         return [{
             "uid": doc.uid, "label": doc.label(), "region": doc.region,
-            "channel": doc.channel_name, "count": len(rows), "models": rows,
+            "channel": doc.channel_name, "channel_id": doc.channel_id,
+            "count": len(rows), "models": rows,
         } for doc, rows in self._models_by_account_raw(ttl)]
 
     # -- 后台 token 自动刷新 -----------------------------------------------------

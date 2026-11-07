@@ -855,7 +855,7 @@ async function snapRestore() {
 }
 
 // -- 我的模型（已入库账号可调用索引）+ 聚合渠道密钥 --
-let _mymRows = [], _mymOk = 0, _mymAll = 0;
+let _mymRows = [], _mymOk = 0, _mymAll = 0, _mymLaneOk = {workbuddy: 0, cline: 0};
 async function loadFree() {
   const r = await api('/api/my-models');
   const accs = r.data || [];
@@ -864,10 +864,16 @@ async function loadFree() {
   $('#mymStat').textContent = _mymOk
     ? `${_mymOk} / ${_mymAll} 个账号可用`
     : '账号池为空';
+  // 分母按泳道分开算：WorkBuddy 系账号只能调 workbuddy: 模型，Cline 账号只能调 cline: 模型，
+  // 两个泳道的账号数不能相加混做分母（否则出现 3/4、1/4 这种错数）。
+  const laneOk = {workbuddy: 0, cline: 0};
+  for (const a of ok) laneOk[a.channel_id === 'cline' ? 'cline' : 'workbuddy']++;
+  _mymLaneOk = laneOk;
   // 统一索引：跨账号合并同名模型，标注可用账号数（id 已带 workbuddy:/cline: 泳道前缀）
   const uni = {};
   for (const a of ok) for (const m of a.models) {
-    const u = uni[m.id] || (uni[m.id] = {id: m.id, name: m.name, cm: m.credit_multiplier, n: 0});
+    const u = uni[m.id] || (uni[m.id] = {id: m.id, name: m.name, cm: m.credit_multiplier, n: 0,
+                                        lane: m.id.startsWith('cline:') ? 'cline' : 'workbuddy'});
     u.n++;
     if (u.cm === undefined && m.credit_multiplier !== undefined) u.cm = m.credit_multiplier;
   }
@@ -892,7 +898,7 @@ function _mymRender() {
     const cm = m.cm === 0 ? '<span style="color:var(--bad);font-weight:600">限时免费</span>'
       : (typeof m.cm === 'number' ? m.cm + 'x' : '—');
     return `<tr><td><code>${m.id}</code></td><td>${m.name}</td>
-      <td>${cm}</td><td>${m.n} / ${_mymOk}</td></tr>`;
+      <td>${cm}</td><td>${m.n} / ${_mymLaneOk[m.lane] || 0}</td></tr>`;
   };
   const wb = _mymRows.filter(m => !m.id.startsWith('cline:') && match(m));
   const cl = _mymRows.filter(m => m.id.startsWith('cline:') && match(m));
