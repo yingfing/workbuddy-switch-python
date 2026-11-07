@@ -2,6 +2,11 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.10] — 2026-11-07
+
+### 修复
+- **WorkBuddy 国际版网页登录崩溃**（「暂无可用登录方式（browser: 'workbuddy-ai'）」）：网页登录流程把上游 platform 名（`workbuddy-ai`）传给了域名白名单查表，而白名单只收录 provider 名（`workbuddy-global`）→ `KeyError`，管理端只见一行带引号的字符串。自 v0.2.0 重制即存在，CLI 路径传名恰好正确因此从未暴露。修复：白名单收录 platform 别名；未收录 provider 改抛含名字的明确 RuntimeError，不再裸抛 KeyError。
+
 ## [0.2.9] — 2026-11-07
 
 ### 修复
