@@ -728,7 +728,8 @@ class TestGatewayToggle(unittest.TestCase):
         for p in ctx:
             p.start()
         self.addCleanup(lambda: [p.stop() for p in ctx])
-        app = create_web_app(AccountPool([]), api_key="", port=8178)
+        self._pool = AccountPool([])          # 暴露给用例做 patch
+        app = create_web_app(self._pool, api_key="", port=8178)
         return _json, TestClient(app)
 
     def test_default_on_and_toggle_hot(self):
@@ -765,6 +766,37 @@ class TestGatewayToggle(unittest.TestCase):
             _, c = self._client(cfg_path)
             self.assertEqual(c.get("/v1/models").status_code, 404)
             self.assertEqual(c.get("/api/pool").status_code, 200)
+
+    def test_aggregate_toggle_hides_catalog(self):
+        """聚合渠道开关：默认开；关 → /v1/models 只剩账号池行；落盘；再开恢复。"""
+        import tempfile
+        import json as _json
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            _, c = self._client(cfg_path)
+            pool_row = {"id": "workbuddy:auto", "name": "Auto", "region": "cn",
+                        "credit_multiplier": 1.0}
+            agg_row = {"id": "opencode/jev-1.13-free", "name": "Jev",
+                       "owned_by": "opencode",
+                       "wbspy": {"configured": True, "note": "free"}}
+            with patch.object(self._pool, "models", return_value=[pool_row]), \
+                 patch("wbspy.gateway.aggregate.models", return_value=[agg_row]):
+                ids = [m["id"] for m in c.get("/v1/models").json()["data"]]
+                self.assertIn("workbuddy:auto", ids)
+                self.assertIn("opencode/jev-1.13-free", ids)               # 默认纳入
+                r = c.post("/api/settings/gateway",
+                           json={"aggregate": False}).json()["data"]
+                self.assertFalse(r["aggregate"])
+                ids = [m["id"] for m in c.get("/v1/models").json()["data"]]
+                self.assertIn("workbuddy:auto", ids)                       # 池内行保留
+                self.assertNotIn("opencode/jev-1.13-free", ids)            # 聚合行隐藏
+            self.assertFalse(
+                _json.loads(cfg_path.read_text())["gateway"]["aggregate"])
+            r = c.post("/api/settings/gateway",
+                       json={"aggregate": True}).json()["data"]
+            self.assertTrue(r["aggregate"])
 
     def test_port_save_validate_and_persist(self):
         """端口：非法值 400；空闲端口落盘 web.port + restart_required；同端口免重启。"""

@@ -100,6 +100,13 @@ input:focus{border-color:var(--accent);border-width:2px;padding:7px 11px}
 .pill{font-size:11px;color:var(--dim)}
 .kv{display:flex;justify-content:space-between;padding:7px 10px;border-radius:4px;font-size:12.5px}
 .kv:nth-child(odd){background:var(--kv)}
+/* 网关设置页：语义分区（只读信息 / 表单 / 开关各自成块，不再混排） */
+.gwSec{border-top:1px solid var(--line-soft);margin-top:16px;padding-top:14px}
+.gwTitle{font-weight:700;font-size:13.5px;margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.gwRow{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+.gwLabel{min-width:72px;color:var(--dim);font-size:12.5px;flex-shrink:0}
+.gwRow code{flex:1;word-break:break-all;color:var(--fg)}
+.hint{color:var(--dim);font-size:12px;margin-top:6px;line-height:1.7}
 a{color:var(--accent);text-decoration:none}
 .empty{color:var(--dim);font-size:12.5px;text-align:center;padding:18px}
 
@@ -362,25 +369,46 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
   <section id="tab-gateway" hidden>
     <div class="card">
       <h2>本机 OpenAI 兼容网关 <span class="tag" id="gwAddr"></span></h2>
-      <p class="pill" style="margin-bottom:10px">
+      <p class="pill" style="margin-bottom:4px">
         <code>POST /v1/chat/completions</code>（流式，多账号自动换号容错） ·
         <code>GET /v1/models</code> · <code>POST /v1/embeddings</code></p>
-      <div class="kv"><span>网关地址</span><span id="gwUrl">—</span></div>
-      <div class="kv"><span>API Key</span><span id="gwKey">—</span></div>
-      <div class="row" style="margin-top:10px">
-        <input id="gwKeyInput" placeholder="自定义访问密钥（留空恢复默认）" style="flex:1">
-        <button class="btn" onclick="gwKeySave(this)">🔑 保存密钥</button>
+
+      <div class="gwSec">
+        <div class="gwTitle">连接信息 <span class="tag">给客户端填的，只读</span></div>
+        <div class="gwRow"><span class="gwLabel">网关地址</span><code id="gwUrl">—</code>
+          <button class="btn sm ghost" onclick="copyField('gwUrl',this)">复制</button></div>
+        <div class="gwRow"><span class="gwLabel">API Key</span><code id="gwKey">—</code>
+          <button class="btn sm ghost" onclick="copyField('gwKey',this)">复制</button></div>
+        <div class="gwRow"><span class="gwLabel">可用账号</span><span id="gwHealthy">—</span></div>
       </div>
-      <span class="tag">客户端调用 /v1 需带密钥（Authorization: Bearer &lt;key&gt;）；内置默认 <code>workbuddy</code>，保存立即生效无需重启</span>
-      <div class="kv"><span>对外网关</span><span><button class="btn sm" id="gwSwitch" onclick="gwSwitchToggle()">…</button></span></div>
-      <span class="tag">关闭后 /v1 一律返回 404（客户端无法调用），管理界面不受影响；立即生效无需重启</span>
-      <div class="kv"><span>服务端口</span><span id="gwPortNow">—</span></div>
-      <div class="row" style="margin-top:6px">
-        <input id="gwPortInput" placeholder="新端口（1-65535，重启后生效）" style="flex:1">
-        <button class="btn" onclick="gwPortSave(this)">🔌 保存端口</button>
+
+      <div class="gwSec">
+        <div class="gwTitle">访问密钥</div>
+        <div class="row">
+          <input id="gwKeyInput" placeholder="自定义密钥（留空恢复默认 workbuddy）" style="flex:1">
+          <button class="btn" onclick="gwKeySave(this)">保存密钥</button>
+        </div>
+        <div class="hint">客户端调用需带 <code>Authorization: Bearer &lt;key&gt;</code>；保存立即生效，无需重启。</div>
       </div>
-      <span class="tag">保存前自动试绑：端口被占用会拒绝保存；保存后按提示重启服务即切换到新端口</span>
-      <div class="kv"><span>可用账号</span><span id="gwHealthy">—</span></div>
+
+      <div class="gwSec">
+        <div class="gwTitle">对外网关 <button class="btn sm" id="gwSwitch" onclick="gwSwitchToggle()">…</button></div>
+        <div class="hint">关闭后 /v1 一律返回 404（客户端无法调用），管理界面不受影响；立即生效无需重启。</div>
+      </div>
+
+      <div class="gwSec">
+        <div class="gwTitle">聚合渠道模型 <button class="btn sm" id="aggSwitch" onclick="aggSwitchToggle()">…</button></div>
+        <div class="hint">关闭后 /v1/models 只暴露账号池（WorkBuddy / Cline）的模型，目录更清爽；已配置 key 的厂商想用随时再开。</div>
+      </div>
+
+      <div class="gwSec">
+        <div class="gwTitle">服务端口 <span class="tag" id="gwPortNow">—</span></div>
+        <div class="row">
+          <input id="gwPortInput" placeholder="新端口（1-65535，重启后生效）" style="flex:1">
+          <button class="btn" onclick="gwPortSave(this)">保存端口</button>
+        </div>
+        <div class="hint">保存前自动试绑：端口被占用会拒绝保存；保存后按提示重启服务即切换到新端口。</div>
+      </div>
     </div>
     <div class="card">
       <h2>模型目录</h2>
@@ -1015,11 +1043,13 @@ async function loadGateway() {
   $('#gwKey').textContent = k.data.is_default ? `${k.data.default}（内置默认）` : k.data.key;
   const gs = await api('/api/settings/gateway');
   gwState.enabled = !!gs.data.enabled;
+  gwState.aggregate = gs.data.aggregate !== false;
   gwState.port = gs.data.port || '';
   $('#gwPortNow').textContent = gs.data.current_port
     ? `${gs.data.current_port}（当前监听）` + (gwState.port && +gwState.port !== gs.data.current_port ? ` → 待重启切到 ${gwState.port}` : '')
     : '—';
   paintGwSwitch();
+  paintAggSwitch();
   const m = await api('/api/models');
   const list = m.data || [];
   $('#modelEmpty').hidden = list.length > 0;
@@ -1050,12 +1080,53 @@ async function gwKeySave(btn) {
   });
 }
 
-let gwState = {enabled: true, port: ''};
+let gwState = {enabled: true, port: '', aggregate: true};
+
+// 只读字段一键复制（http 局域网降级 execCommand）
+async function copyField(id, btn) {
+  const text = document.getElementById(id).textContent.trim();
+  if (!text || text === '—') return toast('还没有内容可复制', false);
+  let done = false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text); done = true;
+    }
+  } catch {}
+  if (!done) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    try { done = document.execCommand('copy'); } catch {}
+    ta.remove();
+  }
+  toast(done ? `已复制：${text.length > 42 ? text.slice(0, 42) + '…' : text}`
+             : '复制失败，请手动选择复制', done);
+}
 
 function paintGwSwitch() {
   const b = $('#gwSwitch');
-  b.textContent = gwState.enabled ? '🟢 开启中 · 点击关闭' : '⛔ 已关闭 · 点击开启';
-  b.classList.toggle('ghost', gwState.enabled);
+  b.textContent = gwState.enabled ? '开启中 · 点击关闭' : '已关闭 · 点击开启';
+  b.style.color = gwState.enabled ? 'var(--ok)' : 'var(--bad)';
+}
+
+function paintAggSwitch() {
+  const b = $('#aggSwitch');
+  b.textContent = gwState.aggregate ? '纳入目录 · 点击关闭' : '已隐藏 · 点击开启';
+  b.style.color = gwState.aggregate ? 'var(--ok)' : 'var(--dim)';
+}
+
+async function aggSwitchToggle() {
+  const r = await api('/api/settings/gateway', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({aggregate: !gwState.aggregate})});
+  if (!r.ok) return toast(r.error, false);
+  gwState.aggregate = !!r.data.aggregate;
+  paintAggSwitch();
+  toast(gwState.aggregate
+    ? '聚合渠道模型已纳入 /v1/models（立即生效）'
+    : '聚合渠道模型已从 /v1/models 隐藏（立即生效）');
 }
 
 async function gwSwitchToggle() {

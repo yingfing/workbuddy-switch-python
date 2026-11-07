@@ -548,15 +548,17 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         cur = getattr(app.state, "web_port", None)
         return _ok({
             "enabled": bool(getattr(app.state, "gw_enabled", True)),
+            "aggregate": bool(getattr(app.state, "gw_aggregate", True)),
             "port": (cfg.get("web") or {}).get("port") or "",
             "current_port": cur,
         })
 
     @app.post("/api/settings/gateway")
     async def gateway_settings_set(request: Request):
-        """body: {enabled?: bool, port?: str|int}
+        """body: {enabled?: bool, aggregate?: bool, port?: str|int}
 
         enabled  → 写 config gateway.enabled 并热生效（/v1 立即 404 或恢复）；
+        aggregate → 写 config gateway.aggregate 并热生效（/v1/models 是否注入聚合渠道模型）；
         port     → 校验 + 试绑检测（自己占着的当前端口除外）+ 落盘 config web.port，
                    重启服务后生效（restart_required=true 提示前端引导重启）。
         """
@@ -564,6 +566,7 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         cfg = load_config()
         cur = getattr(app.state, "web_port", None)
         result = {"enabled": bool(getattr(app.state, "gw_enabled", True)),
+                  "aggregate": bool(getattr(app.state, "gw_aggregate", True)),
                   "port": (cfg.get("web") or {}).get("port") or "",
                   "restart_required": False}
 
@@ -576,6 +579,15 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
                 _log("对外网关（/v1）：已开启，立即生效。")
             else:
                 _log("对外网关（/v1）：已关闭，客户端调用将返回 404（管理界面不受影响）。")
+
+        if "aggregate" in body:
+            agg = bool(body.get("aggregate"))
+            cfg.setdefault("gateway", {})["aggregate"] = agg
+            app.state.gw_aggregate = agg
+            app.state.model_cached_at = 0            # 目录 TTL 缓存作废，下次请求立即重建
+            result["aggregate"] = agg
+            _log("聚合渠道模型：" + ("已纳入 /v1/models 目录。" if agg
+                                     else "已从 /v1/models 目录移除。"))
 
         if "port" in body and str(body.get("port") or "").strip():
             raw = str(body.get("port")).strip()

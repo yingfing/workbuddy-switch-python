@@ -86,6 +86,10 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     # 关闭后 /v1/* 一律 404，/api/* 管理界面与 /healthz 不受影响
     app.state.gw_enabled = bool(
         (load_config().get("gateway") or {}).get("enabled", True))
+    # 聚合渠道模型注入开关（config gateway.aggregate，网页端点热更新直接改这里）：
+    # 关闭后 /v1/models 只暴露账号池模型，目录清爽
+    app.state.gw_aggregate = bool(
+        (load_config().get("gateway") or {}).get("aggregate", True))
     # 网关运行日志（与自动化共用网页日志抽屉 /api/logs）
     app.state.auto_log: list[str] = []
     app.state.auto_total = 0
@@ -294,13 +298,15 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
 
                 pool_rows.sort(key=lambda r: (_cm(r) is None, _cm(r) or 0))
                 rows = pool_rows
-                # 聚合渠道只暴露「当前真的可调用」的：未配置 key 的厂商不进目录
-                try:
-                    rows += [{"id": m["id"], "object": "model", "owned_by": m["owned_by"],
-                              **m["wbspy"]}
-                             for m in aggregate.models() if m["wbspy"].get("configured")]
-                except Exception as exc:
-                    _gw_log(f"聚合渠道目录刷新失败（忽略）：{type(exc).__name__}: {exc}")
+                # 聚合渠道只暴露「当前真的可调用」的：未配置 key 的厂商不进目录；
+                # 可在网页设置里整体关掉（目录只留账号池模型）
+                if app.state.gw_aggregate:
+                    try:
+                        rows += [{"id": m["id"], "object": "model", "owned_by": m["owned_by"],
+                                  **m["wbspy"]}
+                                 for m in aggregate.models() if m["wbspy"].get("configured")]
+                    except Exception as exc:
+                        _gw_log(f"聚合渠道目录刷新失败（忽略）：{type(exc).__name__}: {exc}")
                 app.state.model_cache = rows
                 app.state.model_cached_at = now
         return {"object": "list", "data": app.state.model_cache}
