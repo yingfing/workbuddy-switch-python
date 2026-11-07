@@ -2,6 +2,11 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.12] — 2026-11-07
+
+### 新增
+- **网关视觉透传开关（识图）**：诊断确认转发链本就保留图片 part（content 数组原样透传），客户端「无法识图」的根因是目录从未声明视觉能力。现对齐原版 channel-pack 网关出站约定——`/v1/models` 的 WorkBuddy 系行带 `input: ["text","image"]` 声明（cline/qoder 行不越权代言），`gateway.vision` 总闸默认开；关闭时目录撤回声明 + 图片剥成文字占位（上游零图片流量）。网页设置页热生效开关，落盘。
+
 ## [0.2.11] — 2026-11-07
 
 ### 修复
