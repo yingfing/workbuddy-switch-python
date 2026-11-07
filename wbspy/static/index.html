@@ -722,6 +722,7 @@ function toggleLogDrawer(force) {
   logDrawerOpen = force !== undefined ? force : !logDrawerOpen;
   $('#logDrawer').classList.toggle('on', logDrawerOpen);
   $('#logDrawerBg').classList.toggle('on', logDrawerOpen);
+  dbgPoll(logDrawerOpen && logTabCur === 'debug');   // 关抽屉即停轮询
   if (logDrawerOpen) loadLogDrawer();
 }
 function logTab(t) {
@@ -731,6 +732,7 @@ function logTab(t) {
   $('#ldLive').hidden = t !== 'live';
   $('#ldHist').hidden = t !== 'hist';
   $('#ldDebug').hidden = t !== 'debug';
+  dbgPoll(t === 'debug');                    // 调试标签激活期间自动刷新
   if (t === 'hist') loadHistToDrawer();
   if (t === 'debug') loadDebugToDrawer();
 }
@@ -791,7 +793,12 @@ async function copyLog() {
 }
 
 // -- 调试日志：客户端调网关的来龙去脉（发了什么密钥/ body 摘要 / 响应状态）--
-let _dbgOn = false;
+// 标签激活期间每 3 秒自动刷新（内容没变不重绘，不打断选择文本；在底部时贴底跟随）
+let _dbgOn = false, _dbgSig = '', _dbgTimer = null;
+function dbgPoll(on) {
+  if (_dbgTimer) { clearInterval(_dbgTimer); _dbgTimer = null; }
+  if (on) _dbgTimer = setInterval(loadDebugToDrawer, 3000);
+}
 async function loadDebugToDrawer() {
   const r = await api('/api/debug-logs');
   if (!r.ok) return;
@@ -799,7 +806,12 @@ async function loadDebugToDrawer() {
   $('#dbgToggle').textContent = _dbgOn ? '调试：开' : '调试：关';
   $('#dbgToggle').style.color = _dbgOn ? 'var(--ok)' : 'var(--dim)';
   const logs = r.data.logs || [];
-  $('#ldDebugList').innerHTML = logs.length ? logs.map(e => {
+  const sig = logs.length + ':' + (logs.length ? logs[0].t : '');
+  if (sig === _dbgSig) return;               // 内容没变：跳过重绘
+  _dbgSig = sig;
+  const list = $('#ldDebugList');
+  const stick = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+  list.innerHTML = logs.length ? logs.map(e => {
     const bad = e.status >= 400;
     const st = `<span style="color:${bad ? 'var(--bad)' : 'var(--ok)'};font-weight:700">${e.status}</span>`;
     return `<div class="hcard" style="${bad ? 'border-left:3px solid var(--bad)' : ''}">
@@ -809,6 +821,7 @@ async function loadDebugToDrawer() {
       ${e.note ? `<div class="line" style="color:${bad ? 'var(--bad)' : 'inherit'}">${e.note}</div>` : ''}
     </div>`;
   }).join('') : '<div class="empty">暂无调试记录 —— 有客户端调一次网关再看。</div>';
+  if (stick) list.scrollTop = list.scrollHeight;
 }
 async function toggleDebug() {
   const r = await api('/api/debug-logs', {
@@ -816,10 +829,12 @@ async function toggleDebug() {
     body: JSON.stringify({on: !_dbgOn})});
   if (r.ok) { _dbgOn = !!r.data.on; toast(`调试日志已${_dbgOn ? '开启' : '关闭'}`); }
   else toast(r.error, false);
+  _dbgSig = '';
   loadDebugToDrawer();
 }
 async function clearDebug() {
   await api('/api/debug-logs', {method: 'DELETE'});
+  _dbgSig = '';
   loadDebugToDrawer();
 }
 async function pollLogBadge() {
