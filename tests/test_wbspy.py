@@ -1486,7 +1486,7 @@ class TestClinePrices(unittest.TestCase):
 
     def test_models_rows_carry_price(self):
         """目录行注入 input_price/output_price；查不到的模型不带价格字段。"""
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, patch
         from wbspy.upstream import ClineClient
         c = self._client()
         resp = MagicMock(ok=True, status_code=200)
