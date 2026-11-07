@@ -1221,7 +1221,7 @@ class TestGatewayLogging(unittest.TestCase):
     """网关日志接线：401 鉴权失败、对话成败、换号/续期事件进网页日志抽屉。"""
 
     def test_auth_fail_and_chat_logged(self):
-        """密钥不匹配 401 与对话失败都写入 /api/logs。"""
+        """密钥不匹配 401 进调试日志（req_log）；对话失败进运行日志（/api/logs）。"""
         from unittest.mock import patch
         from fastapi.testclient import TestClient
         from wbspy.gateway import create_app
@@ -1229,10 +1229,13 @@ class TestGatewayLogging(unittest.TestCase):
         from wbspy.upstream import UpstreamError
         app = create_app(AccountPool([]), api_key="secret")
         c = TestClient(app, raise_server_exceptions=False)
-        # 密钥不匹配 → 401 + 日志
+        # 密钥不匹配 → 401 + 调试日志（含脱敏密钥与指引）
         r = c.get("/v1/models", headers={"Authorization": "Bearer wrong"})
         self.assertEqual(r.status_code, 401)
-        self.assertIn("鉴权失败", app.state.auto_log[-1])
+        e = app.state.req_log[-1]
+        self.assertEqual(e["status"], 401)
+        self.assertIn("密钥无效", e["note"])
+        self.assertIn("****", e["auth"])
         # 对话失败 → 错误进日志
         class _P(AccountPool):
             def chat_failover(self, payload, session=None, lane="workbuddy"):
@@ -1310,3 +1313,103 @@ class TestRegionOf(unittest.TestCase):
                           "auth": {"accessToken": "t", "domain": "api.cline.bot"}})
         self.assertEqual(doc.region, "intl")
         self.assertIn("国际", doc.label())
+
+
+
+
+def _make_app_with_pool(tmp, doc=None, client=None, api_key="secret-1234-5678"):
+    """造一个可注入 mock 客户端的网关 app（调试日志测试用），config 重定向到 tmp。"""
+    from pathlib import Path
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from wbspy.gateway import create_app
+    from wbspy.pool import AccountPool, _key
+    from wbspy.document import parse_auth
+    from wbspy import store
+    ctx = (patch.object(store, "CONFIG_PATH", Path(tmp) / "config.json"),
+           patch("wbspy.gateway.load_config", store.load_config),
+           patch("wbspy.store.save_config", store.save_config))
+    for p in ctx:
+        p.start()
+    docs = [doc] if doc else []
+    pool = AccountPool(docs)
+    if doc and client is not None:
+        pool.clients[_key(doc)] = client
+    app = create_app(pool, api_key=api_key)
+    return TestClient(app), app
+
+
+class TestGatewayDebug(unittest.TestCase):
+    """网关调试日志：/v1 请求来龙去脉（密钥脱敏/body 摘要/状态码），网页抽屉可见。"""
+
+    def _env(self):
+        import tempfile
+        from unittest.mock import MagicMock
+        from wbspy.document import parse_auth
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        doc = parse_auth({"account": {"uid": "dbg1", "nickname": "调试号"},
+                          "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}})
+        resp = MagicMock()
+        resp.iter_lines.return_value = iter([
+            'data: {"id":"1","model":"auto","choices":[{"delta":{"content":"hi"}}]}',
+            'data: [DONE]'])
+        client = MagicMock()
+        client.chat.return_value = resp
+        c, app = _make_app_with_pool(tmp.name, doc=doc, client=client)
+        return c, app
+
+    def test_401_recorded_and_masked(self):
+        """密钥无效：记录 401 + 脱敏密钥 + 明确指引；密钥全文不落盘。"""
+        c, app = self._env()
+        r = c.get("/v1/models", headers={"Authorization": "Bearer wrong-key-abcdef-xyz!"})
+        self.assertEqual(r.status_code, 401)
+        e = app.state.req_log[-1]
+        self.assertEqual(e["status"], 401)
+        self.assertEqual(e["path"], "/v1/models")
+        self.assertIn("****", e["auth"])
+        self.assertNotIn("wrong-key-abcdef-xyz!", e["auth"])
+        self.assertIn("密钥无效", e["note"])
+        self.assertIn("长度", e["note"])            # 提示两边密钥长度差异
+        self.assertNotEqual(e["ip"], "")
+
+    def test_ok_request_logged_with_body_digest(self):
+        """密钥正确的对话请求：200 + body 摘要（model/消息数/最后一条预览），下游正常解析。"""
+        c, app = self._env()
+        body = {"model": "auto",
+                "messages": [{"role": "user", "content": "你好世界" * 30}]}
+        r = c.post("/v1/chat/completions", json=body,
+                   headers={"Authorization": "Bearer secret-1234-5678"})
+        self.assertEqual(r.status_code, 200)        # body 经中间件读后仍正常解析
+        e = app.state.req_log[-1]
+        self.assertEqual(e["status"], 200)
+        self.assertIn("model=auto", e["body"])
+        self.assertIn("messages=1", e["body"])
+        self.assertIn("****", e["auth"])
+        self.assertGreaterEqual(e["ms"], 0)
+
+    def test_toggle_persists_and_off_only_logs_errors(self):
+        """开关落盘 config；关闭后成功请求不记录，失败请求仍记录（排障底线）。"""
+        import json as _json
+        from wbspy import store
+        c, app = self._env()
+        r = c.post("/api/debug-logs", json={"on": False}).json()["data"]
+        self.assertFalse(r["on"])
+        self.assertFalse(
+            _json.loads(store.CONFIG_PATH.read_text())["gateway"]["debug"])
+        n = len(app.state.req_log)
+        c.get("/v1/models", headers={"Authorization": "Bearer secret-1234-5678"})
+        self.assertEqual(len(app.state.req_log), n)            # 成功不记
+        c.get("/v1/models", headers={"Authorization": "Bearer bad"})
+        self.assertEqual(len(app.state.req_log), n + 1)        # 失败仍记
+        self.assertTrue(c.post("/api/debug-logs",
+                               json={"on": True}).json()["data"]["on"])
+
+    def test_clear_and_default_on(self):
+        """默认开启；DELETE 清空。"""
+        c, app = self._env()
+        self.assertTrue(c.get("/api/debug-logs").json()["data"]["on"])
+        c.get("/v1/models", headers={"Authorization": "Bearer secret-1234-5678"})
+        self.assertTrue(app.state.req_log)
+        self.assertEqual(c.delete("/api/debug-logs").status_code, 200)
+        self.assertEqual(app.state.req_log, [])

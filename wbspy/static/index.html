@@ -429,10 +429,19 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
   <div class="ldTabs">
     <button class="on" data-lt="live" onclick="logTab('live')">实时日志</button>
     <button data-lt="hist" onclick="logTab('hist')">历史轮次</button>
+    <button data-lt="debug" onclick="logTab('debug')">调试日志</button>
   </div>
   <div class="ldBody">
     <div id="ldLive" class="log">暂无日志。</div>
     <div id="ldHist" hidden></div>
+    <div id="ldDebug" hidden>
+      <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+        <button class="btn sm" id="dbgToggle" onclick="toggleDebug()"></button>
+        <button class="btn sm ghost" onclick="clearDebug()">清空</button>
+        <span class="tag">记录客户端对网关 /v1 的每次请求（密钥自动脱敏，环形 300 条）</span>
+      </div>
+      <div id="ldDebugList" class="log" style="max-height:calc(100vh - 220px)">暂无调试记录。</div>
+    </div>
   </div>
 </aside>
 
@@ -720,7 +729,9 @@ function logTab(t) {
     b.classList.toggle('on', b.dataset.lt === t));
   $('#ldLive').hidden = t !== 'live';
   $('#ldHist').hidden = t !== 'hist';
+  $('#ldDebug').hidden = t !== 'debug';
   if (t === 'hist') loadHistToDrawer();
+  if (t === 'debug') loadDebugToDrawer();
 }
 async function loadLogDrawer() {
   const r = await api('/api/logs');
@@ -750,6 +761,39 @@ async function loadHistToDrawer() {
       return `<div class="hcard"><div class="when">${when} · ${ok}</div>${lines}</div>`;
     }).join('') : '<div class="empty">还没有运行记录。</div>';
   } catch {}
+}
+
+// -- 调试日志：客户端调网关的来龙去脉（发了什么密钥/ body 摘要 / 响应状态）--
+let _dbgOn = false;
+async function loadDebugToDrawer() {
+  const r = await api('/api/debug-logs');
+  if (!r.ok) return;
+  _dbgOn = !!r.data.on;
+  $('#dbgToggle').textContent = _dbgOn ? '调试：开' : '调试：关';
+  $('#dbgToggle').style.color = _dbgOn ? 'var(--ok)' : 'var(--dim)';
+  const logs = r.data.logs || [];
+  $('#ldDebugList').innerHTML = logs.length ? logs.map(e => {
+    const bad = e.status >= 400;
+    const st = `<span style="color:${bad ? 'var(--bad)' : 'var(--ok)'};font-weight:700">${e.status}</span>`;
+    return `<div class="hcard" style="${bad ? 'border-left:3px solid var(--bad)' : ''}">
+      <div class="when">${e.t} · ${st} · ${e.method} ${e.path}${e.ms != null ? ' · ' + e.ms + 'ms' : ''} · 来自 ${e.ip}</div>
+      <div class="line">密钥：<code>${e.auth || '—'}</code>${e.ua ? ` · UA：${e.ua}` : ''}</div>
+      ${e.body ? `<div class="line">请求：${e.body}</div>` : ''}
+      ${e.note ? `<div class="line" style="color:${bad ? 'var(--bad)' : 'inherit'}">${e.note}</div>` : ''}
+    </div>`;
+  }).join('') : '<div class="empty">暂无调试记录 —— 有客户端调一次网关再看。</div>';
+}
+async function toggleDebug() {
+  const r = await api('/api/debug-logs', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({on: !_dbgOn})});
+  if (r.ok) { _dbgOn = !!r.data.on; toast(`调试日志已${_dbgOn ? '开启' : '关闭'}`); }
+  else toast(r.error, false);
+  loadDebugToDrawer();
+}
+async function clearDebug() {
+  await api('/api/debug-logs', {method: 'DELETE'});
+  loadDebugToDrawer();
 }
 async function pollLogBadge() {
   try {

@@ -96,6 +96,80 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         app.state.auto_total += 1
     app.state.gw_log = _gw_log
 
+    # -- 客户端调试日志：每个 /v1/* 请求的来龙去脉（环形缓冲 300 条）----------
+    app.state.req_log: list[dict] = []
+    app.state.gw_debug = bool((load_config().get("gateway") or {}).get("debug", True))
+
+    def _dbg(entry: dict) -> None:
+        """调试模式关闭时只记 4xx/5xx（排障底线），打开时全量记录。"""
+        if not app.state.gw_debug and entry.get("status", 0) < 400:
+            return
+        entry = {"t": time.strftime("%H:%M:%S"), **entry}
+        app.state.req_log.append(entry)
+        del app.state.req_log[:-300]
+    app.state.gw_dbg = _dbg
+
+    def _client_ip(request) -> str:
+        return (request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                or (request.client.host if request.client else "?"))
+
+    def _mask(presented: str) -> str:
+        """密钥脱敏：只留前 8 后 4，中间打码（能认出是哪个 key，又不泄密）。"""
+        s = (presented or "").strip()
+        if not s:
+            return "（未带密钥）"
+        if len(s) <= 14:
+            return s[:4] + "****"
+        return s[:8] + "****" + s[-4:]
+
+    async def _body_digest(request) -> str:
+        """请求体摘要（不存全文）：model、消息条数、最后一条消息预览、字节数。"""
+        try:
+            raw = await request.body()
+        except Exception:
+            return "（body 读取失败）"
+        if not raw:
+            return "（无 body）"
+        try:
+            j = json.loads(raw)
+        except ValueError:
+            return f"非 JSON：{raw[:120]!r}（{len(raw)}B）"
+        if not isinstance(j, dict):
+            return f"JSON {type(j).__name__}（{len(raw)}B）"
+        msgs = j.get("messages")
+        n = len(msgs) if isinstance(msgs, list) else 0
+        last = ""
+        if isinstance(msgs, list) and msgs and isinstance(msgs[-1], dict):
+            last = str(msgs[-1].get("content"))[:140]
+        return (f"model={j.get('model')} messages={n} stream={j.get('stream')} "
+                f"last={last!r}（{len(raw)}B）")
+
+    # 调试日志管理端点（本机管理界面，同 /api/* 不设网关密钥）
+    @app.get("/api/debug-logs")
+    def debug_logs() -> dict:
+        return {"ok": True, "data": {"on": app.state.gw_debug,
+                                     "logs": list(reversed(app.state.req_log[-300:]))}}
+
+    @app.post("/api/debug-logs")
+    async def debug_logs_toggle(request: Request) -> dict:
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(400, "请求须为 JSON 对象。")
+        on = bool(body.get("on"))
+        app.state.gw_debug = on
+        from .store import save_config
+        cfg = load_config()
+        cfg.setdefault("gateway", {})["debug"] = on
+        save_config(cfg)
+        _gw_log(f"调试日志已{'开启' if on else '关闭'}（配置已落盘）")
+        return {"ok": True, "data": {"on": on}}
+
+    @app.delete("/api/debug-logs")
+    def debug_logs_clear() -> dict:
+        app.state.req_log.clear()
+        return {"ok": True}
+
     # 统一鉴权中间件：只保护 /v1/*（对外 OpenAI 服务）；/api/* 是本机管理
     # 界面，不被网关密钥锁死（公网防护由 _public_guard / 反向代理负责）。
     # 接受 Authorization: Bearer <key> 或 X-Wbspy-Key。
@@ -103,6 +177,8 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     async def auth_middleware(request, call_next):
         path = request.url.path
         if not app.state.gw_enabled and path.startswith("/v1"):
+            _dbg({"ip": _client_ip(request), "method": request.method, "path": path,
+                  "status": 404, "auth": "（未带密钥）", "note": "网关已关闭（gateway_disabled）"})
             return JSONResponse(status_code=404,
                                 content={"error": {"message": "gateway is disabled",
                                                    "type": "gateway_disabled"}})
@@ -111,11 +187,27 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             presented = request.headers.get("authorization", "") or \
                         request.headers.get("x-wbspy-key", "")
             if presented not in (f"Bearer {key}", key):
-                _gw_log(f"鉴权失败 401：{request.client.host if request.client else '?'} "
-                        f"{request.method} {path}（密钥不匹配，请核对客户端配置的密钥）")
+                _dbg({"ip": _client_ip(request), "method": request.method, "path": path,
+                      "status": 401, "auth": _mask(presented),
+                      "ua": request.headers.get("user-agent", "")[:120],
+                      "body": await _body_digest(request),
+                      "note": "✗ 密钥无效：客户端发的密钥与网关设置的不一致"
+                              f"（本网关密钥长度 {len(key)}，对方发来长度 {len(presented.strip())}）"})
                 return JSONResponse(status_code=401,
                                     content={"error": {"message": "invalid api key",
                                                        "type": "invalid_api_key"}})
+            # 密钥正确 → 记录请求与响应全貌（调试模式关闭则只记账不落盘）。
+            # body 摘要必须在 call_next 之前取：流会被下游消费掉。
+            digest = await _body_digest(request)
+            t0 = time.time()
+            response = await call_next(request)
+            _dbg({"ip": _client_ip(request), "method": request.method, "path": path,
+                  "status": response.status_code,
+                  "ms": int((time.time() - t0) * 1000),
+                  "auth": _mask(presented),
+                  "ua": request.headers.get("user-agent", "")[:120],
+                  "body": digest})
+            return response
         return await call_next(request)
 
     # 鉴权统一由上方 auth_middleware 处理（Bearer 或 X-Wbspy-Key）。
