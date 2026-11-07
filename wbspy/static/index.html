@@ -1058,11 +1058,13 @@ async function snapRestore() {
 }
 
 // -- 我的模型（已入库账号可调用索引）+ 聚合渠道密钥 --
-let _mymRows = [], _mymOk = 0, _mymAll = 0, _mymLaneOk = {workbuddy: 0, cline: 0, qoder: 0};
+let _mymRows = [], _mymOk = 0, _mymAll = 0, _mymLaneOk = {workbuddy: 0, cline: 0, qoder: 0, zcode: 0};
 // 泳道判定：cline: → Cline；qoder:/qodercn: → Qoder；其余（workbuddy:/cn:/global:/裸名）→ WorkBuddy
 const _laneOfId = id => { const h = String(id).split(':')[0];
-  return h === 'cline' ? 'cline' : h.startsWith('qoder') ? 'qoder' : 'workbuddy'; };
+  return h === 'cline' ? 'cline' : h === 'zcode' ? 'zcode'
+    : h.startsWith('qoder') ? 'qoder' : 'workbuddy'; };
 const _laneOfAcc = a => a.channel_id === 'cline' ? 'cline'
+  : a.channel_id === 'zcode' ? 'zcode'
   : String(a.channel_id || '').startsWith('qoder') ? 'qoder' : 'workbuddy';
 async function loadFree() {
   const r = await api('/api/my-models');
@@ -1073,7 +1075,7 @@ async function loadFree() {
     ? `${_mymOk} / ${_mymAll} 个账号可用`
     : '账号池为空';
   // 分母按泳道分开算：各泳道账号只能调本泳道模型，账号数不能混做分母
-  const laneOk = {workbuddy: 0, cline: 0, qoder: 0};
+  const laneOk = {workbuddy: 0, cline: 0, qoder: 0, zcode: 0};
   for (const a of ok) laneOk[_laneOfAcc(a)]++;
   _mymLaneOk = laneOk;
   // 统一索引：跨账号合并同名模型，标注可用账号数（id 已带泳道前缀）
@@ -1109,7 +1111,7 @@ function _mymRender() {
     return `<tr><td><code>${m.id}</code></td><td>${m.name}</td>
       <td>${cm}</td><td>${m.n} / ${_mymLaneOk[m.lane] || 0}</td></tr>`;
   };
-  const byLane = {workbuddy: [], cline: [], qoder: []};
+  const byLane = {workbuddy: [], cline: [], qoder: [], zcode: []};
   for (const m of _mymRows) if (match(m)) byLane[m.lane].push(m);
   const count = lane => q
     ? `${byLane[lane].length} / ${_mymRows.filter(m => m.lane === lane).length} 条匹配`
@@ -1124,10 +1126,14 @@ function _mymRender() {
   $('#mymQoderBox').hidden = !_mymRows.some(m => m.lane === 'qoder');
   $('#mymQoderCount').textContent = count('qoder');
   $('#mymQoderTbody').innerHTML = byLane.qoder.map(cell).join('');
+  $('#mymZcodeBox').hidden = !_mymRows.some(m => m.lane === 'zcode');
+  $('#mymZcodeCount').textContent = count('zcode');
+  $('#mymZcodeTbody').innerHTML = byLane.zcode.map(cell).join('');
   if (q) {   // 搜索命中时自动展开对应分组
     $('#mymWbBox').open = byLane.workbuddy.length > 0;
     $('#mymClineBox').open = byLane.cline.length > 0;
     $('#mymQoderBox').open = byLane.qoder.length > 0;
+    $('#mymZcodeBox').open = byLane.zcode.length > 0;
   }
 }
 

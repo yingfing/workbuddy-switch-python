@@ -43,13 +43,17 @@ def _lane_of(doc: Document) -> str:
 
 def _client_for(doc: Document):
     """按渠道构造客户端：Cline 走 OpenAI 兼容 api.cline.bot，Qoder 走
-    静态目录客户端（推理协议未接入），其余走 WorkBuddy。"""
+    静态目录客户端（推理协议未接入），ZCode 走 Anthropic 线转码客户端，
+    其余走 WorkBuddy。"""
     from .upstream import ClineClient, WorkBuddyClient
     if doc.channel_id == "cline":
         return ClineClient(doc)
     if doc.channel_id in ("qoder", "qodercn"):
         from .qoder import QoderClient
         return QoderClient(doc)
+    if doc.channel_id == "zcode":
+        from .zcode import ZCodeClient
+        return ZCodeClient(doc)
     return WorkBuddyClient(doc)
 
 

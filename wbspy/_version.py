@@ -5,4 +5,4 @@ pyproject.toml（dynamic = ["version"]）与运行时 __init__ 都从本文件�
 导致 0.2.5~0.2.12 运行时始终自报 0.2.4（更新弹窗永远显示 v0.2.4 → vX.Y.Z）。
 """
 
-__version__ = "0.2.15"
+__version__ = "0.2.16"

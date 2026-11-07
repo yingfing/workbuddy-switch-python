@@ -2433,3 +2433,276 @@ class TestPriorityOrderApi(unittest.TestCase):
             self.assertEqual(r.status_code, 400)
             r = c.post("/api/settings/gateway", json={"distribution": "priority"})
             self.assertEqual(r.json()["data"]["distribution"], "priority")
+
+
+class TestDenialAnnotation(unittest.TestCase):
+    """11128 审查拒错误消息的诊断注解：大小分档 + 对策状态 + 行动指引。
+
+    背景：审查拒是最高频的「用户来问」项（老问题）。对策一/二在
+    upstream 层已自动化，但错误消息只有干巴巴一句官方代码，用户每次
+    都得人工排查——现在把请求体大小、已试过的对策、该做什么直接写进
+    错误消息。
+    """
+
+    def _err(self):
+        from wbspy.upstream import UpstreamError
+        return UpstreamError(403, "upstream_access_denied", "上游渠道检查拒绝本次请求。",
+                             upstream_status=403, upstream_code="11128")
+
+    def test_huge_body_flags_mb_and_demoted(self):
+        from wbspy.upstream import annotate_denial
+        out = annotate_denial(self._err(), "x" * (600 * 1024), demoted=True)
+        self.assertIn("MB", out.message)
+        self.assertIn("大会话", out.message)
+        self.assertIn("system 降级重试仍被拒", out.message)
+        self.assertIn("新开会话", out.message)
+        self.assertIn("换账号无效", out.message)
+        self.assertEqual(out.status, 403)                # 其余字段原样保留
+        self.assertEqual(out.upstream_code, "11128")
+
+    def test_medium_body_flags_kb(self):
+        from wbspy.upstream import annotate_denial
+        out = annotate_denial(self._err(), "x" * (80 * 1024), demoted=False)
+        self.assertIn("KB", out.message)
+        self.assertNotIn("MB", out.message)
+        self.assertNotIn("降级", out.message)            # 没试过降级不冒功
+
+    def test_small_body_no_size_section(self):
+        from wbspy.upstream import annotate_denial
+        out = annotate_denial(self._err(), "短消息", demoted=False)
+        self.assertNotIn("请求体", out.message)
+        self.assertIn("新开会话", out.message)
+
+    def test_chat_integrates_annotation(self):
+        """端到端：带 system 的请求被 11128 拒 → 对策二重试也拒 →
+        抛出的错误消息注明「降级重试仍被拒」。"""
+        from unittest.mock import MagicMock, patch
+        from wbspy.document import parse_auth
+        from wbspy.upstream import WorkBuddyClient, UpstreamError
+        doc = parse_auth({"account": {"uid": "d1", "nickname": "注解号"},
+                          "auth": {"accessToken": "t",
+                                   "domain": "www.codebuddy.cn"}})
+        cl = WorkBuddyClient(doc)
+        resp = MagicMock(ok=False, status_code=403,
+                         text='{"code": "11128", "message": "review"}',
+                         headers={"Retry-After": "", "Content-Type": "application/json"})
+        with patch.object(cl.http, "post", return_value=resp):
+            with self.assertRaises(UpstreamError) as cm:
+                cl.chat({"model": "m", "stream": False,
+                         "messages": [{"role": "system", "content": "S"},
+                                      {"role": "user", "content": "hi"}]})
+        self.assertEqual(cm.exception.code, "upstream_access_denied")
+        self.assertIn("system 降级重试仍被拒", cm.exception.message)
+        self.assertIn("新开会话", cm.exception.message)
+
+
+class TestZcodeLane(unittest.TestCase):
+    """ZCode（智谱 GLM）接入：OpenAI↔Anthropic 双向转码、SSE 实时转码、
+    双通道选线（start-plan 免费线 JWT / coding-plan 订阅线 plan key）。
+
+    协议全部来自 dsh-xdpool channel-pack 的线上实测结论：请求体恒流式、
+    订阅线必须删 HTTP-Referer、headers 指纹逐头对齐。
+    """
+
+    def _doc(self, meta=None):
+        from wbspy.document import parse_auth
+        return parse_auth({"account": {"uid": "zc1", "nickname": "Z"},
+                           "auth": {"accessToken": "jwt-t", "domain": "zcode.z.ai"},
+                           "zcode": meta or {"device_mid": "mid1"}})
+
+    # -- 请求体转换 ----------------------------------------------------------
+
+    def test_body_core_mapping(self):
+        from wbspy.zcode import to_anthropic_body
+        b = to_anthropic_body({
+            "max_tokens": 100, "max_completion_tokens": 200, "temperature": 0.5,
+            "stop": ["END"],
+            "messages": [{"role": "system", "content": "S1"},
+                         {"role": "system", "content": "S2"},
+                         {"role": "user", "content": "你好"},
+                         {"role": "assistant", "content": "答"}]}, "glm-5.3")
+        self.assertEqual(b["model"], "glm-5.3")
+        self.assertEqual(b["max_tokens"], 200)          # completion_tokens 覆盖
+        self.assertEqual(b["system"], "S1\n\nS2")       # 多条 system 合并
+        self.assertIs(b["stream"], True)                # 恒流式（pack 实测）
+        self.assertEqual(b["stop_sequences"], ["END"])
+        self.assertEqual(b["temperature"], 0.5)
+        self.assertEqual([(m["role"], m["content"][0]["text"])
+                          for m in b["messages"]],
+                         [("user", "你好"), ("assistant", "答")])
+
+    def test_body_image_and_defaults(self):
+        from wbspy.zcode import to_anthropic_body
+        b = to_anthropic_body({"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "看图"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,XYZ"}},
+            {"type": "image_url", "image_url": {"url": "https://x/y.png"}}]}]},
+            "glm-5.3-flash")
+        self.assertEqual(b["max_tokens"], 8192)         # 默认上限
+        self.assertNotIn("system", b)                   # 空 system 不产出键
+        blocks = b["messages"][0]["content"]
+        self.assertEqual(blocks[1], {"type": "image", "source": {
+            "type": "base64", "media_type": "image/jpeg", "data": "XYZ"}})
+        self.assertEqual(blocks[2], {"type": "image", "source": {
+            "type": "url", "url": "https://x/y.png"}})
+
+    # -- SSE 实时转码 ----------------------------------------------------------
+
+    def _sse(self, events):
+        import json as _json
+        from unittest.mock import MagicMock
+        up = MagicMock()
+        up.iter_lines = lambda decode_unicode: iter(
+            ["data: " + _json.dumps(e) for e in events])
+        return up
+
+    def test_sse_transcode_full_chain(self):
+        import json as _json
+        from wbspy.zcode import _OpenAIShapeResponse
+        events = [
+            {"type": "message_start", "message": {
+                "id": "msg_1", "model": "glm-5.3", "usage": {"input_tokens": 12}}},
+            {"type": "content_block_delta",
+             "delta": {"type": "text_delta", "text": "你好"}},
+            {"type": "content_block_delta",
+             "delta": {"type": "thinking_delta", "thinking": "想"}},
+            {"type": "message_delta", "delta": {"stop_reason": "max_tokens"},
+             "usage": {"output_tokens": 5}},
+            {"type": "message_stop"},
+        ]
+        r = _OpenAIShapeResponse(self._sse(events), "glm-5.3-flash")
+        self.assertTrue(r.ok and r.status_code == 200)
+        lines = list(r.iter_lines())
+        self.assertEqual(lines[-1], "data: [DONE]")
+        chunks = [_json.loads(ln[6:]) for ln in lines[:-1] if ln.startswith("data: ")]
+        deltas = [c["choices"][0]["delta"] for c in chunks]
+        self.assertEqual(deltas[0], {"role": "assistant", "content": ""})
+        self.assertEqual(deltas[1], {"content": "你好"})
+        self.assertEqual(deltas[2], {"reasoning_content": "想"})   # 思考流归一
+        final = chunks[-1]
+        self.assertEqual(final["choices"][0]["delta"], {})         # 收尾空 delta
+        self.assertEqual(final["choices"][0]["finish_reason"], "length")
+        self.assertEqual(final["usage"], {"prompt_tokens": 12,
+                                          "completion_tokens": 5,
+                                          "total_tokens": 17})
+        self.assertTrue(all(c["id"] == "msg_1" for c in chunks))   # 上游 id 透传
+        # 字节流路径（网关流式透传消费）
+        raw = b"".join(r.iter_content())
+        self.assertIn(b"data: [DONE]", raw)
+
+    def test_sse_error_event_and_dead_stream(self):
+        import json as _json
+        from wbspy.zcode import _OpenAIShapeResponse
+        r1 = _OpenAIShapeResponse(self._sse([
+            {"type": "error", "error": {"message": "boom" * 100}},
+            {"type": "message_stop"}]), "glm-5.3")
+        lines = list(r1.iter_lines())
+        self.assertIn("[ZCode 上游错误]", lines[0])     # 截断 200 字内
+        r2 = _OpenAIShapeResponse(self._sse([]), "glm-5.3")  # 断流兜底
+        out = list(r2.iter_lines())
+        self.assertEqual(len(out), 3)                   # 空 content + 收尾 + DONE
+        self.assertIn('"content": ""', out[0])
+
+    # -- 双通道选线 ------------------------------------------------------------
+
+    def test_route_free_coding_unknown(self):
+        from wbspy.zcode import (ZCodeClient, MESSAGES_URL, CODING_MESSAGES_URL)
+        cl = ZCodeClient(self._doc({"device_mid": "m", "coding_plan_key_zai": "pk1"}))
+        self.assertEqual(cl._route("glm-5.3-flash"),
+                         ("start-plan", MESSAGES_URL, "jwt-t"))
+        self.assertEqual(cl._route("glm-5.3"),
+                         ("coding-plan", CODING_MESSAGES_URL, "pk1"))  # 缓存 key 直用
+        self.assertEqual(cl._route("glm-9.9")[0], "start-plan")        # 未知走免费线
+
+    def test_route_coding_without_key_rejected_400(self):
+        from wbspy.zcode import ZCodeClient
+        from wbspy.upstream import UpstreamError
+        cl = ZCodeClient(self._doc({"device_mid": "m"}))
+        with self.assertRaises(UpstreamError) as cm:
+            cl._route("glm-5.3")
+        self.assertEqual(cm.exception.code, "coding_plan_key_required")
+        self.assertIn("免费线", cm.exception.message)
+
+    def test_chat_outbound_fingerprint(self):
+        """出站指纹：订阅线删 Referer、恒流式 body、AuthorizationBearer。"""
+        from unittest.mock import MagicMock, patch
+        from wbspy.zcode import ZCodeClient, CODING_MESSAGES_URL
+        cl = ZCodeClient(self._doc({"device_mid": "m", "coding_plan_key_zai": "pk1"}))
+        resp = MagicMock(ok=True)
+        with patch.object(cl.http, "post", return_value=resp) as post:
+            cl.chat({"model": "glm-5.3", "stream": False,
+                     "messages": [{"role": "user", "content": "hi"}]})
+        args, kwargs = post.call_args
+        self.assertEqual(args[0], CODING_MESSAGES_URL)
+        h = kwargs["headers"]
+        self.assertEqual(h["Authorization"], "Bearer pk1")
+        self.assertNotIn("HTTP-Referer", h)             # pack 实测：订阅线必删
+        self.assertEqual(h["X-Platform"], "win32")
+        self.assertEqual(h["anthropic-version"], "2023-06-01")
+        self.assertTrue(kwargs["json"]["stream"] is True)
+        self.assertIsNone(kwargs.get("data"))           # json= 出站
+
+    def test_chat_error_classification(self):
+        from unittest.mock import MagicMock, patch
+        from wbspy.zcode import ZCodeClient
+        from wbspy.upstream import UpstreamError
+        cl = ZCodeClient(self._doc())
+        for status, want_code in ((401, "upstream_auth_expired"),
+                                  (429, "upstream_rate_limit"),
+                                  (402, "upstream_quota"),
+                                  (500, "upstream_error")):
+            resp = MagicMock(ok=False, status_code=status, text="e",
+                             headers={"content-type": "application/json"})
+            with patch.object(cl.http, "post", return_value=resp):
+                with self.assertRaises(UpstreamError) as cm:
+                    cl.chat({"model": "glm-5.3-flash",
+                             "messages": [{"role": "user", "content": "hi"}]})
+            self.assertEqual(cm.exception.code, want_code, status)
+
+    # -- 余额 ------------------------------------------------------------------
+
+    def test_credits_aggregation(self):
+        from unittest.mock import MagicMock, patch
+        from wbspy.zcode import ZCodeClient
+        cl = ZCodeClient(self._doc({"device_mid": "m"}))
+        resp = MagicMock(ok=True, status_code=200,
+                         headers={"content-type": "application/json"})
+        resp.json.return_value = {"data": {"balances": [
+            {"show_name": "新手包", "available_units": 100.5, "total_units": 1000,
+             "expires_at": 200},
+            {"show_name": "签到包", "remaining_units": 50, "expires_at": 100}]}}
+        with patch.object(cl.http, "get", return_value=resp):
+            out = cl.credits()
+        self.assertEqual(out["total"], 150.5)           # 双拼法都收
+        self.assertEqual(out["nearest_expiry"], 100)    # 最近到期
+        self.assertEqual(out["unit"], "tokens")
+        self.assertEqual(len(out["packages"]), 2)
+
+    # -- 池 / 网关集成 ----------------------------------------------------------
+
+    def test_pool_wiring(self):
+        from wbspy.pool import _client_for, _lane_of, AccountPool
+        from wbspy.zcode import ZCodeClient
+        doc = self._doc()
+        self.assertIsInstance(_client_for(doc), ZCodeClient)
+        self.assertEqual(_lane_of(doc), "zcode")
+        self.assertEqual(AccountPool._route_id(doc, "glm-5.3"), "zcode:glm-5.3")
+
+    def test_gateway_lane_accepts_zcode(self):
+        """网关路由把 zcode: 前缀识别为独立泳道：请求进池取号（而非 404）。"""
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        from fastapi.testclient import TestClient
+        pool = AccountPool([self._doc()])
+        c = TestClient(create_web_app(pool, api_key=""))
+        fake = MagicMock(ok=True, status_code=200)
+        fake.headers = {"content-type": "text/event-stream"}
+        fake.iter_content = lambda chunk_size=None: iter([b"data: [DONE]\n\n"])
+        with patch.object(pool, "chat_failover",
+                          return_value=(self._doc(), fake)) as fo:
+            r = c.post("/v1/chat/completions", json={
+                "model": "zcode:glm-5.3-flash", "stream": True,
+                "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(fo.call_count, 1)              # 进了池 = 泳道识别成功

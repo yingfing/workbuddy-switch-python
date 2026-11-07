@@ -242,6 +242,30 @@ def normalize_payload(raw: dict) -> dict:
     return payload
 
 
+def annotate_denial(error: UpstreamError, body_text: str, demoted: bool) -> UpstreamError:
+    """11128 错误消息附诊断注解：请求体大小 + 已试过的对策 + 行动指引。
+
+    实测模式：大会话（1MB 级）反复触发审查；对策二失败说明触发点在消息
+    内容而非 system 指纹。审查按内容判定，换账号无效——这些事实直接
+    写进错误消息，用户不用再来回排查。
+    """
+    size = len(body_text.encode("utf-8"))
+    tips = []
+    if size >= 512 * 1024:
+        tips.append(f"本请求体 {size / 1048576:.1f} MB——大会话上下文是审查重灾区")
+    elif size >= 64 * 1024:
+        tips.append(f"本请求体 {size / 1024:.0f} KB，上下文偏大")
+    if demoted:
+        tips.append("已自动尝试 system 降级重试仍被拒（触发点在会话内容，不在 system）")
+    tips.append("该审查按请求内容判定，换账号无效")
+    tips.append("建议新开会话；若仍被拒则调整本次发送的内容")
+    return UpstreamError(error.status, error.code,
+                         error.message + "（" + "；".join(tips) + "）",
+                         retry_after=error.retry_after,
+                         upstream_status=error.upstream_status,
+                         upstream_code=error.upstream_code)
+
+
 def classify_business_error(status: int, body: str, retry_header: str = "",
                             content_type: str = "") -> UpstreamError:
     """上游响应 → 本地可分类错误（对应原版 businessError）。"""
@@ -885,6 +909,7 @@ class WorkBuddyClient:
                     if retry.ok:
                         return retry
                     retry.close()
+                raise annotate_denial(error, body, relocated is not None)
             raise error
         return resp
 

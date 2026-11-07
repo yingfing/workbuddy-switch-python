@@ -2,6 +2,20 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.16] — 2026-11-08
+
+### 新增
+- **ZCode（智谱 GLM）渠道接入**：继 WorkBuddy / Cline 之后第三条完整对话泳道（账号级 API，非聚合网关）。协议全部取自 dsh-xdpool channel-pack 的线上实测结论：
+  - OpenAI 入站 ↔ Anthropic messages 出站双向转码：system 消息合并、data URL 图片拆 base64、`max_completion_tokens`/`stop` 等参数映射；
+  - **SSE 实时转码**：上游恒流式（`stream:true` 硬编码对齐官方客户端），`text_delta`→`content`、`thinking_delta`→`reasoning_content`，网关流式透传与非流式聚合两条消费路径零改动；
+  - **双通道选线**：`glm-5.3-flash` / `glm-5.2` / `glm-5-turbo` 走 start-plan 免费线（JWT 直连）；`glm-5.3` 走 coding-plan 订阅线（plan key 自动换取并落盘，未订阅时 400 人话提示引导用免费线）；未知模型不瞎拦，走免费线让上游报错；
+  - headers 指纹逐头对齐（`ZCode/<ver>` UA、`X-Device-Mid`、`X-Platform: win32`、`anthropic-version: 2023-06-01`），订阅线按 pack 实测删除 `HTTP-Referer`；
+  - token 计余额查询（billing/balance，`available_units`/`remaining_units` 双拼法都收）；「我的模型」页新增 ZCode 分组（默认展开）。
+- **11128 审查拒错误消息自带诊断**：审查拒是最高频的"用户来问"项，现在错误消息直接写明——请求体大小（≥512KB 标注"大会话上下文是审查重灾区"）、对策二（system 降级重试）是否已试过（试过说明触发点在会话内容不在 system 指纹）、换账号无效、建议新开会话。排查信息一步到位，不用再来回问。
+
+### 修复
+- ZCode 泳道模型 ID 统一 `zcode:` 前缀，池/网关/前端三处路由与分组判定对齐（账号被误塞 WorkBuddyClient 的历史问题不会复发）。
+
 ## [0.2.15] — 2026-11-07
 
 ### 新增

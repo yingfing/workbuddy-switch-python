@@ -536,7 +536,7 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         # 泳道内多账号轮换容错；纯模型名等价 workbuddy:<model>
         lane = "workbuddy"
         head, sep, rest = model.partition(":")
-        if sep and head in ("cline", "qoder", "qodercn"):
+        if sep and head in ("cline", "qoder", "qodercn", "zcode"):
             lane = head
             raw = {**raw, "model": rest}
         elif sep and head in ("workbuddy", "cn", "global"):
