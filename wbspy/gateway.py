@@ -341,7 +341,8 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         # 内部的问题（自动换号已失败），客户端只会误以为自己的中转密钥坏了。
         if exc.kind == "auth":
             exc = UpstreamError(503, "upstream_account_unavailable",
-                                "上游账号暂不可用（网关已自动换号仍未成功），请稍后重试。",
+                                "上游账号暂不可用（已自动换号与续期仍未成功）。"
+                                "请到 wbspy 账号页检查各账号状态——红点即需重新网页授权。",
                                 retry_after=60)
         return JSONResponse(
             status_code=exc.status,

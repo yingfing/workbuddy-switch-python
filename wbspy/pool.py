@@ -105,6 +105,53 @@ class AccountPool:
         self.event_log: Callable[[str], None] | None = None  # 网页日志钩子（webui 接线）
         self._cursor = 0
         self._lock = threading.Lock()
+        self._revive_at: dict[tuple[str, str], float] = {}   # 救命续期节流（60s/账号）
+
+    def _do_refresh(self, doc: Document) -> Document:
+        """用 refresh_token 换新凭据：请求上游 → 更新文档 → 落盘 → 换入池。
+
+        后台续期 worker 与救命续期（_revive）共用；到期时间经 _token_expiry
+        归一化（上游给字符串到期时间的脏数据会炸全池比较，此处一并防住）。
+        """
+        from .store import save_account
+        auth = self.clients[_key(doc)].refresh()
+        root = doc.raw
+        root["auth"] = {**root.get("auth", {}), **auth}
+        fresh = Document(
+            raw=root, uid=doc.uid,
+            token=auth["accessToken"],
+            refresh_token=auth.get("refreshToken", doc.refresh_token),
+            nickname=doc.nickname, region=doc.region, domain=doc.domain,
+            token_expires_at=_token_expiry(auth))
+        save_account(fresh)
+        self.refresh_documents([fresh])
+        return fresh
+
+    def _revive(self, doc: Document) -> bool:
+        """救命续期：凭据被上游拒 / 候选全灭时同步续期一次（60 秒节流）。
+
+        与后台 worker 的差别只在触发时机——worker 最长 5 分钟一轮，
+        「凭据刚失效」到下一轮扫描之间是服务黑窗；这里当场续、当场复活，
+        单账号池或全池失效时不再白白躺过黑窗。成功返回 True（死亡标记
+        已清、文档已换新落盘）；无 refresh 能力 / 节流中 / 续期失败 → False。
+        """
+        k = _key(doc)
+        if "refresh" not in doc.capabilities or not doc.refresh_token or doc.protected_token:
+            return False
+        now = time.time()
+        if now - self._revive_at.get(k, 0) < 60:
+            return False
+        self._revive_at[k] = now
+        try:
+            self._do_refresh(doc)
+        except Exception as exc:
+            self._emit(f"「{doc.label()}」救命续期失败：{str(exc)[:80]}"
+                       f"——请到账号页重新网页授权")
+            return False
+        self.dead_until.pop(k, None)     # 续期成功 → 原地复活（清死亡标记）
+        self._mba_cache = None           # 模型目录缓存作废（凭据变了）
+        self._emit(f"「{doc.label()}」凭据被上游拒绝，refresh_token 当场续期成功，账号复活")
+        return True
 
     def _emit(self, msg: str) -> None:
         """关键调度事件（换号/凭据失效/续期）推给网页日志；未接线时静默。"""
@@ -432,9 +479,20 @@ class AccountPool:
         tried: set = set()
         last_error: UpstreamError | None = None
         waited = False
+        revived = False
         while True:
             doc = self.pick(model, exclude=tried, session=session, lane=lane)
             if doc is None:
+                # 容灾第一层：候选全灭 ≠ 立即投降——先对当前泳道带 refresh
+                # 能力的账号救命续期一轮（本地判定过期 ≠ refresh_token 失效）
+                if not revived:
+                    for d in list(self.documents.values()):
+                        if (_key(d) not in tried and _lane_of(d) == lane
+                                and "chat" in d.capabilities and self._revive(d)):
+                            revived = True
+                            break
+                    if revived:
+                        continue      # 救活至少一个 → 重新取号
                 # 兜底一：免费行冷却时降级试付费行（换行名重试，客户端无感）
                 fb = FALLBACK_ROWS.get(model) if lane == "workbuddy" else None
                 if fb:
@@ -460,7 +518,8 @@ class AccountPool:
                 if last_error:
                     raise last_error
                 raise UpstreamError(503, "no_available_accounts",
-                                    "账号池中没有可用账号（全部冷却、失效或未登录）。")
+                                    "账号池中没有可用账号（全部冷却、失效或未登录，"
+                                    "救命续期也未救回）。请到 wbspy 账号页检查账号状态。")
             tried.add(_key(doc))
             try:
                 return doc, self.clients[_key(doc)].chat(payload)
@@ -471,7 +530,13 @@ class AccountPool:
                 if not self._should_failover(exc):
                     raise             # 请求本身的问题（参数错/渠道审查），换号无意义
                 if exc.kind == "auth":
-                    self._emit(f"「{doc.label()}」凭据被上游拒绝（401），已标记失效并换号重试")
+                    # 容灾核心：上游拒凭据 ≠ 账号死刑——先当场用 refresh_token
+                    # 续期复活（60s 节流），成功则本轮即可重选它；失败才标死换号
+                    if self._revive(doc):
+                        tried.discard(_key(doc))
+                        continue
+                    self._emit(f"「{doc.label()}」凭据被上游拒绝（401）且续期未成，"
+                               f"已标记失效并换号重试")
                 elif exc.code == "upstream_quota":
                     self._emit(f"「{doc.label()}」额度已用尽，已自动换号")
                 else:
@@ -535,8 +600,6 @@ class AccountPool:
         self._refresh_stop = stop
 
         def worker():  # pragma: no cover
-            import json as _json
-            from .store import save_account
             while not stop.is_set():
                 for k, doc in list(self.documents.items()):
                     if "refresh" not in doc.capabilities or not doc.refresh_token or doc.protected_token:
@@ -547,20 +610,8 @@ class AccountPool:
                     if exp and exp > (time.time() + 600) * 1000:
                         continue                       # 还没临期
                     try:
-                        auth = self.clients[k].refresh()
-                        root = doc.raw
-                        root["auth"] = {**root.get("auth", {}), **auth}
-                        fresh = Document(
-                            raw=root, uid=doc.uid,
-                            token=auth["accessToken"],
-                            refresh_token=auth.get("refreshToken", doc.refresh_token),
-                            nickname=doc.nickname, region=doc.region, domain=doc.domain,
-                            # 到期时间必须归一化为毫秒整数——上游若返回字符串
-                            # 原样塞进 Document，会让全池 api_ready 比较炸 TypeError
-                            token_expires_at=_token_expiry(auth))
-                        save_account(fresh)
-                        self.refresh_documents([fresh])
-                        self._emit(f"「{fresh.label()}」token 已自动续期")
+                        self._do_refresh(doc)          # 共享续期（救命续期同款）
+                        self._emit(f"「{doc.label()}」token 已自动续期")
                     except Exception as exc:
                         self._emit(f"「{doc.label()}」token 自动续期失败：{exc}（下轮重试，多次失败请重新登录）")
                 stop.wait(interval_sec)               # 可中断的 sleep

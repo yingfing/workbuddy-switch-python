@@ -1685,7 +1685,7 @@ class TestFailoverBoundaries(unittest.TestCase):
         msg = r.json()["error"]["message"]
         self.assertNotIn("凭据", msg)
         self.assertNotIn("密钥", msg)
-        self.assertIn("稍后重试", msg)
+        self.assertIn("上游账号暂不可用", msg)
 
 
 def _gw_client(pool):
@@ -2747,3 +2747,148 @@ class TestAuthErrorMessage(unittest.TestCase):
         r = c.get("/v1/models")
         self.assertEqual(r.status_code, 404)
         self.assertIn("网关已关闭", r.json()["error"]["message"])
+
+
+class TestLifesaverRefresh(unittest.TestCase):
+    """容灾缺口修复：凭据被上游拒 ≠ 死刑——当场用 refresh_token 续期复活。
+
+    旧行为：auth 失败 → 标死 5 分钟 + 换号，续期全靠后台 worker（最长
+    5 分钟一轮）→ 单账号池/全池失效时服务黑窗，明明 refresh_token 可能
+    还有效却白白 503。新行为：当场救命续期（60s 节流），救活即原地复活。
+    """
+
+    def _pool(self, n=1):
+        from wbspy.pool import AccountPool
+        from wbspy.document import parse_auth
+        docs = [parse_auth({"account": {"uid": f"lv{i}", "nickname": f"号{i}"},
+                            "auth": {"accessToken": "old", "refreshToken": "rt",
+                                     "domain": "www.codebuddy.cn"}})
+                for i in range(n)]
+        return AccountPool(docs)
+
+    def _key(self, pool, uid):
+        return next(k for k in pool.documents if k[1] == uid)
+
+    def test_revive_on_auth_failure(self):
+        """端到端：唯一账号凭据被拒 → 救命续期成功 → 原地复活重试成功。"""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from wbspy.upstream import UpstreamError
+        pool = self._pool(1)
+        k = self._key(pool, "lv0")
+        calls = []
+
+        def chat_side(payload):
+            calls.append(payload)
+            if len(calls) == 1:                      # 首次：凭据失效
+                raise UpstreamError(401, "upstream_auth_expired", "凭据失效",
+                                    upstream_status=401, upstream_code="12153")
+            return MagicMock(ok=True, status_code=200, headers={}, text="")
+
+        # refresh_documents 换文档时会 _client_for 重建客户端——mock 工厂
+        # 必须同时覆盖初始与重建两条路，否则第二轮循环会发真实 HTTP
+        refresh_mock = MagicMock(return_value={"accessToken": "new-token",
+                                               "expiresAt": 99999999999999})
+
+        def _mock_client(d):
+            c = MagicMock()
+            c.chat = chat_side
+            c.refresh = refresh_mock      # 共享实例：客户端被重建也能断言
+            return c
+
+        pool.clients[k] = _mock_client(None)
+        with patch("wbspy.store.save_account"), \
+             patch("wbspy.pool._client_for", side_effect=_mock_client):
+            doc, resp = pool.chat_failover({"model": "auto", "stream": False,
+                                            "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(len(calls), 2)              # 失败一次 → 续期 → 重试成功
+        refresh_mock.assert_called_once()                # 续期确实发生
+        self.assertEqual(pool.documents[k].token, "new-token")   # 凭据已换新
+        self.assertNotIn(k, pool.dead_until)         # 死亡标记已清
+        self.assertTrue(any("复活" in m for m in pool._events) if
+                        hasattr(pool, "_events") else True)
+
+    def test_revive_failure_marks_dead_and_failover(self):
+        """续期也失败 → 才标死换号（若有其他号）或抛 401 转换 503。"""
+        from unittest.mock import MagicMock, patch
+        from wbspy.upstream import UpstreamError
+        pool = self._pool(2)
+        k0 = self._key(pool, "lv0")
+        k1 = self._key(pool, "lv1")
+        pool.clients[k0].chat = MagicMock(side_effect=UpstreamError(
+            401, "upstream_auth_expired", "失效", upstream_status=401))
+        pool.clients[k0].refresh = MagicMock(side_effect=RuntimeError("refresh 也炸"))
+        pool.clients[k1].chat = MagicMock(return_value=MagicMock(
+            ok=True, status_code=200, headers={}, text=""))
+        with patch("wbspy.store.save_account"):
+            doc, _ = pool.chat_failover({"model": "auto", "stream": False,
+                                         "messages": [{"role": "user", "content": "hi"}]})
+        self.assertIs(pool.documents[k1], doc)       # 换到二号成功
+        self.assertIn(k0, pool.dead_until)           # 一号确认死亡
+        pool.clients[k0].refresh.assert_called_once()
+
+    def test_revive_throttle_60s(self):
+        """节流：60 秒内同一账号只真续一次（防对话路径被续期拖慢）。"""
+        from unittest.mock import MagicMock, patch
+        from wbspy.upstream import UpstreamError
+        pool = self._pool(1)
+        k = self._key(pool, "lv0")
+        client = pool.clients[k]
+        client.chat = MagicMock(side_effect=UpstreamError(
+            401, "upstream_auth_expired", "失效", upstream_status=401))
+        client.refresh = MagicMock(side_effect=RuntimeError("炸"))
+        with patch("wbspy.store.save_account"):
+            with self.assertRaises(UpstreamError):
+                pool.chat_failover({"model": "auto", "stream": False,
+                                    "messages": [{"role": "user", "content": "hi"}]})
+            with self.assertRaises(UpstreamError):   # 第二次请求
+                pool.chat_failover({"model": "auto", "stream": False,
+                                    "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(client.refresh.call_count, 1)   # 节流：只续一次
+
+    def test_no_refresh_capability_skips(self):
+        """无 refresh 能力（如 ZCode）/无 refresh_token → 不浪费调用直接 False。"""
+        from wbspy.document import parse_auth
+        from wbspy.pool import AccountPool
+        doc = parse_auth({"account": {"uid": "zc9", "nickname": "Z"},
+                          "auth": {"accessToken": "t", "domain": "zcode.z.ai"}})
+        pool = AccountPool([doc])
+        from wbspy.pool import _key
+        self.assertFalse(pool._revive(pool.documents[_key(doc)]))
+
+    def test_empty_candidates_rescued_by_revive(self):
+        """候选全灭（本地判定过期）→ 救命续期救活 → 请求成功，不再 503。"""
+        from unittest.mock import MagicMock, patch
+        pool = self._pool(1)
+        k = self._key(pool, "lv0")
+        # 本地判定 token 已过期 → api_ready False → pick 直接空手
+        doc = pool.documents[k]
+        doc.token_expires_at = 1                     # 1970 年 = 已过期
+        self.assertIsNone(pool.pick("auto"))
+        def _mock_client(d):
+            c = MagicMock()
+            c.chat = MagicMock(return_value=MagicMock(
+                ok=True, status_code=200, headers={}, text=""))
+            c.refresh = MagicMock(return_value={"accessToken": "fresh",
+                                                "expiresAt": 99999999999999})
+            return c
+
+        pool.clients[k] = _mock_client(None)
+        with patch("wbspy.store.save_account"), \
+             patch("wbspy.pool._client_for", side_effect=_mock_client):
+            got_doc, _ = pool.chat_failover({"model": "auto", "stream": False,
+                                             "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(got_doc.token, "fresh")     # 救活后成功，不再 503
+
+    def test_503_message_guides_user(self):
+        from unittest.mock import patch
+        from wbspy.gateway import create_app
+        from fastapi.testclient import TestClient
+        from wbspy.upstream import UpstreamError
+        pool = self._pool(1)
+        c = TestClient(create_app(pool, api_key=""))
+        with patch.object(pool, "pick", return_value=None):
+            r = c.post("/v1/chat/completions", json={
+                "model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 503)
+        self.assertIn("账号页", r.json()["error"]["message"])
