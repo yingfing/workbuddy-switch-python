@@ -853,6 +853,48 @@ CLINE_HEADERS = {"HTTP-Referer": "https://cline.bot", "X-Title": "Cline",
                  "X-IS-MULTIROOT": "false", "X-CLIENT-TYPE": "cline-sdk"}
 
 
+# -- models.dev 价格补充 -------------------------------------------------------
+# api.cline.bot 的 /api/v1/models 只回 id/object/created/owned_by，不含价格；
+# Cline 扩展的目录元数据取自 models.dev（其源码 catalog-live.ts 实锤），这里
+# 用同一数据源补每百万 tokens 的美元价。cost 单位已是 $/M，无需换算。
+_MD_CACHE: dict = {"data": None, "at": 0.0}
+_MD_TTL = 24 * 3600
+_MD_ALIAS = {"z-ai": "zhipuai", "x-ai": "xai"}   # cline 供应商名 vs models.dev 键名
+
+
+def _models_dev_prices() -> dict:
+    """models.dev 全量目录（24h 缓存）；任何失败都返回空表，不拦模型目录主流程。"""
+    now = time.time()
+    if _MD_CACHE["data"] is None or now - _MD_CACHE["at"] > _MD_TTL:
+        try:
+            resp = requests.get("https://models.dev/api.json", timeout=15)
+            _MD_CACHE["data"] = resp.json() if resp.ok else {}
+        except Exception:
+            _MD_CACHE["data"] = {}
+        _MD_CACHE["at"] = now
+    return _MD_CACHE["data"] or {}
+
+
+def _cline_price(model_id: str) -> dict | None:
+    """按 cline 模型 ID 匹配 models.dev 价格；剥 :batch/:free 后缀与 ~ 别名，点横线互转。"""
+    mid = model_id.split(":")[0].lstrip("~")
+    if "/" not in mid:
+        return None                                   # @preset/ 内部路由等无价可查
+    prov, name = mid.split("/", 1)
+    table = _models_dev_prices()
+    for p in (prov, _MD_ALIAS.get(prov, prov)):
+        models = ((table.get(p) or {}).get("models")) or {}
+        entry = models.get(name) or models.get(name.replace(".", "-"))
+        cost = entry.get("cost") if isinstance(entry, dict) else None
+        if isinstance(cost, dict):
+            try:
+                return {"input": round(float(cost["input"]), 2),
+                        "output": round(float(cost["output"]), 2)}
+            except (KeyError, TypeError, ValueError):
+                return None
+    return None
+
+
 class ClineClient:
     """Cline 渠道客户端（协议对照 dsh-xdpool vendor/channel-pack/cline-adapter）。
 
@@ -895,9 +937,14 @@ class ClineClient:
             mid = raw.get("id")
             if not isinstance(mid, str) or not mid:
                 continue
-            out.append({"id": mid,
-                        "name": str(raw.get("display_name") or raw.get("name") or mid)[:80],
-                        "region": "intl"})   # Cline 是国际渠道，与账号入库时的 region 无关
+            row = {"id": mid,
+                   "name": str(raw.get("display_name") or raw.get("name") or mid)[:80],
+                   "region": "intl"}   # Cline 是国际渠道，与账号入库时的 region 无关
+            price = _cline_price(mid)
+            if price:
+                row["input_price"] = price["input"]
+                row["output_price"] = price["output"]
+            out.append(row)
         return out
 
     def chat(self, payload: dict) -> requests.Response:

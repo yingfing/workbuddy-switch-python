@@ -1448,3 +1448,60 @@ class TestCreditsRequestRange(unittest.TestCase):
         self.assertIsNone(_parse_ms(253402300799000))            # 9999-12-31 ms
         self.assertIsNone(_parse_ms(float(2**31 * 1000)))        # 恰好越过 2038
         self.assertEqual(_parse_ms(1762400000000), 1762400000000)  # 正常值不受影响
+
+
+class TestClinePrices(unittest.TestCase):
+    """Cline 模型价格：models.dev 数据源（Cline 扩展同款），归一化匹配后注入 $/M 价。"""
+
+    def _client(self):
+        from wbspy.document import parse_auth
+        from wbspy.upstream import ClineClient
+        doc = parse_auth({"account": {"uid": "c9", "nickname": "T"},
+                          "auth": {"accessToken": "abc", "domain": "api.cline.bot"}})
+        return ClineClient(doc)
+
+    def _with_md(self, table):
+        import time as _t
+        from unittest.mock import patch
+        from wbspy import upstream
+        return patch.object(upstream, "_MD_CACHE",
+                            {"data": table, "at": _t.time()})
+
+    def test_price_lookup_normalization(self):
+        """:batch 剥离、点→横线、供应商别名、内部路由/裸 ID 直接判无。"""
+        from wbspy.upstream import _cline_price
+        table = {"anthropic": {"models": {"claude-sonnet-5-5":
+                                          {"cost": {"input": 2, "output": 10}}}},
+                 "zhipuai": {"models": {"glm-5.3": {"cost": {"input": 0.5, "output": 2}}}}}
+        with self._with_md(table):
+            self.assertEqual(_cline_price("anthropic/claude-sonnet-5.5"),
+                             {"input": 2, "output": 10})                       # 点→横线
+            self.assertEqual(_cline_price("z-ai/glm-5.3"),
+                             {"input": 0.5, "output": 2})                      # 别名
+            self.assertEqual(_cline_price("anthropic/claude-sonnet-5.5:batch"),
+                             {"input": 2, "output": 10})                       # 剥 :batch
+            self.assertIsNone(_cline_price("@preset/xxx"))                     # 内部路由
+            self.assertIsNone(_cline_price("glm-5.2"))                         # 裸 ID 无 provider
+            self.assertIsNone(_cline_price("anthropic/no-such-model"))         # 未收录
+
+    def test_models_rows_carry_price(self):
+        """目录行注入 input_price/output_price；查不到的模型不带价格字段。"""
+        from unittest.mock import MagicMock
+        from wbspy.upstream import ClineClient
+        c = self._client()
+        resp = MagicMock(ok=True, status_code=200)
+        resp.json.return_value = {"data": [
+            {"id": "anthropic/claude-sonnet-5.5", "display_name": "Sonnet"},
+            {"id": "openai/brand-new-model"},
+            {"id": "moonshotai/kimi-k3"},
+        ]}
+        table = {"anthropic": {"models": {"claude-sonnet-5-5":
+                                          {"cost": {"input": 2, "output": 10}}}},
+                 "moonshotai": {"models": {"kimi-k3":
+                                           {"cost": {"input": 3, "output": 15}}}}}
+        with self._with_md(table), patch.object(c.http, "get", return_value=resp):
+            rows = c.models()
+        self.assertEqual(rows[0]["input_price"], 2)
+        self.assertEqual(rows[0]["output_price"], 10)
+        self.assertEqual(rows[2]["input_price"], 3)
+        self.assertNotIn("input_price", rows[1])       # 未收录 → 无价格字段 → 前端显示 —

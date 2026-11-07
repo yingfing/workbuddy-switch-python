@@ -262,13 +262,13 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
              placeholder="🔍 搜模型名或 ID（如 hy3 / claude / gemini）" oninput="_mymRender()">
       <h3>账号池（WorkBuddy 系，模型 ID 带 <code>workbuddy:</code> 前缀）</h3>
       <table id="mymTable"><thead><tr>
-        <th>调用 ID</th><th>名称</th><th>倍率</th><th>可用账号</th>
+        <th>调用 ID</th><th>名称</th><th>倍率 / 价格</th><th>可用账号</th>
       </tr></thead><tbody id="mymTbody"></tbody></table>
       <details style="margin-top:12px" id="mymClineBox">
         <summary><b>Cline 渠道（国际，模型 ID 带 <code>cline:</code> 前缀）</b>
           <span class="tag" id="mymClineCount">—</span></summary>
         <table><thead><tr>
-          <th>调用 ID</th><th>名称</th><th>倍率</th><th>可用账号</th>
+          <th>调用 ID</th><th>名称</th><th>倍率 / 价格</th><th>可用账号</th>
         </tr></thead><tbody id="mymClineTbody"></tbody></table>
       </details>
       <div class="empty" id="mymEmpty" hidden>账号池为空或目录未就绪 —— 先去「登录」页添加账号</div>
@@ -872,7 +872,8 @@ async function loadFree() {
   // 统一索引：跨账号合并同名模型，标注可用账号数（id 已带 workbuddy:/cline: 泳道前缀）
   const uni = {};
   for (const a of ok) for (const m of a.models) {
-    const u = uni[m.id] || (uni[m.id] = {id: m.id, name: m.name, cm: m.credit_multiplier, n: 0,
+    const u = uni[m.id] || (uni[m.id] = {id: m.id, name: m.name, cm: m.credit_multiplier,
+                                        ip: m.input_price, op: m.output_price, n: 0,
                                         lane: m.id.startsWith('cline:') ? 'cline' : 'workbuddy'});
     u.n++;
     if (u.cm === undefined && m.credit_multiplier !== undefined) u.cm = m.credit_multiplier;
@@ -896,7 +897,8 @@ function _mymRender() {
   const match = m => !q || m.id.toLowerCase().includes(q) || String(m.name || '').toLowerCase().includes(q);
   const cell = m => {
     const cm = m.cm === 0 ? '<span style="color:var(--bad);font-weight:600">限时免费</span>'
-      : (typeof m.cm === 'number' ? m.cm + 'x' : '—');
+      : (typeof m.cm === 'number' ? m.cm + 'x'
+        : (m.ip != null ? `<span title="每百万 tokens 美元价（数据源 models.dev）">$${m.ip} <span style="opacity:.5">in</span> / $${m.op} <span style="opacity:.5">out</span></span>` : '—'));
     return `<tr><td><code>${m.id}</code></td><td>${m.name}</td>
       <td>${cm}</td><td>${m.n} / ${_mymLaneOk[m.lane] || 0}</td></tr>`;
   };
