@@ -2010,3 +2010,180 @@ class TestVisionSwitch(unittest.TestCase):
             self.assertFalse(app.state.gw_vision)
             data = c.get("/v1/models").json()["data"]
             self.assertTrue(all("input" not in m for m in data))
+
+
+class TestCatalogCapabilities(unittest.TestCase):
+    """目录能力解析（dsh-xdpool parseReasoning / 图片标志拼法兼容移植）。
+
+    上游 reasoning 有 plural（supportedEfforts 数组）与 singular（仅 effort
+    字符串）两种拼法；图片标志有正拼法 supportsImages 与否定拼法
+    disabledMultimodal。解析必须兼容两种、未知形态不编造。
+    """
+
+    def test_reasoning_plural_form(self):
+        from wbspy.upstream import parse_reasoning
+        r = parse_reasoning({"supportedEfforts": ["low", "high", 3, None],
+                             "defaultEffort": "high"})
+        self.assertEqual(r["supported_efforts"], ["low", "high"])
+        self.assertEqual(r["default_effort"], "high")
+
+    def test_reasoning_singular_folds_to_ladder(self):
+        from wbspy.upstream import parse_reasoning
+        r = parse_reasoning({"effort": "high"})
+        self.assertEqual(r["supported_efforts"],
+                         ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(r["default_effort"], "high")
+
+    def test_reasoning_singular_unknown_effort_kept_alone(self):
+        from wbspy.upstream import parse_reasoning
+        r = parse_reasoning({"effort": "turbo"})
+        self.assertEqual(r["supported_efforts"], ["turbo"])
+
+    def test_reasoning_singular_folds_even_with_default(self):
+        """折叠只看 effort 是否字符串（对齐 xdpool singularEffortLadder）：
+        defaultEffort 只标默认档，不改变「全阶梯可思考」的实测结论。"""
+        from wbspy.upstream import parse_reasoning
+        r = parse_reasoning({"effort": "high", "defaultEffort": "high"})
+        self.assertEqual(r["supported_efforts"],
+                         ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(r["default_effort"], "high")
+
+    def test_reasoning_unknown_shape_is_empty(self):
+        from wbspy.upstream import parse_reasoning
+        self.assertEqual(parse_reasoning(None), {})
+        self.assertEqual(parse_reasoning({"canDisableThinking": True}), {})
+        self.assertEqual(parse_reasoning("high"), {})
+
+    def _client(self):
+        from wbspy.document import parse_auth
+        from wbspy.upstream import WorkBuddyClient
+        doc = parse_auth({"account": {"uid": "cap1", "nickname": "号"},
+                          "auth": {"accessToken": "t",
+                                   "domain": "www.codebuddy.cn"}})
+        return WorkBuddyClient(doc)
+
+    def test_catalog_parses_images_and_efforts(self):
+        """目录行解析 supportsImages / disabledMultimodal / reasoning。"""
+        import json as _json
+        from unittest.mock import patch, MagicMock
+        cl = self._client()
+        rows = [{"id": "m1", "name": "M1", "supportsImages": True,
+                 "reasoning": {"supportedEfforts": ["low", "high"]}},
+                {"id": "m2", "name": "M2", "disabledMultimodal": True},
+                {"id": "m3", "name": "M3", "reasoning": {"effort": "high"}},
+                {"id": "m4", "name": "M4"}]
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"data": rows}
+        with patch.object(cl.http, "get", return_value=resp):
+            out = cl.models()
+        by_id = {r["id"]: r for r in out}
+        self.assertTrue(by_id["m1"]["supports_images"])
+        self.assertEqual(by_id["m1"]["supported_efforts"], ["low", "high"])
+        self.assertIs(by_id["m2"]["supports_images"], False)   # 否定拼法
+        self.assertEqual(by_id["m3"]["supported_efforts"],
+                         ["low", "medium", "high", "xhigh", "max"])
+        self.assertNotIn("supports_images", by_id["m4"])       # 没说就不编造
+        self.assertNotIn("supported_efforts", by_id["m4"])
+
+
+class TestCapabilityGuard(unittest.TestCase):
+    """池泳道能力闸：目录明说做不了就明 400（人话），不扔给上游收谜语错误。
+
+    场景对齐 dsh-xdpool：带图打纯文本模型（明拒优于上游 11128 谜语）、
+    reasoning_effort 发了模型不支持的档位（优于上游 11133）。
+    """
+
+    def test_reasoning_effort_off_stripped(self):
+        """"off" 两个网关都不收（实测 11133/onlyReasoning 拒绝）→ 出口删除。"""
+        from wbspy.upstream import normalize_payload
+        p = normalize_payload({"model": "m", "stream": False,
+                               "reasoning_effort": "off",
+                               "messages": [{"role": "user", "content": "hi"}]})
+        self.assertNotIn("reasoning_effort", p)
+
+    def test_reasoning_effort_valid_value_kept(self):
+        from wbspy.upstream import normalize_payload
+        p = normalize_payload({"model": "m", "stream": False,
+                               "reasoning_effort": "high",
+                               "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(p["reasoning_effort"], "high")
+
+    def test_unsupported_effort_rejected_400(self):
+        from wbspy.gateway import capability_guard
+        from wbspy.upstream import UpstreamError
+        rows = [{"id": "workbuddy:m1", "supported_efforts": ["low", "medium"]}]
+        with self.assertRaises(UpstreamError) as cm:
+            capability_guard(rows, "workbuddy:m1", {"reasoning_effort": "max"})
+        self.assertEqual(cm.exception.status, 400)
+        self.assertEqual(cm.exception.code, "effort_unsupported")
+        self.assertIn("low、medium", cm.exception.message)
+
+    def test_supported_effort_passes(self):
+        from wbspy.gateway import capability_guard
+        rows = [{"id": "workbuddy:m1", "supported_efforts": ["low", "high"]}]
+        capability_guard(rows, "workbuddy:m1", {"reasoning_effort": "high"})  # 不抛
+
+    def test_image_to_textonly_model_rejected_400(self):
+        from wbspy.gateway import capability_guard
+        from wbspy.upstream import UpstreamError
+        rows = [{"id": "workbuddy:m1", "supports_images": False}]
+        raw = {"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "看图"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}]}]}
+        with self.assertRaises(UpstreamError) as cm:
+            capability_guard(rows, "workbuddy:m1", raw)
+        self.assertEqual(cm.exception.code, "model_vision_unsupported")
+        self.assertEqual(cm.exception.status, 400)
+
+    def test_unknown_model_or_missing_data_passes(self):
+        """目录没数据（行不存在 / 字段缺省）→ 放行，未知不编造。"""
+        from wbspy.gateway import capability_guard
+        capability_guard([{"id": "workbuddy:other"}], "workbuddy:m1", {})
+        capability_guard([{"id": "workbuddy:m1"}], "workbuddy:m1",
+                         {"reasoning_effort": "max"})            # 无 efforts 声明
+        capability_guard([{"id": "workbuddy:m1"}], "workbuddy:m1",
+                         {"messages": [{"role": "user", "content": [
+                             {"type": "image_url", "image_url": {"url": "data:,"}}]}]})
+        capability_guard(None, "workbuddy:m1", {})               # 缓存为空
+
+    def test_gateway_integrates_guard(self):
+        """端到端：带图打目录声明纯文本的模型 → 400 人话错误，不进池。"""
+        from unittest.mock import patch
+        from wbspy.pool import AccountPool
+        pool = AccountPool([])
+        c, app = _gw_client(pool)
+        app.state.model_cache = [{"id": "workbuddy:text-only", "object": "model",
+                                  "owned_by": "wbspy", "name": "T",
+                                  "supports_images": False}]
+        app.state.model_cached_at = 0
+        with patch.object(pool, "models", return_value=[]):
+            r = c.post("/v1/chat/completions", json={
+                "model": "text-only",
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}]}]})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["error"]["code"], "model_vision_unsupported")
+        self.assertIn("不支持图片", r.json()["error"]["message"])
+
+    def test_vision_off_strips_images_before_guard(self):
+        """视觉开关关闭时先剥图：图已变占位文字，能力闸不再拦（放行语义）。"""
+        from unittest.mock import patch
+        from wbspy.pool import AccountPool
+        pool = AccountPool([])
+        c, app = _gw_client(pool)
+        app.state.gw_vision = False
+        app.state.model_cache = [{"id": "workbuddy:text-only", "object": "model",
+                                  "owned_by": "wbspy", "name": "T",
+                                  "supports_images": False}]
+        app.state.model_cached_at = 0
+        with patch.object(pool, "models", return_value=[]), \
+             patch.object(pool, "chat_failover",
+                          side_effect=RuntimeError("不应走到这里")):
+            r = c.post("/v1/chat/completions", json={
+                "model": "text-only",
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}]}]})
+        # 图被剥 → guard 无图可拒 → 走到池（此处 mock 成 RuntimeError → 500，
+        # 证明没被 400 拦截、也没被上游谜语挡住）
+        self.assertNotEqual(r.status_code, 400)

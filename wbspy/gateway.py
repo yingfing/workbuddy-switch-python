@@ -36,6 +36,52 @@ from .upstream import EMBEDDING_MODELS, UpstreamError
 MODEL_TTL_SEC = 300
 
 
+def _payload_has_image(payload: dict) -> bool:
+    """消息里是否携带图片 part（判定逻辑与 strip_images 同源）。"""
+    msgs = payload.get("messages")
+    if not isinstance(msgs, list):
+        return False
+    for m in msgs:
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, list):
+            for p in c:
+                if isinstance(p, dict) and (p.get("type") in ("image_url", "image")
+                                            or isinstance(p.get("image_url"), (str, dict))):
+                    return True
+    return False
+
+
+def capability_guard(rows: list | None, model_id: str, raw: dict) -> None:
+    """池泳道请求前的能力闸（语义对齐 dsh-xdpool 的 ChannelRequestError）。
+
+    目录**明说**做不了的事就明 400——带图打纯文本模型、发不支持的推理
+    档位，都直接给客户端人话错误，而不是把请求原样扔给上游收 11128 /
+    11133 谜语（xdpool：「502 读起来像上游宕机，真正被拒的是用户发的图」）。
+    目录没数据（行不存在 / 字段缺省）一律放行——未知不编造。
+    """
+    row = None
+    for r in rows or []:
+        if isinstance(r, dict) and r.get("id") == model_id:
+            row = r
+            break
+    if row is None:
+        return
+    effort = raw.get("reasoning_effort")
+    efforts = row.get("supported_efforts")
+    if (isinstance(effort, str) and effort
+            and isinstance(efforts, list) and efforts
+            and effort not in efforts):
+        raise UpstreamError(
+            400, "effort_unsupported",
+            f"模型 {model_id.split(':', 1)[-1]} 声明支持的推理强度为 "
+            f"{'、'.join(efforts)}，收到 reasoning_effort: {effort}。请换档或不传该参数。")
+    if row.get("supports_images") is False and _payload_has_image(raw):
+        raise UpstreamError(
+            400, "model_vision_unsupported",
+            f"模型 {model_id.split(':', 1)[-1]} 不支持图片输入，但请求携带了图片。"
+            "请改用视觉模型或不传图。")
+
+
 def strip_images(payload: dict) -> tuple[dict, int]:
     """视觉透传关闭时剥掉消息里的图片 part，换文字占位（对齐原版
     `[image unavailable]` 思路——宁可明说图没了，不发假占位骗模型）。
@@ -316,22 +362,39 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                     if isinstance(v, (int, float)) and not isinstance(v, bool) else {}
 
             def _vision_field(m: dict) -> dict:
-                """视觉声明只给 WorkBuddy 系行（原版实测全表 supportsImages）；
-                Cline/Qoder 行模型混杂不越权代言。字段名对齐原版网关出站
-                （input: ["text","image"]），客户端按它放行传图。"""
+                """视觉声明只给 WorkBuddy 系行；Cline/Qoder 行模型混杂不越权
+                代言。字段名对齐原版网关出站（input: ["text","image"]）。
+                逐模型判断（对齐 dsh-xdpool）：目录明说 supports_images=False
+                （含 disabledMultimodal 否定拼法）就不声明——上游上了纯文本
+                模型时客户端不会误传图；目录没带该字段维持原版实测结论
+                「全表支持」，不凭空把现有模型变纯文本。"""
                 if not getattr(app.state, "gw_vision", True):
                     return {}
                 mid = str(m.get("id") or "")
                 if mid.startswith(("cline:", "qoder:", "qodercn:")):
                     return {}
+                if m.get("supports_images") is False:
+                    return {}
                 return {"input": ["text", "image"]}
+
+            def _cap_fields(m: dict) -> dict:
+                """能力字段白名单透传：目录明说了才带，未知不编造。"""
+                out: dict = {}
+                eff = m.get("supported_efforts")
+                if (isinstance(eff, list) and eff
+                        and all(isinstance(x, str) for x in eff)):
+                    out["supported_efforts"] = eff
+                si = m.get("supports_images")
+                if isinstance(si, bool):
+                    out["supports_images"] = si
+                return out
 
             try:
                 pool_rows = [{"id": m["id"], "object": "model", "owned_by": "wbspy",
                               **m.get("wbspy", {}),
                               "name": _with_rate(m),
                               "region": m.get("region"),
-                              **_cm_field(m), **_vision_field(m)}
+                              **_cm_field(m), **_vision_field(m), **_cap_fields(m)}
                              for m in pool.models()]
             except Exception as exc:
                 # 目录拉取失败不该 500 卡死客户端启动：用旧缓存顶上，没有则空目录
@@ -481,6 +544,15 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         # 视觉透传关闭 → 剥图（占位文字替代，上游零图片流量）
         if not getattr(app.state, "gw_vision", True):
             raw, _dropped = strip_images(raw)
+
+        # 能力闸（池泳道）：目录明说做不了就明 400，不扔给上游收谜语错误
+        if lane == "workbuddy":
+            try:
+                capability_guard(app.state.model_cache,
+                                 "workbuddy:" + str(raw["model"]), raw)
+            except UpstreamError as exc:
+                _gw_log(f"能力闸拒绝：{model} → {exc.code}：{exc.message[:120]}")
+                return _error(exc)
 
         raw, _trimmed = trim_context(raw)
 

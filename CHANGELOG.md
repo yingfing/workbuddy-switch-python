@@ -2,6 +2,19 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.14] — 2026-11-07
+
+> 本版能力语义移植自 dsh-xdpool（XDTrees，MIT）的实测结论：上游「怎么说能力」与「收什么参数」的方言差异逐条对齐，原则同为**实测优先、未知不编造**。
+
+### 修复
+- **`reasoning_effort: "off"` 出口删除**：两个网关都不收这个拼法——国际 GPT 系 400/11133（`extError.param === 'reasoning.effort'`），国内网关在 `onlyReasoning` 模型上拒绝；字面 `'none'` 也不安全（GPT-5.6 系接受、其他拒绝）。省略字段是唯一处处正确的拼法，客户端发「关闭思考」不再撞上游谜语错误。
+- **带图打纯文本模型改明拒 400**（`model_vision_unsupported`）：目录声明不支持图片输入的模型收到带图请求时，直接给客户端人话错误，不再原样转发让上游报 11128/11128 族谜语（xdpool：「502 读起来像上游宕机，真正被拒的是用户发的图」）。视觉总开关关闭时先剥图，不受影响。
+
+### 新增
+- **目录 reasoning 拼法兼容**：上游 `reasoning` 对象有 plural（`supportedEfforts` 数组）与 singular（仅一个 `effort` 字符串）两种拼法，singular 按实测阶梯 `low/medium/high/xhigh/max` 折叠（单值只是默认档，模型全阶梯都能产出思考流），不认识的值原样作为唯一一档；解析结果随 `/v1/models` 暴露（`supported_efforts` / `default_effort`），未知形态不编造。
+- **推理档位校验**（`effort_unsupported`）：目录明说了模型支持的档位、客户端却发了别的档 → 400 人话报错并列出可用档；目录没说则放行。
+- **图片标志否定拼法兼容**：部分上游条目用 `disabledMultimodal`（否定拼法）表达「不支持图」，与 `supportsImages` 等价识别；目录行视觉声明从「WorkBuddy 系全表声明」细化为逐模型判断（没带字段维持原版实测结论「全表支持」，不凭空把现有模型变纯文本）。
+
 ## [0.2.13] — 2026-11-07
 
 ### 修复

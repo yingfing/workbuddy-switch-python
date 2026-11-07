@@ -68,6 +68,44 @@ EMBEDDING_INPUT_CHARS = 8188
 
 NOT_FOUND = {"__not_found__": True}
 
+# dsh-xdpool 实测：reasoning 目录有两种拼法——plural（supportedEfforts 数组）
+# 与 singular（仅一个 effort 字符串）。singular 的单值只是「默认档」：这类
+# 模型在整个阶梯上每档都产出独立 reasoning_content，须折叠成完整阶梯而非
+# 单档；不认识的 effort 值则原样作为唯一一档透传。
+SINGULAR_EFFORT_LADDER = ("low", "medium", "high", "xhigh", "max")
+
+
+def parse_reasoning(raw: Any) -> dict:
+    """解析上游目录条目的 ``reasoning`` 对象（dsh-xdpool parseReasoning 移植）。
+
+    返回 ``{"supported_efforts": [...], "default_effort": "..."}``；
+    形态不认识或什么都没声明时返回 ``{}``——未知不编造。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    efforts = raw.get("supportedEfforts")
+    if isinstance(efforts, list):
+        efforts = [e for e in efforts if isinstance(e, str) and e]
+    else:
+        # singular 形态：effort 是字符串就折叠成实测阶梯（对齐 xdpool
+        # singularEffortLadder——单值只是默认档，模型全阶梯都能思考）；
+        # 不认识的值原样作为唯一一档。
+        effort = raw.get("effort")
+        if isinstance(effort, str) and effort:
+            efforts = (list(SINGULAR_EFFORT_LADDER)
+                       if effort in SINGULAR_EFFORT_LADDER else [effort])
+        else:
+            efforts = None
+    if not efforts:
+        return {}
+    out: dict = {"supported_efforts": efforts}
+    de = raw.get("defaultEffort")
+    if not isinstance(de, str) and isinstance(raw.get("effort"), str):
+        de = raw["effort"]            # singular 拼法下 effort 兼任默认档
+    if isinstance(de, str) and de:
+        out["default_effort"] = de
+    return out
+
 
 # ---------------------------------------------------------------------------
 # 错误分类
@@ -178,6 +216,12 @@ def normalize_payload(raw: dict) -> dict:
     if not isinstance(raw, dict):
         raise UpstreamError(400, "invalid_request", "请求须为 JSON 对象。")
     payload = {k: v for k, v in raw.items() if k in PAYLOAD_FIELDS and v is not None}
+    # dsh-xdpool 实测（reasoning_effort 兼容）：两个网关都不收 "off"——国际
+    # GPT 系 400/11133（extError.param === 'reasoning.effort'），国内网关在
+    # onlyReasoning 模型上拒绝；字面 'none' 也不安全（GPT-5.6 系接受、其他
+    # 拒绝）。省略字段是唯一处处正确的拼法，故 "off" 在出口统一删除。
+    if payload.get("reasoning_effort") == "off":
+        del payload["reasoning_effort"]
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         raise UpstreamError(400, "invalid_request", "messages 不能为空。")
@@ -731,6 +775,19 @@ class WorkBuddyClient:
             cm = row.get("credit_multiplier")   # 官方计费倍率（0 = 限时免费）
             if isinstance(cm, (int, float)) and not isinstance(cm, bool):
                 entry["credit_multiplier"] = cm
+            # 图片输入标志：正拼法 supportsImages；部分条目用否定拼法
+            # disabledMultimodal（dsh-xdpool 实测同义）。只信布尔，都没有
+            # 就不写字段——维持「全表支持」的现状结论，不凭空变纯文本
+            # （xdpool 教训：读错字段曾把所有模型误报纯文本，模型选择器
+            # 分组裂开）。
+            si = row.get("supportsImages")
+            if isinstance(si, bool):
+                entry["supports_images"] = si
+            elif row.get("disabledMultimodal") is True:
+                entry["supports_images"] = False
+            rs = parse_reasoning(row.get("reasoning"))
+            if rs:
+                entry.update(rs)
             out.append(entry)
         return out
 
