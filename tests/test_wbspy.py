@@ -1850,4 +1850,8 @@ class TestGlobalLoginFlow(unittest.TestCase):
             wb_flow.start(channel, ticket)          # 旧代码在此 KeyError('workbuddy-ai')
         self.assertEqual(ticket.auth_url, "https://www.workbuddy.ai/login?state=xyz")
         self.assertEqual(ticket.platform, "workbuddy-ai")
-        self.assertTrue(ticket.qr_svg)              # 二维码同步生成
+        try:                        # 二维码是可选依赖（qrcode 缺失时按设计降级空串）
+            import qrcode  # noqa: F401
+            self.assertTrue(ticket.qr_svg)
+        except ImportError:
+            self.assertEqual(ticket.qr_svg, "")
