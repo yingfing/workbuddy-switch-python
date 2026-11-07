@@ -258,15 +258,25 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
   <section id="tab-free" hidden>
     <div class="card">
       <h2>已入库账号可调用的模型 <span class="tag" id="mymStat">—</span></h2>
+      <input id="mymSearch" class="inp" style="max-width:320px;margin-bottom:8px"
+             placeholder="🔍 搜模型名或 ID（如 hy3 / claude / gemini）" oninput="_mymRender()">
+      <h3>账号池（WorkBuddy 系，模型 ID 带 <code>workbuddy:</code> 前缀）</h3>
       <table id="mymTable"><thead><tr>
         <th>调用 ID</th><th>名称</th><th>倍率</th><th>可用账号</th>
-      </tr></thead><tbody></tbody></table>
+      </tr></thead><tbody id="mymTbody"></tbody></table>
+      <details style="margin-top:12px" id="mymClineBox">
+        <summary><b>Cline 渠道（国际，模型 ID 带 <code>cline:</code> 前缀）</b>
+          <span class="tag" id="mymClineCount">—</span></summary>
+        <table><thead><tr>
+          <th>调用 ID</th><th>名称</th><th>倍率</th><th>可用账号</th>
+        </tr></thead><tbody id="mymClineTbody"></tbody></table>
+      </details>
       <div class="empty" id="mymEmpty" hidden>账号池为空或目录未就绪 —— 先去「登录」页添加账号</div>
       <h2 style="margin-top:16px">逐账号明细</h2>
       <table id="mymAccTable"><thead><tr>
         <th>账号</th><th>地区</th><th>可调模型数</th>
       </tr></thead><tbody></tbody></table>
-      <span class="tag">目录缓存 5 分钟；调用一律走网关 <code>/v1</code>，模型 ID 带 <code>workbuddy:</code> 前缀</span>
+      <span class="tag">目录缓存 5 分钟；调用一律走网关 <code>/v1/chat/completions</code>，<code>workbuddy:*</code> 走账号池、<code>cline:*</code> 走 Cline；倍率由官方目录下发，未下发显示 —（0 = 限时免费）</span>
     </div>
     <div class="card">
       <h2>聚合渠道密钥 <span class="tag">填了 Key 的渠道，其模型才会出现在网关目录</span></h2>
@@ -561,7 +571,7 @@ async function loadAccounts() {
   const row = a => `<tr>
     <td><span class="dot ${a.api_ready ? 'g' : (a.protected ? 'y' : 'r')}"></span>${
       a.api_ready ? '可用' : (a.protected ? '加密凭据' : '已过期')}</td>
-    <td>${a.label}</td><td>${a.channel || a.domain || '—'}</td><td>${a.region === 'global' ? '国际版' : '国内版'}</td>
+    <td>${a.label}</td><td>${a.channel || a.domain || '—'}</td><td>${_regionText(a)}</td>
     <td>${a.api_ready ? '✓' : '—'}</td>
     <td id="${qid(a.uid)}">—</td>
     <td><button class="btn sm bad" onclick="rmAccount('${a.uid}','${a.domain || ''}')">移除</button></td>
@@ -801,33 +811,55 @@ async function snapRestore() {
 }
 
 // -- 我的模型（已入库账号可调用索引）+ 聚合渠道密钥 --
+let _mymRows = [], _mymOk = 0, _mymAll = 0;
 async function loadFree() {
   const r = await api('/api/my-models');
   const accs = r.data || [];
   const ok = accs.filter(a => a.count > 0);
-  $('#mymStat').textContent = ok.length
-    ? `${ok.length} / ${accs.length} 个账号可用`
+  _mymOk = ok.length; _mymAll = accs.length;
+  $('#mymStat').textContent = _mymOk
+    ? `${_mymOk} / ${_mymAll} 个账号可用`
     : '账号池为空';
-  // 统一索引：跨账号合并同名模型，标注可用账号数
+  // 统一索引：跨账号合并同名模型，标注可用账号数（id 已带 workbuddy:/cline: 泳道前缀）
   const uni = {};
   for (const a of ok) for (const m of a.models) {
     const u = uni[m.id] || (uni[m.id] = {id: m.id, name: m.name, cm: m.credit_multiplier, n: 0});
     u.n++;
     if (u.cm === undefined && m.credit_multiplier !== undefined) u.cm = m.credit_multiplier;
   }
-  const rows = Object.values(uni).sort((x, y) => y.n - x.n || x.id.localeCompare(y.id));
-  $('#mymEmpty').hidden = rows.length > 0;
-  $('#mymTable').style.display = rows.length ? '' : 'none';
-  $('#mymTable tbody').innerHTML = rows.map(m => {
-    const cm = m.cm === 0 ? '<span style="color:var(--bad);font-weight:600">限时免费</span>'
-      : (typeof m.cm === 'number' ? m.cm + 'x' : '—');
-    return `<tr><td><code>workbuddy:${m.id}</code></td><td>${m.name}</td>
-      <td>${cm}</td><td>${m.n} / ${ok.length}</td></tr>`;
-  }).join('');
+  _mymRows = Object.values(uni).sort((x, y) => y.n - x.n || x.id.localeCompare(y.id));
+  _mymRender();
   $('#mymAccTable tbody').innerHTML = accs.map(a => `<tr>
-    <td>${a.label}</td><td>${a.region === 'global' ? '国际版' : '国内版'}</td>
+    <td>${a.label}</td><td>${_regionText(a)}</td>
     <td>${a.count ? `<b>${a.count}</b>` : '<span style="color:var(--bad)">目录不可用</span>'}</td></tr>`).join('');
   loadChannelKeys();
+}
+
+function _regionText(a) {
+  // intl = Cline 等国际渠道；global = WorkBuddy 国际版；cn = 国内版
+  if (a.region === 'intl') return '国际';
+  return a.region === 'global' ? '国际版' : '国内版';
+}
+
+function _mymRender() {
+  const q = ($('#mymSearch').value || '').trim().toLowerCase();
+  const match = m => !q || m.id.toLowerCase().includes(q) || String(m.name || '').toLowerCase().includes(q);
+  const cell = m => {
+    const cm = m.cm === 0 ? '<span style="color:var(--bad);font-weight:600">限时免费</span>'
+      : (typeof m.cm === 'number' ? m.cm + 'x' : '—');
+    return `<tr><td><code>${m.id}</code></td><td>${m.name}</td>
+      <td>${cm}</td><td>${m.n} / ${_mymOk}</td></tr>`;
+  };
+  const wb = _mymRows.filter(m => !m.id.startsWith('cline:') && match(m));
+  const cl = _mymRows.filter(m => m.id.startsWith('cline:') && match(m));
+  const total = wb.length + cl.length;
+  $('#mymEmpty').hidden = total > 0;
+  $('#mymTable').style.display = wb.length ? '' : 'none';
+  $('#mymTbody').innerHTML = wb.map(cell).join('');
+  $('#mymClineBox').style.display = _mymRows.some(m => m.id.startsWith('cline:')) ? '' : 'none';
+  $('#mymClineCount').textContent = q ? `${cl.length} / ${_mymRows.filter(m => m.id.startsWith('cline:')).length} 条匹配` : `${cl.length} 个`;
+  $('#mymClineTbody').innerHTML = cl.map(cell).join('');
+  if (q) $('#mymClineBox').open = cl.length > 0;   // 搜索命中时自动展开
 }
 
 async function loadChannelKeys() {

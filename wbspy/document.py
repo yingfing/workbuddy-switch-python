@@ -104,6 +104,9 @@ def workbuddy_origin(domain: str | None) -> str:
 
 
 def region_of(domain: str | None) -> str:
+    """按登录域名判定区域。cline.bot 系是国际渠道（美元计价），无 cn/global 之分。"""
+    if domain and "cline.bot" in domain:
+        return "intl"
     return "global" if domain in GLOBAL_DOMAINS else "cn"
 
 
@@ -218,7 +221,7 @@ class Document:
     def label(self) -> str:
         base = self.nickname or "WorkBuddy 账号"
         suffix = " [加密凭据,仅切换]" if self.protected_token else ""
-        region = "国际版" if self.region == "global" else "国内版"
+        region = {"global": "国际版", "intl": "国际"}.get(self.region, "国内版")
         return f"{base}（{region}, {self.uid[:12]}…）{suffix}"
 
 

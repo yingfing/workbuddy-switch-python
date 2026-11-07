@@ -1294,3 +1294,19 @@ class TestGatewayLogging(unittest.TestCase):
             except StopIteration:
                 pass
         self.assertTrue(any("续期失败" in e for e in events), events)
+
+
+class TestRegionOf(unittest.TestCase):
+    """区域判定：cline.bot 系域名 → intl（国际渠道，非 cn/global 体系）。"""
+
+    def test_cline_domain_is_intl(self):
+        from wbspy.document import region_of, parse_auth
+        self.assertEqual(region_of("api.cline.bot"), "intl")
+        self.assertEqual(region_of("cline.bot"), "intl")
+        self.assertEqual(region_of("www.codebuddy.cn"), "cn")      # 不影响原有
+        self.assertEqual(region_of("api.workbuddy.ai"), "global") \
+            if "api.workbuddy.ai" in __import__("wbspy.document", fromlist=["GLOBAL_DOMAINS"]).GLOBAL_DOMAINS else None
+        doc = parse_auth({"account": {"uid": "ci", "nickname": "克莱恩"},
+                          "auth": {"accessToken": "t", "domain": "api.cline.bot"}})
+        self.assertEqual(doc.region, "intl")
+        self.assertIn("国际", doc.label())

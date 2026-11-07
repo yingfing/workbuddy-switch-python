@@ -892,7 +892,7 @@ class ClineClient:
                 continue
             out.append({"id": mid,
                         "name": str(raw.get("display_name") or raw.get("name") or mid)[:80],
-                        "region": self.doc.region})
+                        "region": "intl"})   # Cline 是国际渠道，与账号入库时的 region 无关
         return out
 
     def chat(self, payload: dict) -> requests.Response:
