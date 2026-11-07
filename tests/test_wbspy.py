@@ -2706,3 +2706,44 @@ class TestZcodeLane(unittest.TestCase):
                 "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(fo.call_count, 1)              # 进了池 = 泳道识别成功
+
+
+class TestAuthErrorMessage(unittest.TestCase):
+    """401 响应体人话化：多数客户端只显示 error.message（401 一律渲染成
+    「API 密钥无效」），message 里不带排查信息用户就无处可看真相。
+    之前响应体只有一句 "invalid api key"，详细的密钥长度对比只进调试日志。"""
+
+    def _env(self, key="wbs-test-key-1234567890"):
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        from fastapi.testclient import TestClient
+        pool = AccountPool([])
+        app = create_web_app(pool, api_key=key)
+        return TestClient(app), app
+
+    def test_wrong_key_message_is_actionable(self):
+        c, app = self._env()
+        r = c.get("/v1/models", headers={"Authorization": "Bearer wrong"})
+        self.assertEqual(r.status_code, 401)
+        err = r.json()["error"]
+        self.assertIn("不一致", err["message"])
+        self.assertIn("设置", err["message"])            # 行动指引写进响应体
+        self.assertEqual(err["gateway_key_len"], len("wbs-test-key-1234567890"))
+        self.assertEqual(err["presented_key_len"], len("Bearer wrong"))
+        # 运行日志同步可见（调试开关关着也能看到原因）
+        self.assertTrue(any("密钥校验失败" in m for m in app.state.auto_log))
+        # 密钥全文绝不落日志
+        self.assertFalse(any("Bearer wrong" in m for m in app.state.auto_log))
+
+    def test_missing_key_message(self):
+        c, app = self._env()
+        r = c.get("/v1/models")                          # 不带任何密钥头
+        self.assertEqual(r.status_code, 401)
+        self.assertIn("没有发送访问密钥", r.json()["error"]["message"])
+
+    def test_gateway_disabled_message_localized(self):
+        c, app = self._env()
+        app.state.gw_enabled = False
+        r = c.get("/v1/models")
+        self.assertEqual(r.status_code, 404)
+        self.assertIn("网关已关闭", r.json()["error"]["message"])

@@ -266,7 +266,7 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             _dbg({"ip": _client_ip(request), "method": request.method, "path": path,
                   "status": 404, "auth": "（未带密钥）", "note": "网关已关闭（gateway_disabled）"})
             return JSONResponse(status_code=404,
-                                content={"error": {"message": "gateway is disabled",
+                                content={"error": {"message": "网关已关闭（设置页可重新开启）。",
                                                    "type": "gateway_disabled"}})
         key = app.state.gw_key
         if key and path.startswith("/v1"):
@@ -279,9 +279,25 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                       "body": await _body_digest(request),
                       "note": "✗ 密钥无效：客户端发的密钥与网关设置的不一致"
                               f"（本网关密钥长度 {len(key)}，对方发来长度 {len(presented.strip())}）"})
+                # 运行日志同步记一条：调试开关关着时用户也能在网页看到原因
+                _gw_log(f"✗ 客户端密钥校验失败（{_mask(presented) or '（空）'}，"
+                        f"长度 {len(presented.strip())} vs 网关密钥长度 {len(key)}）"
+                        f"——请到「设置」页复制完整访问密钥填入客户端。")
+                # 响应体也必须人话：多数客户端只显示 error.message，401 一律
+                # 渲染成「API 密钥无效」，message 里不写清楚用户就没处看真相。
+                if not presented.strip():
+                    msg = ("客户端没有发送访问密钥。请打开 wbspy 网页「设置」页复制"
+                           "完整访问密钥，填入客户端的 API Key 配置。")
+                else:
+                    msg = ("客户端发送的访问密钥与网关设置的不一致。请打开 wbspy 网页"
+                           "「设置」页复制完整访问密钥重新填入（注意 Bearer 前缀与"
+                           "密钥全文，不要多空格）。")
                 return JSONResponse(status_code=401,
-                                    content={"error": {"message": "invalid api key",
-                                                       "type": "invalid_api_key"}})
+                                    content={"error": {
+                                        "message": msg,
+                                        "type": "invalid_api_key",
+                                        "gateway_key_len": len(key),
+                                        "presented_key_len": len(presented.strip())}})
             # 密钥正确 → 记录请求与响应全貌（调试模式关闭则只记账不落盘）。
             # body 摘要必须在 call_next 之前取：流会被下游消费掉。
             digest = await _body_digest(request)
