@@ -1644,22 +1644,29 @@ class TestFailoverBoundaries(unittest.TestCase):
         self.assertIn("稍后重试", msg)
 
 
+def _gw_client(pool):
+    """测试用网关 TestClient（CONFIG_PATH 指向临时目录，避免碰真实配置）。
+
+    临时目录留给系统回收（测试沙箱可接受），换取模块级无状态调用。
+    """
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from wbspy.gateway import create_app
+    from wbspy import store
+    tmp = Path(tempfile.mkdtemp(prefix="wbspy-test-"))
+    with patch.object(store, "CONFIG_PATH", tmp / "config.json"), \
+         patch("wbspy.gateway.load_config", store.load_config):
+        app = create_app(pool, api_key="")
+    return TestClient(app, raise_server_exceptions=False), app
+
+
 class TestGatewayCrashGuard(unittest.TestCase):
     """路由内未捕获异常：调试日志必须留痕（此前 500 无日志的根因）；目录失败降级用缓存。"""
 
     def _client(self, pool):
-        import tempfile
-        from pathlib import Path
-        from unittest.mock import patch
-        from fastapi.testclient import TestClient
-        from wbspy.gateway import create_app
-        from wbspy import store
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        with patch.object(store, "CONFIG_PATH", Path(tmp.name) / "config.json"), \
-             patch("wbspy.gateway.load_config", store.load_config):
-            app = create_app(pool, api_key="")
-        return TestClient(app, raise_server_exceptions=False), app
+        return _gw_client(pool)
 
     def test_uncaught_exception_logged_and_500(self):
         """路由抛非 UpstreamError：响应 500（中性文案）+ 调试日志/运行日志都留痕。"""
@@ -1694,3 +1701,81 @@ class TestGatewayCrashGuard(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["data"][0]["id"], "workbuddy:auto")   # 旧缓存顶上
         self.assertTrue(any("目录刷新失败" in x for x in app.state.auto_log))
+
+
+class TestTokenExpiryGuard(unittest.TestCase):
+    """上游返回字符串 expiresAt 污染 Document → 全池路由炸 TypeError 的根因修复。
+
+    事故链条：续期 worker 把原始 expiresAt（可能为字符串）直接塞进
+    Document.token_expires_at → token_expired 里 `<= time.time()*1000`
+    抛 TypeError → /v1/chat/completions 与 /v1/models 全 500。
+    """
+
+    def _doc(self, uid="tx1"):
+        from wbspy.document import parse_auth
+        return parse_auth({"account": {"uid": uid, "nickname": "号"},
+                           "auth": {"accessToken": "t",
+                                    "domain": "www.codebuddy.cn"}})
+
+    def test_dirty_expiry_does_not_break_routing(self):
+        """token_expires_at 为字符串（脏数据）：token_expired/api_ready 不炸。"""
+        doc = self._doc()
+        doc.token_expires_at = "2026-11-07T10:44:00Z"    # 上游脏数据形态
+        self.assertFalse(doc.token_expired)              # 旧代码在此抛 TypeError
+        self.assertTrue(doc.api_ready)                   # 路由判定照常可用
+
+    def test_auto_refresh_normalizes_string_expires(self):
+        """续期响应 expiresAt 为字符串：入库前归一化为毫秒整数。"""
+        import time as _t
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool, _key
+        doc = self._doc("tx2")
+        doc.refresh_token = "r"
+        doc.token_expires_at = 0                         # 已临期 → 立即触发续期
+        with patch("wbspy.pool._client_for") as MF, \
+             patch("wbspy.store.save_account", lambda d: None):
+            client = MagicMock()
+            client.refresh.return_value = {"accessToken": "t2", "refreshToken": "r2",
+                                           "expiresAt": "1794019442000"}   # 字符串毫秒
+            MF.return_value = client
+            pool = AccountPool([doc])
+            emitted: list[str] = []
+            pool._emit = emitted.append
+            thread = pool.start_auto_refresh(interval_sec=3600)
+            for _ in range(200):                          # 等 worker 首轮跑完
+                if emitted:
+                    break
+                _t.sleep(0.01)
+            thread.join(timeout=0.2)
+        self.assertEqual(len(emitted), 1)
+        self.assertIn("token 已自动续期", emitted[0])
+        fresh = pool.documents[_key(doc)]
+        self.assertIsInstance(fresh.token_expires_at, int)   # 不再是字符串
+        self.assertEqual(fresh.token_expires_at, 1794019442000)
+        fresh.token_expired                                  # 不炸（返回值随时间）
+
+    def test_models_sort_survives_string_multiplier(self):
+        """目录行混入字符串倍率：/v1/models 照常 200，排序只认数值键。"""
+        from unittest.mock import patch
+        from wbspy.pool import AccountPool
+        pool = AccountPool([])
+        rows = [{"id": "workbuddy:auto", "name": "Auto", "region": "cn",
+                 "credit_multiplier": 1.5},
+                {"id": "workbuddy:fast", "name": "Fast", "region": "cn",
+                 "credit_multiplier": "0.15"},                # 脏数据
+                {"id": "workbuddy:free", "name": "Free", "region": "cn",
+                 "credit_multiplier": 0}]
+        with patch.object(pool, "models", return_value=rows):
+            c, _app = _gw_client(pool)
+            _app.state.model_cached_at = 0
+            r = c.get("/v1/models")
+        self.assertEqual(r.status_code, 200)
+        data = {m["id"]: m for m in r.json()["data"]}
+        for row in rows:                       # 目录可能还含聚合渠道内置行，只验池内行
+            self.assertIn(row["id"], data)
+        self.assertEqual(data["workbuddy:fast"]["name"], "Fast")      # 脏倍率不拼进名字
+        self.assertIn("1.50x", data["workbuddy:auto"]["name"])
+        self.assertIn("限时免费", data["workbuddy:free"]["name"])
+        mults = [m.get("credit_multiplier") for m in r.json()["data"]
+                 if m.get("credit_multiplier") is not None]
+        self.assertTrue(all(isinstance(v, (int, float)) for v in mults))

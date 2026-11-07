@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Callable
 
-from .document import Document
+from .document import Document, _token_expiry
 from .upstream import UpstreamError, WorkBuddyClient
 
 DEFAULT_MODEL_COOLDOWN = 60
@@ -382,7 +382,9 @@ class AccountPool:
                 for k, doc in list(self.documents.items()):
                     if "refresh" not in doc.capabilities or not doc.refresh_token or doc.protected_token:
                         continue             # 渠道未声明 refresh 能力 → 不代为续期
-                    exp = doc.token_expires_at or 0
+                    exp = doc.token_expires_at
+                    if exp is not None and not isinstance(exp, (int, float)):
+                        continue             # 脏数据（如上游给了字符串到期时间）不代续期
                     if exp and exp > (time.time() + 600) * 1000:
                         continue                       # 还没临期
                     try:
@@ -393,8 +395,10 @@ class AccountPool:
                             raw=root, uid=doc.uid,
                             token=auth["accessToken"],
                             refresh_token=auth.get("refreshToken", doc.refresh_token),
-                            nickname=doc.nickname, region=doc.region, domain=doc.domain)
-                        fresh.token_expires_at = auth.get("expiresAt")
+                            nickname=doc.nickname, region=doc.region, domain=doc.domain,
+                            # 到期时间必须归一化为毫秒整数——上游若返回字符串
+                            # 原样塞进 Document，会让全池 api_ready 比较炸 TypeError
+                            token_expires_at=_token_expiry(auth))
                         save_account(fresh)
                         self.refresh_documents([fresh])
                         self._emit(f"「{fresh.label()}」token 已自动续期")

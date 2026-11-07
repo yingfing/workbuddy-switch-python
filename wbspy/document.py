@@ -208,7 +208,10 @@ class Document:
 
     @property
     def token_expired(self) -> bool:
-        return bool(self.token_expires_at and self.token_expires_at <= time.time() * 1000)
+        exp = self.token_expires_at
+        if not isinstance(exp, (int, float)):
+            return False    # 无到期时间或脏数据（字符串）→ 当未过期，别让比较炸了全池路由
+        return exp <= time.time() * 1000
 
     @property
     def api_ready(self) -> bool:

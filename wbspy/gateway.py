@@ -263,27 +263,36 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             def _with_rate(m: dict) -> str:
                 base = m.get("name") or m["id"].split(":", 1)[-1]
                 cm = m.get("credit_multiplier")
-                if cm == 0:
+                if isinstance(cm, (int, float)) and not isinstance(cm, bool) and cm == 0:
                     return f"{base}（限时免费）"
-                if isinstance(cm, (int, float)):
+                if isinstance(cm, (int, float)) and not isinstance(cm, bool):
                     return f"{base} {cm:.2f}x"
                 return base
+
+            def _cm_field(m: dict) -> dict:
+                """倍率字段只认数值：上游给的脏字符串不进目录（防客户端再被坑）。"""
+                v = m.get("credit_multiplier")
+                return {"credit_multiplier": v} \
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) else {}
 
             try:
                 pool_rows = [{"id": m["id"], "object": "model", "owned_by": "wbspy",
                               **m.get("wbspy", {}),
                               "name": _with_rate(m),
                               "region": m.get("region"),
-                              **({"credit_multiplier": m["credit_multiplier"]}
-                                 if "credit_multiplier" in m else {})}
+                              **_cm_field(m)}
                              for m in pool.models()]
             except Exception as exc:
                 # 目录拉取失败不该 500 卡死客户端启动：用旧缓存顶上，没有则空目录
                 _gw_log(f"模型目录刷新失败（沿用缓存）：{type(exc).__name__}: {exc}")
                 pool_rows = None
             if pool_rows is not None:
-                pool_rows.sort(key=lambda r: (r.get("credit_multiplier") is None,
-                                              r.get("credit_multiplier") or 0))
+                # 排序 key 只认数值：万一上游把倍率给成字符串，也不能 500 全池
+                def _cm(r: dict):
+                    v = r.get("credit_multiplier")
+                    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+                pool_rows.sort(key=lambda r: (_cm(r) is None, _cm(r) or 0))
                 rows = pool_rows
                 # 聚合渠道只暴露「当前真的可调用」的：未配置 key 的厂商不进目录
                 try:

@@ -729,7 +729,7 @@ class WorkBuddyClient:
                      "name": str(row.get("display_name") or row.get("name") or mid)[:80],
                      "region": self.doc.region}
             cm = row.get("credit_multiplier")   # 官方计费倍率（0 = 限时免费）
-            if isinstance(cm, (int, float)):
+            if isinstance(cm, (int, float)) and not isinstance(cm, bool):
                 entry["credit_multiplier"] = cm
             out.append(entry)
         return out
