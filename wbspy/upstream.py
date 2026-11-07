@@ -812,7 +812,7 @@ class WorkBuddyClient:
                 )
             except requests.RequestException as exc:
                 raise UpstreamError(502, "upstream_transport_error",
-                                    "对话连接中断，结果和消耗尚未确认，不会自动重发。") from exc
+                                    "对话连接中断（结果与消耗未知，网关会换号重试）。") from exc
             return resp
 
         resp = send(body)

@@ -224,8 +224,12 @@ class AccountPool:
             self.dead_until[k] = time.time() + 300   # 5 分钟后允许刷新重试
             for s in [s for s, (bk, _) in self.session_map.items() if bk == k]:
                 del self.session_map[s]
+        elif error.code == "upstream_quota":
+            self.cooldowns.set(k, model, 1800)       # 额度尽是持久状态：冷却 30 分钟
         elif error.kind in ("rate", "model", "channel"):
             self.cooldowns.set(k, model, error.retry_after or DEFAULT_MODEL_COOLDOWN)
+        elif error.upstream_status >= 500 or error.code == "upstream_transport_error":
+            self.cooldowns.set(k, model, 60)         # 上游侧故障非账号之过：短冷却轻罚
 
     def status(self) -> list[dict]:
         now = time.time()
@@ -244,6 +248,21 @@ class AccountPool:
     # （pick / apply_error 已合并到上方健康判定的统一实现）
 
     # -- 请求 -----------------------------------------------------------------
+
+    @staticmethod
+    def _should_failover(exc: "UpstreamError") -> bool:
+        """该错误是否值得换号再试。
+
+        * 账号侧问题（凭据失效/限流/该号无此模型/额度尽）→ 一律换号；
+        * 上游 5xx 与连接中断 → 也换号：可能只是单账号会话态引发的故障，
+          换号循环有 tried 上限（每号只试一次），不会雪崩；
+        * 请求本身的问题（400 参数错、渠道审查拒绝且对策二已试过）→ 换号无意义，不重试。
+        """
+        if exc.kind in ("auth", "rate", "model"):
+            return True
+        if exc.code == "upstream_quota":
+            return True
+        return exc.code == "upstream_transport_error" or exc.upstream_status >= 500
 
     def chat_failover(self, payload: dict, session: str | None = None,
                       lane: str = "workbuddy"):
@@ -272,9 +291,9 @@ class AccountPool:
                             last_error = exc
                             self.apply_error(alt, exc, fb)
                             self._unbind(session, _key(alt))
-                            if exc.kind in ("auth", "rate", "model"):
-                                continue
-                            raise
+                            if not self._should_failover(exc):
+                                raise
+                            continue
                 # 兜底二：全池冷却 → 等最早的解冻（一次，≤90 秒）
                 if not waited:
                     wait = self._shortest_cooling(model, lane=lane)
@@ -293,14 +312,17 @@ class AccountPool:
             except UpstreamError as exc:
                 last_error = exc
                 self.apply_error(doc, exc, model)
-                self._unbind(session, _key(doc))  # 粘住的号废了 → 解绑让对话重分配
-                if exc.kind in ("auth", "rate", "model"):
-                    if exc.kind == "auth":
-                        self._emit(f"「{doc.label()}」凭据被上游拒绝（401），已标记失效并换号重试")
-                    else:
-                        self._emit(f"「{doc.label()}」{model} 触发限流/不可用，已自动换号")
-                    continue      # 换号重试
-                raise             # 渠道拒绝重试过 / 上游 5xx 不换号
+                self._unbind(session, _key(doc))  # 粘住的号出问题 → 解绑让对话重分配
+                if not self._should_failover(exc):
+                    raise             # 请求本身的问题（参数错/渠道审查），换号无意义
+                if exc.kind == "auth":
+                    self._emit(f"「{doc.label()}」凭据被上游拒绝（401），已标记失效并换号重试")
+                elif exc.code == "upstream_quota":
+                    self._emit(f"「{doc.label()}」额度已用尽，已自动换号")
+                else:
+                    self._emit(f"「{doc.label()}」{model} 触发限流或上游故障"
+                               f"（HTTP {exc.upstream_status or exc.status}），已自动换号")
+                continue              # 换号重试
 
     @staticmethod
     def _route_id(doc: Document, row_id: str) -> str:

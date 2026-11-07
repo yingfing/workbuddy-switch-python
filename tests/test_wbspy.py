@@ -1505,3 +1505,78 @@ class TestClinePrices(unittest.TestCase):
         self.assertEqual(rows[0]["output_price"], 10)
         self.assertEqual(rows[2]["input_price"], 3)
         self.assertNotIn("input_price", rows[1])       # 未收录 → 无价格字段 → 前端显示 —
+
+
+class TestFailoverPolicy(unittest.TestCase):
+    """failover 策略：5xx/额度尽/连接中断换号重试；请求本身的问题不换号。"""
+
+    def _pool(self, bad_uid, bad_exc):
+        """双账号池：uid=bad_uid 的号必抛 bad_exc，另一号成功；pick 按入库顺序。"""
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool, _key
+        from wbspy.document import parse_auth
+        docs = [parse_auth({"account": {"uid": f"f{i}", "nickname": f"号{i}"},
+                            "auth": {"accessToken": "t",
+                                     "domain": "www.codebuddy.cn"}}) for i in range(2)]
+        events: list[str] = []
+        good = MagicMock()
+        with patch("wbspy.pool._client_for") as MF:
+            MF.side_effect = (lambda d: MagicMock(chat=MagicMock(side_effect=bad_exc))
+                              if d.uid == bad_uid else good)
+            pool = AccountPool(docs)
+            pool.event_log = events.append
+            pool.pick = lambda model, exclude=None, session=None, lane="workbuddy": next(
+                (d for d in docs if _key(d) not in (exclude or set())), None)
+            doc, resp = pool.chat_failover({"model": "auto", "messages": []})
+        self.assertIs(resp, good.chat.return_value)
+        return pool, doc, events
+
+    def test_5xx_fails_over(self):
+        """上游 500：换到下一个号成功（用户实测「重试延迟 961ms」的场景）。"""
+        from wbspy.upstream import UpstreamError
+        pool, doc, events = self._pool("f0", UpstreamError(
+            502, "upstream_error", "官方服务未完成本次请求（HTTP 500）。",
+            upstream_status=500))
+        self.assertEqual(doc.uid, "f1")
+        self.assertTrue(any("上游故障（HTTP 500）" in e for e in events), events)
+
+    def test_quota_fails_over_and_long_cools(self):
+        """额度尽（402）：换号 + 长冷却 30 分钟。"""
+        from wbspy.upstream import UpstreamError
+        pool, doc, events = self._pool("f0", UpstreamError(402, "upstream_quota", "额度不足"))
+        self.assertEqual(doc.uid, "f1")
+        self.assertTrue(any("额度已用尽" in e for e in events), events)
+
+    def test_transport_error_fails_over(self):
+        """连接中断：换号重试（消耗走新账号，无重复扣费）。"""
+        from wbspy.upstream import UpstreamError
+        _, doc, events = self._pool("f0", UpstreamError(
+            502, "upstream_transport_error", "对话连接中断"))
+        self.assertEqual(doc.uid, "f1")
+        self.assertTrue(any("上游故障" in e for e in events), events)
+
+    def test_client_error_never_fails_over(self):
+        """400 参数错：直接抛，绝不换号（换啥号结果都一样）。"""
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool, _key
+        from wbspy.document import parse_auth
+        from wbspy.upstream import UpstreamError
+        docs = [parse_auth({"account": {"uid": f"g{i}", "nickname": f"号{i}"},
+                            "auth": {"accessToken": "t",
+                                     "domain": "www.codebuddy.cn"}}) for i in range(2)]
+        called: list[str] = []
+        with patch("wbspy.pool._client_for") as MF:
+            def factory(d):
+                c = MagicMock()
+                def chat_side(payload, uid=d.uid):
+                    called.append(uid)               # 记录真实 chat 调用（不是建 client）
+                    raise UpstreamError(400, "invalid_request", "参数错误")
+                c.chat.side_effect = chat_side
+                return c
+            MF.side_effect = factory
+            pool = AccountPool(docs)
+            pool.pick = lambda model, exclude=None, session=None, lane="workbuddy": next(
+                (d for d in docs if _key(d) not in (exclude or set())), None)
+            with self.assertRaises(UpstreamError):
+                pool.chat_failover({"model": "auto", "messages": []})
+        self.assertEqual(called, ["g0"])     # 只试了第 1 个号，没有换号
