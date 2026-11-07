@@ -1315,6 +1315,7 @@ class TestGatewayLogging(unittest.TestCase):
 
     def test_refresh_failure_emits(self):
         """token 续期失败不再静默：记入事件日志。"""
+        import time as _time
         from unittest.mock import MagicMock, patch
         from wbspy.pool import AccountPool
         from wbspy.document import parse_auth
@@ -1327,12 +1328,16 @@ class TestGatewayLogging(unittest.TestCase):
         pool.event_log = events.append
         client = MagicMock()
         client.refresh.side_effect = RuntimeError("refresh 炸了")
-        with patch.object(pool, "clients", {next(iter(pool.documents)): client}), \
-             patch("wbspy.pool.time.sleep", lambda *_: (_ for _ in ()).throw(StopIteration)):
+        with patch.object(pool, "clients", {next(iter(pool.documents)): client}):
+            pool.start_auto_refresh(interval_sec=1)
             try:
-                pool.start_auto_refresh(interval_sec=1)
-            except StopIteration:
-                pass
+                # 等待续期失败事件出现（worker 首轮立即跑，带超时兜底）
+                for _ in range(100):
+                    if any("续期失败" in e for e in events):
+                        break
+                    _time.sleep(0.02)
+            finally:
+                pool.stop_auto_refresh()               # 确定性收线，不靠杀线程
         self.assertTrue(any("续期失败" in e for e in events), events)
 
 
@@ -1373,7 +1378,9 @@ def _make_app_with_pool(tmp, doc=None, client=None, api_key="secret-1234-5678"):
     if doc and client is not None:
         pool.clients[_key(doc)] = client
     app = create_app(pool, api_key=api_key)
-    return TestClient(app), app
+    # 必须交还 stopper 由调用方注册 cleanup：此前 start 后不 stop，CONFIG_PATH
+    # 永久指向本测试的 tmp 目录，目录删除后污染后续走真实路径的测试（500 之谜）
+    return TestClient(app), app, lambda: [p.stop() for p in ctx]
 
 
 class TestGatewayDebug(unittest.TestCase):
@@ -1393,7 +1400,8 @@ class TestGatewayDebug(unittest.TestCase):
             'data: [DONE]'])
         client = MagicMock()
         client.chat.return_value = resp
-        c, app = _make_app_with_pool(tmp.name, doc=doc, client=client)
+        c, app, stop = _make_app_with_pool(tmp.name, doc=doc, client=client)
+        self.addCleanup(stop)
         return c, app
 
     def test_401_recorded_and_masked(self):
@@ -1782,7 +1790,8 @@ class TestTokenExpiryGuard(unittest.TestCase):
                 if emitted:
                     break
                 _t.sleep(0.01)
-            thread.join(timeout=0.2)
+            pool.stop_auto_refresh()                      # 收线，不留挂起线程
+            thread.join(timeout=1)
         self.assertEqual(len(emitted), 1)
         self.assertIn("token 已自动续期", emitted[0])
         fresh = pool.documents[_key(doc)]
@@ -2187,3 +2196,240 @@ class TestCapabilityGuard(unittest.TestCase):
         # 图被剥 → guard 无图可拒 → 走到池（此处 mock 成 RuntimeError → 500，
         # 证明没被 400 拦截、也没被上游谜语挡住）
         self.assertNotEqual(r.status_code, 400)
+
+
+class TestPriorityCredits(unittest.TestCase):
+    """priority 策略的积分感知降级（用户语义：固定优先账号，积分烧穿阈值
+    → 换剩余里积分最高的继续用，直到全部低于阈值；阈值可配置）。"""
+
+    def _cfg(self, **gw):
+        from unittest.mock import patch
+        from wbspy import store
+        return patch.object(store, "load_config", return_value={"gateway": gw})
+
+    def _pool_n(self, n):
+        from wbspy.pool import AccountPool
+        docs = []
+        for i in range(n):
+            from wbspy.document import parse_auth
+            docs.append(parse_auth({
+                "account": {"uid": f"pu{i}", "nickname": f"号{i}"},
+                "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}}))
+        return AccountPool(docs)
+
+    def _uid(self, pool, doc):
+        return next(k[1] for k, v in pool.documents.items() if v is doc)
+
+    def test_unknown_credits_follows_drag_order(self):
+        """全部没查过余额 → 纯按拖拽顺序（不查余额 = 普通优先级模式）。"""
+        pool = self._pool_n(3)
+        with self._cfg(distribution="priority",
+                       account_order={"buddy:cn": ["pu2", "pu1", "pu0"]}):
+            self.assertEqual(self._uid(pool, pool.pick("auto")), "pu2")
+
+    def test_highest_credits_wins_among_ok(self):
+        """已知积分达标 → 取积分最高者（用户语义：积分最高的先用最久）。"""
+        pool = self._pool_n(3)
+        with self._cfg(distribution="priority",
+                       priority_threshold=100,
+                       credits_cache={"pu0": {"total": 500, "at": 1},
+                                      "pu1": {"total": 800, "at": 1},
+                                      "pu2": {"total": 60, "at": 1}}):
+            self.assertEqual(self._uid(pool, pool.pick("auto")), "pu1")   # 800 最高
+
+    def test_fixed_until_below_threshold(self):
+        """固定语义：第一名烧穿前每次都选它，不抖动。"""
+        pool = self._pool_n(2)
+        with self._cfg(distribution="priority", priority_threshold=100,
+                       credits_cache={"pu0": {"total": 150, "at": 1},
+                                      "pu1": {"total": 120, "at": 1}}):
+            for _ in range(3):
+                self.assertEqual(self._uid(pool, pool.pick("auto")), "pu0")  # 150>120
+
+    def test_switch_to_highest_when_exhausted(self):
+        """队首烧穿阈值 → 换剩余里积分最高的。"""
+        pool = self._pool_n(3)
+        with self._cfg(distribution="priority", priority_threshold=100,
+                       credits_cache={"pu0": {"total": 99, "at": 1},
+                                      "pu1": {"total": 120, "at": 1},
+                                      "pu2": {"total": 400, "at": 1}}):
+            self.assertEqual(self._uid(pool, pool.pick("auto")), "pu2")   # 400
+
+    def test_all_below_threshold_keeps_serving(self):
+        """全部低于阈值 → 积分最高者继续顶住（服务不断供）。"""
+        pool = self._pool_n(3)
+        with self._cfg(distribution="priority", priority_threshold=100,
+                       credits_cache={"pu0": {"total": 99, "at": 1},
+                                      "pu1": {"total": 50, "at": 1},
+                                      "pu2": {"total": 10, "at": 1}}):
+            self.assertEqual(self._uid(pool, pool.pick("auto")), "pu0")   # 99 最高
+
+    def test_unknown_after_known_ok(self):
+        """已知达标号优先于未知号（不查余额的号不抢已确认高分的位）。"""
+        pool = self._pool_n(2)
+        with self._cfg(distribution="priority", priority_threshold=100,
+                       credits_cache={"pu1": {"total": 500, "at": 1}}):
+            self.assertEqual(self._uid(pool, pool.pick("auto")), "pu1")
+
+    def test_unknown_first_when_no_known_ok(self):
+        """已知号全部烧穿 → 未知号顶上（它可能是满分，只是没查过）。"""
+        pool = self._pool_n(2)
+        with self._cfg(distribution="priority", priority_threshold=100,
+                       credits_cache={"pu0": {"total": 5, "at": 1}}):
+            self.assertEqual(self._uid(pool, pool.pick("auto")), "pu1")
+
+    def test_threshold_zero_disables_credit_awareness(self):
+        """阈值 0 = 关闭积分感知，纯拖拽顺序。"""
+        pool = self._pool_n(2)
+        with self._cfg(distribution="priority", priority_threshold=0,
+                       credits_cache={"pu0": {"total": 1, "at": 1},
+                                      "pu1": {"total": 999, "at": 1}},
+                       account_order={"buddy:cn": ["pu0", "pu1"]}):
+            self.assertEqual(self._uid(pool, pool.pick("auto")), "pu0")
+
+    def test_threshold_persists_and_validates(self):
+        from wbspy.pool import AccountPool
+        written = {}
+
+        def fake_save(cfg):
+            written.update(cfg)
+
+        from unittest.mock import patch
+        from wbspy import store
+        with patch.object(store, "load_config", return_value={"gateway": {}}), \
+             patch.object(store, "save_config", side_effect=fake_save):
+            self.assertEqual(AccountPool.set_priority_threshold("150"), 150.0)
+            self.assertEqual(written["gateway"]["priority_threshold"], 150.0)
+            with self.assertRaises(ValueError):
+                AccountPool.set_priority_threshold(-1)
+            with self.assertRaises(ValueError):
+                AccountPool.set_priority_threshold("abc")
+
+    def test_remember_credits_persists(self):
+        """查询余额落盘：数值写入，脏值忽略。"""
+        pool = self._pool_n(1)
+        from unittest.mock import patch
+        from wbspy import store
+        written = {}
+
+        def fake_save(cfg):
+            written.update(cfg)
+
+        with patch.object(store, "load_config", return_value={"gateway": {}}), \
+             patch.object(store, "save_config", side_effect=fake_save):
+            pool.remember_credits("pu0", 321)
+            self.assertEqual(written["gateway"]["credits_cache"]["pu0"]["total"], 321)
+            pool.remember_credits("pu0", "很多")     # 脏值不写
+            pool.remember_credits("pu0", None)
+            self.assertEqual(written["gateway"]["credits_cache"]["pu0"]["total"], 321)
+
+
+class TestPriorityOrderApi(unittest.TestCase):
+    """拖拽排序：set_priority_order 校验/落盘、_priority_sorted 组内生效、
+    /api/accounts/order 端点、/api/accounts 带 group+credits。"""
+
+    def _pool_n(self, n, domain="www.codebuddy.cn", prefix="ou"):
+        from wbspy.pool import AccountPool
+        from wbspy.document import parse_auth
+        docs = [parse_auth({"account": {"uid": f"{prefix}{i}", "nickname": f"号{i}"},
+                            "auth": {"accessToken": "t", "domain": domain}})
+                for i in range(n)]
+        return AccountPool(docs)
+
+    def _cfg(self, **gw):
+        from unittest.mock import patch
+        from wbspy import store
+        return patch.object(store, "load_config", return_value={"gateway": gw})
+
+    def test_set_priority_order_validates_and_persists(self):
+        pool = self._pool_n(2)
+        from unittest.mock import patch
+        from wbspy import store
+        written = {}
+
+        def fake_save(cfg):
+            written.update(cfg)
+
+        with patch.object(store, "load_config", return_value={"gateway": {}}), \
+             patch.object(store, "save_config", side_effect=fake_save):
+            pool.set_priority_order("buddy:cn", ["ou1", "ou0"])
+            self.assertEqual(written["gateway"]["account_order"]["buddy:cn"],
+                             ["ou1", "ou0"])
+            with self.assertRaises(ValueError):
+                pool.set_priority_order("", ["ou0"])
+            with self.assertRaises(ValueError):
+                pool.set_priority_order("buddy:cn", ["ou0", 3])
+
+    def test_priority_sorted_group_inner(self):
+        """组间保持入库顺序，组内按拖拽顺序；未列入的排组尾。"""
+        pool2 = self._pool_n(1, domain="www.workbuddy.ai", prefix="wb")
+        docs = list(self._pool_n(3).documents.values()) + list(pool2.documents.values())
+        from wbspy.pool import AccountPool
+        pool3 = AccountPool(docs)
+        with self._cfg(account_order={"buddy:cn": ["ou2", "ou0"]}):
+            out = [d.uid for d in pool3._priority_sorted(docs)]
+            # buddy 组：ou2、ou0（拖拽序）、ou1（未列入排尾）；workbuddy 组保持后置
+            self.assertEqual(out, ["ou2", "ou0", "ou1", "wb0"])
+        with self._cfg():
+            out = [d.uid for d in pool3._priority_sorted(docs)]  # 无顺序表 → 原序
+            self.assertEqual(out, [d.uid for d in docs])
+
+    def test_accounts_order_endpoint(self):
+        from unittest.mock import patch
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        from fastapi.testclient import TestClient
+        pool = self._pool_n(2)
+        c = TestClient(create_web_app(pool, api_key=""))
+        with patch.object(pool, "set_priority_order") as mock_set:
+            r = c.post("/api/accounts/order", json={"group": "buddy:cn",
+                                                    "uids": ["ou1", "ou0"]})
+            self.assertEqual(r.status_code, 200)
+            mock_set.assert_called_once_with("buddy:cn", ["ou1", "ou0"])
+        # 非法参数走真校验（mock 外）→ 400
+        r = c.post("/api/accounts/order", json={"group": "", "uids": []})
+        self.assertEqual(r.status_code, 400)
+        r = c.post("/api/accounts/order", json={"group": "buddy:cn", "uids": "not-a-list"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_accounts_endpoint_carries_group_and_credits(self):
+        from unittest.mock import patch
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        from fastapi.testclient import TestClient
+        pool = self._pool_n(2)
+        c = TestClient(create_web_app(pool, api_key=""))
+        with self._cfg(credits_cache={"ou0": {"total": 42, "at": 1}}), \
+             patch("wbspy.webui.load_accounts",
+                   return_value=list(pool.documents.values())):
+            r = c.get("/api/accounts")
+        self.assertEqual(r.status_code, 200)
+        rows = {a["uid"]: a for a in r.json()["data"]}
+        self.assertEqual(rows["ou0"]["group"], "buddy:cn")
+        self.assertEqual(rows["ou0"]["credits"], 42)
+        self.assertIsNone(rows["ou1"]["credits"])     # 从未查询 → None
+
+    def test_settings_endpoints_roundtrip_threshold(self):
+        from unittest.mock import patch
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        from fastapi.testclient import TestClient
+        pool = self._pool_n(1)
+        c = TestClient(create_web_app(pool, api_key=""), raise_server_exceptions=True)
+        cfg = {"gateway": {}}
+        from wbspy import store
+        with patch.object(store, "load_config", side_effect=lambda: {**cfg}), \
+             patch.object(store, "save_config", side_effect=lambda c: cfg.update(c)):
+            r = c.post("/api/settings/gateway", json={"priority_threshold": 200})
+            if r.status_code != 200:
+                logs = list(getattr(c.app.state, "auto_log", []))[-5:]
+                raise AssertionError(f"POST 500 响应体: {r.text[:200]}；app 日志: {logs}")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["data"]["priority_threshold"], 200.0)
+            self.assertEqual(cfg["gateway"]["priority_threshold"], 200.0)
+            r = c.post("/api/settings/gateway", json={"priority_threshold": -5})
+            self.assertEqual(r.status_code, 400)
+            r = c.post("/api/settings/gateway", json={"distribution": "nope"})
+            self.assertEqual(r.status_code, 400)
+            r = c.post("/api/settings/gateway", json={"distribution": "priority"})
+            self.assertEqual(r.json()["data"]["distribution"], "priority")

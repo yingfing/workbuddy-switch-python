@@ -30,7 +30,11 @@ class _FakeResp:
         return self._payload
 
 
-def _fake_github(tag="v0.2.12", tags=None, main_sha=None, fail=()):
+CUR_TAG = "v" + __version__          # 动态跟随当前版本，发版后 mock 仍自洽
+
+
+def _fake_github(tag=None, tags=None, main_sha=None, fail=()):
+    tag = tag or CUR_TAG
     """按请求路径打桩 releases/latest / tags / commits/main 三端点。"""
     tags = tags if tags is not None else [tag]
 
@@ -118,7 +122,7 @@ def test_ghost_version_flagged(monkeypatch):
 
 def test_published_version_not_ghost(monkeypatch):
     monkeypatch.setattr(update.requests, "get",
-                        _fake_github(tag="v0.2.13", tags=["v0.2.13", "v0.2.12"]))
+                        _fake_github(tags=[CUR_TAG, "v0.2.1"]))
     r = update.check_update()
     assert r["ok"] and r["ghost"] is False
 
@@ -126,7 +130,7 @@ def test_published_version_not_ghost(monkeypatch):
 def test_aux_endpoints_fail_gracefully(monkeypatch):
     """tags/commits 不可达 → ghost/main_sync 降级为未知，主结果不受影响。"""
     monkeypatch.setattr(update.requests, "get",
-                        _fake_github(tag="v0.2.13", fail=("tags", "commits")))
+                        _fake_github(fail=("tags", "commits")))
     r = update.check_update()
     assert r["ok"] and r["ghost"] is None and r["main_sync"] == "unknown"
 
@@ -134,7 +138,7 @@ def test_aux_endpoints_fail_gracefully(monkeypatch):
 def test_main_ahead_detected(monkeypatch):
     """git 安装且本地 HEAD ≠ 远端 main → main_sync='ahead'（有未发版修复）。"""
     monkeypatch.setattr(update.requests, "get",
-                        _fake_github(tag="v0.2.13", tags=["v0.2.13"],
+                        _fake_github(tags=[CUR_TAG],
                                      main_sha="abcdef1234567890"))
     monkeypatch.setattr(update, "_local_head", lambda *a, **k: "1110000")
     r = update.check_update()
@@ -144,7 +148,7 @@ def test_main_ahead_detected(monkeypatch):
 
 def test_main_same_when_synced(monkeypatch):
     monkeypatch.setattr(update.requests, "get",
-                        _fake_github(tag="v0.2.13", tags=["v0.2.13"],
+                        _fake_github(tags=[CUR_TAG],
                                      main_sha="abcdef1"))
     monkeypatch.setattr(update, "_local_head", lambda *a, **k: "abcdef1")
     r = update.check_update()
@@ -158,10 +162,10 @@ def test_channel_reused_for_aux_requests(monkeypatch):
     def fake_get(url, **k):
         calls.append(url)
         if "/tags" in url:
-            return _FakeResp([{"name": "v0.2.13"}])
+            return _FakeResp([{"name": CUR_TAG}])
         if "/commits/main" in url:
             return _FakeResp({"sha": "aabbccddeeff"})
-        return _FakeResp("v0.2.13")
+        return _FakeResp(CUR_TAG)
 
     def no_probe(*a, **k):
         raise AssertionError("通道已建立后不应再探测候选 IP")

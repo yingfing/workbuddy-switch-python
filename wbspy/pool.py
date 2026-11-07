@@ -157,6 +157,146 @@ class AccountPool:
             v = "round-robin"
         return v if v in DISTRIBUTIONS else "round-robin"
 
+    # -- 账号优先级（同渠道同地区分组内拖拽排序） --------------------------------
+
+    @staticmethod
+    def _group_key(doc: Document) -> str:
+        """账号分组键：同渠道 + 同地区才算「同种账号」——优先级只在组内生效
+        （不同地区/渠道的账号模型目录不同，本就没有先后可言）。"""
+        return f"{doc.channel_id or '?'}:{doc.region or ''}"
+
+    def _order_map(self) -> dict:
+        """用户拖拽的组内账号顺序（config gateway.account_order，热读）。"""
+        try:
+            from .store import load_config
+            v = (load_config().get("gateway") or {}).get("account_order")
+        except Exception:
+            return {}
+        return v if isinstance(v, dict) else {}
+
+    def set_priority_order(self, group: str, uids: list) -> None:
+        """保存某分组的账号顺序（网页拖拽排序落盘，priority 策略下即时生效）。"""
+        from .store import load_config, save_config
+        if not isinstance(group, str) or not group:
+            raise ValueError("分组键不能为空")
+        if not isinstance(uids, list) or not all(isinstance(u, str) for u in uids):
+            raise ValueError("顺序须为 uid 字符串列表")
+        cfg = load_config()
+        gw = cfg.setdefault("gateway", {})
+        orders = gw.get("account_order")
+        orders = orders if isinstance(orders, dict) else {}
+        orders[group] = [str(u) for u in uids]
+        gw["account_order"] = orders
+        save_config(cfg)
+
+    def _priority_sorted(self, candidates: list) -> list:
+        """priority 策略的候选排序：组间保持入库顺序，组内按用户拖拽顺序。
+
+        未列入顺序表的账号排在本组末尾（组内相对稳定）；顺序表热读，
+        网页拖完下一发请求即生效。
+        """
+        if len(candidates) < 2:
+            return candidates
+        order_map = self._order_map()
+        group_seq: dict[str, int] = {}
+        for d in candidates:
+            group_seq.setdefault(self._group_key(d), len(group_seq))
+
+        def _key(t):
+            i, d = t
+            lst = order_map.get(self._group_key(d))
+            if isinstance(lst, list) and d.uid in lst:
+                inner = lst.index(d.uid)
+            else:
+                inner = (len(lst) if isinstance(lst, list) else 0) + i
+            return (group_seq[self._group_key(d)], inner, i)
+
+        return [d for _, d in sorted(enumerate(candidates), key=_key)]
+
+    # -- priority 策略的积分感知降级 ------------------------------------------
+    # 用户语义：固定用优先级最高的账号，积分烧到阈值以下就换「还活着里积分
+    # 最高的」继续用，直到全部账号都低于阈值。实现为 pick 时的过滤规则，
+    # 不需要后台任务——每次取号现查缓存即可。
+
+    def _priority_threshold(self) -> float:
+        """积分降级阈值（config gateway.priority_threshold，默认 100；<=0 关闭感知）。"""
+        try:
+            from .store import load_config
+            v = (load_config().get("gateway") or {}).get("priority_threshold")
+        except Exception:
+            return 100.0
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 100.0
+
+    @staticmethod
+    def set_priority_threshold(value) -> float:
+        from .store import load_config, save_config
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("阈值须为数字")
+        if v < 0:
+            raise ValueError("阈值不能为负（0 = 关闭积分感知）")
+        cfg = load_config()
+        cfg.setdefault("gateway", {})["priority_threshold"] = v
+        save_config(cfg)
+        return v
+
+    def _credits_cache(self) -> dict:
+        """「查询余额」落盘的积分缓存（config gateway.credits_cache，热读）。"""
+        try:
+            from .store import load_config
+            v = (load_config().get("gateway") or {}).get("credits_cache")
+        except Exception:
+            return {}
+        return v if isinstance(v, dict) else {}
+
+    def remember_credits(self, uid: str, total) -> None:
+        """缓存某账号的剩余积分（网页「查询余额」时调用，重启不丢）。"""
+        if not isinstance(total, (int, float)) or isinstance(total, bool):
+            return
+        from .store import load_config, save_config
+        cfg = load_config()
+        cache = cfg.setdefault("gateway", {}).get("credits_cache")
+        cache = cache if isinstance(cache, dict) else {}
+        cache[str(uid)] = {"total": total, "at": time.time()}
+        cfg["gateway"]["credits_cache"] = cache
+        save_config(cfg)
+
+    def _pick_by_credits(self, ordered: list) -> Document:
+        """priority 策略取号（ordered 已按拖拽顺序排好，同组内）。
+
+        用户语义：固定用优先级最高的账号；其积分烧穿阈值 → 换剩余账号里
+        「当前积分最高」的继续固定用；直到全部低于阈值。规则：
+        - 已知积分且 >= 阈值 → 达标，取其中积分最高者（积分单调递减，
+          「最高」天然稳定，第一名烧穿前不会抖动切换）；
+        - 没查过余额（或脏数据）→ 未知，排在已知达标之后、按拖拽顺序——
+          不查余额就纯按拖拽优先级用，查过余额才启用智能降级；
+        - 已知且低于阈值 → 跳过；
+        - 全部低于阈值 → 取已知积分最高者继续用（最耐用），服务不断供；
+          下次「查询余额」刷新缓存后自动恢复正常的降级节奏。
+        """
+        thr = self._priority_threshold()
+        if thr <= 0:
+            return ordered[0]
+        cache = self._credits_cache()
+        known: list[tuple[float, int, Document]] = []      # (积分, 拖拽序, 账号)
+        unknown: list[Document] = []
+        for i, d in enumerate(ordered):
+            rec = cache.get(d.uid)
+            total = rec.get("total") if isinstance(rec, dict) else None
+            if isinstance(total, (int, float)) and not isinstance(total, bool):
+                known.append((float(total), i, d))
+            else:
+                unknown.append(d)
+        ok = [t for t in known if t[0] >= thr]
+        if ok:
+            return max(ok, key=lambda t: (t[0], -t[1]))[2]  # 达标里积分最高
+        if unknown:
+            return unknown[0]                               # 无达标已知号 → 拖拽序第一个未知
+        if known:
+            return max(known, key=lambda t: (t[0], -t[1]))[2]  # 全烧穿 → 积分最高者顶住
+        return ordered[0]
+
     def _sweep_sessions(self, now: float) -> None:
         for s in [s for s, (_, at) in self.session_map.items() if now - at > SESSION_TTL]:
             del self.session_map[s]
@@ -196,7 +336,10 @@ class AccountPool:
 
         strategy = self._distribution()
         if strategy == "priority":
-            doc = candidates[0]                       # 按入库顺序，用完一个再换下一个
+            candidates = self._priority_sorted(candidates)
+            # 拖拽顺序 + 积分感知：固定优先账号，低于阈值自动降到下一个；
+            # 全部低于阈值回退队首（服务不断供），下次「查询余额」后自动恢复
+            doc = self._pick_by_credits(candidates)
         elif strategy == "balanced":
             # 随机加权、偏向闲置久的：距上次使用越久权重越高
             weights = [1.0 + now - self.last_used.get(_key(d), 0) for d in candidates]
@@ -379,12 +522,18 @@ class AccountPool:
     # -- 后台 token 自动刷新 -----------------------------------------------------
 
     def start_auto_refresh(self, interval_sec: int = 300) -> threading.Thread:
-        """后台循环：凭据临期（<10 分钟）或已过期即用 refresh_token 续期。"""
+        """后台循环：凭据临期（<10 分钟）或已过期即用 refresh_token 续期。
+
+        线程可经 stop_auto_refresh() 优雅停止（等待用 Event 替代 sleep，
+        测试与热重启都能确定性收线，不用再靠杀线程）。
+        """
+        stop = threading.Event()
+        self._refresh_stop = stop
 
         def worker():  # pragma: no cover
             import json as _json
             from .store import save_account
-            while True:
+            while not stop.is_set():
                 for k, doc in list(self.documents.items()):
                     if "refresh" not in doc.capabilities or not doc.refresh_token or doc.protected_token:
                         continue             # 渠道未声明 refresh 能力 → 不代为续期
@@ -410,8 +559,14 @@ class AccountPool:
                         self._emit(f"「{fresh.label()}」token 已自动续期")
                     except Exception as exc:
                         self._emit(f"「{doc.label()}」token 自动续期失败：{exc}（下轮重试，多次失败请重新登录）")
-                time.sleep(interval_sec)
+                stop.wait(interval_sec)               # 可中断的 sleep
 
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
         return thread
+
+    def stop_auto_refresh(self) -> None:
+        """停止后台续期线程（下轮等待立即返回，循环收尾退出）。"""
+        stop = getattr(self, "_refresh_stop", None)
+        if stop is not None:
+            stop.set()

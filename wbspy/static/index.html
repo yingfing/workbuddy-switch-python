@@ -254,8 +254,22 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
     <div class="card">
       <h2>账号库 <span class="tag" id="accCount"></span>
         <button class="btn sm ghost" onclick="loadCredits(this)" title="逐账号向上游查询剩余积分（只读）">查询余额</button></h2>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0 8px;font-size:12px">
+        <span>取号策略：</span>
+        <select id="distSel" onchange="setDistribution(this.value)" style="padding:3px 6px">
+          <option value="round-robin">轮换（默认）</option>
+          <option value="priority">按优先级</option>
+          <option value="balanced">均衡负载</option>
+        </select>
+        <span id="thrWrap" hidden>积分低于
+          <input id="thrInput" type="number" min="0" step="10" style="width:64px;padding:2px 5px" value="100">
+          自动换积分最高的
+          <button class="btn sm" onclick="saveThreshold(this)">保存</button>
+        </span>
+        <span class="hint" style="margin:0" id="distHint">「按优先级」时固定用排最前的账号，积分烧穿阈值自动换积分最高的，直到全部低于阈值（组间互不影响）。先<b>查询余额</b>再启用降级更准。</span>
+      </div>
       <table id="accTable"><thead><tr>
-        <th>状态</th><th>账号</th><th>渠道</th><th>地区</th><th>API</th><th>余额</th><th>操作</th>
+        <th style="width:24px" title="拖动调整优先级（仅同渠道同地区内）"></th><th>状态</th><th>账号</th><th>渠道</th><th>地区</th><th>API</th><th>余额</th><th>操作</th>
       </tr></thead><tbody></tbody></table>
       <div class="empty" id="accEmpty" hidden>账号库为空，去「登录」页添加账号</div>
     </div>
@@ -626,28 +640,118 @@ function channelName(id) {
 }
 
 // -- 账号 --
+let _thr = 100;                                   // 积分降级阈值（服务端回填）
 async function loadAccounts() {
-  const r = await api('/api/accounts');
+  const [r, gs] = await Promise.all([api('/api/accounts'), api('/api/settings/gateway')]);
   const list = r.data || [];
+  _thr = (gs.data && gs.data.priority_threshold) ?? 100;
+  const dist = (gs.data && gs.data.distribution) || 'round-robin';
+  $('#distSel').value = dist;
+  $('#thrWrap').hidden = dist !== 'priority';      // 阈值只在优先级策略下有意义
   $('#accCount').textContent = list.length + ' 个账号';
   $('#accEmpty').hidden = list.length > 0;
   $('#accTable').style.display = list.length ? '' : 'none';
   const qid = u => 'quota-' + String(u).replace(/[^a-zA-Z0-9-]/g, '');
-  const row = a => `<tr>
+  const row = a => {
+    const c = a.credits;
+    const low = typeof c === 'number' && c < _thr;
+    const cred = typeof c === 'number'
+      ? `<b style="${low ? 'color:var(--bad)' : ''}">${c}</b>${low ? ' ⚠低于阈值' : ''}` : '—';
+    const drag = dist === 'priority'
+      ? `<td class="drag-handle" title="拖动调整组内优先级" style="cursor:grab;user-select:none">☰</td>` : '<td></td>';
+    return `<tr draggable="${dist === 'priority'}" data-uid="${a.uid}" data-group="${a.group}">
+    ${drag}
     <td><span class="dot ${a.api_ready ? 'g' : (a.protected ? 'y' : 'r')}"></span>${
       a.api_ready ? '可用' : (a.protected ? '加密凭据' : '已过期')}</td>
     <td>${a.label}</td><td>${a.channel || a.domain || '—'}</td><td>${_regionText(a)}</td>
     <td>${a.api_ready ? '✓' : '—'}</td>
-    <td id="${qid(a.uid)}">—</td>
+    <td id="${qid(a.uid)}">${cred}</td>
     <td><button class="btn sm bad" onclick="rmAccount('${a.uid}','${a.domain || ''}')">移除</button></td>
   </tr>`;
-  // 按渠道分组：同渠道账号排在一起，组间插渠道标题行
+  };
+  // 按「渠道:地区」分组渲染（= 优先级分组，组内才可拖拽排序）
   const groups = {};
-  for (const a of list) (groups[a.channel || a.domain || '其他'] = groups[a.channel || a.domain || '其他'] || []).push(a);
-  $('#accTable tbody').innerHTML = Object.entries(groups).map(([ch, accs]) =>
-    `<tr><td colspan="7" style="background:var(--panel-2,#f6f6f6);font-weight:600;font-size:12px;padding:5px 8px">
-       ${ch} <span class="tag">${accs.length} 个</span></td></tr>`
+  for (const a of list) (groups[a.group || a.channel || '其他'] = groups[a.group || a.channel || '其他'] || []).push(a);
+  $('#accTable tbody').innerHTML = Object.entries(groups).map(([g, accs]) =>
+    `<tr><td colspan="8" style="background:var(--panel-2,#f6f6f6);font-weight:600;font-size:12px;padding:5px 8px">
+       ${g.replace(':', ' · ')} <span class="tag">${accs.length} 个</span>${
+       dist === 'priority' && accs.length > 1 ? ' <span class="tag">拖 ☰ 调优先级</span>' : ''}</td></tr>`
     + accs.map(row).join('')).join('');
+  bindAccDrag();
+}
+
+// -- 账号拖拽排序（仅同分组内；drop 后按新顺序落盘） -------------------------
+function bindAccDrag() {
+  const tbody = document.querySelector('#accTable tbody');
+  let dragged = null;
+  tbody.addEventListener('dragstart', e => {
+    const tr = e.target.closest('tr[draggable="true"]');
+    if (!tr) return;
+    dragged = tr; tr.style.opacity = '.4';
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  tbody.addEventListener('dragend', () => {
+    if (dragged) dragged.style.opacity = '';
+    dragged = null;
+    [...tbody.querySelectorAll('tr')].forEach(t => t.style.borderTop = '');
+  });
+  tbody.addEventListener('dragover', e => {
+    if (!dragged) return;
+    const over = e.target.closest('tr[data-uid]');
+    if (!over || over === dragged || over.dataset.group !== dragged.dataset.group) return;
+    e.preventDefault();                            // 允许 drop（仅同组）
+    [...tbody.querySelectorAll('tr')].forEach(t => { if (t !== dragged) t.style.borderTop = ''; });
+    const rect = over.getBoundingClientRect();
+    const before = e.clientY < rect.top + rect.height / 2;
+    over.style.borderTop = before ? '2px solid #4a90d9' : '';
+    over._dropBefore = before;
+  });
+  tbody.addEventListener('drop', async e => {
+    const over = e.target.closest('tr[data-uid]');
+    if (!dragged || !over || over === dragged || over.dataset.group !== dragged.dataset.group) return;
+    e.preventDefault();
+    const group = dragged.dataset.group;
+    // 重组该组当前 DOM 顺序 → 拖拽行插入目标位置
+    const rows = [...tbody.querySelectorAll(`tr[data-group="${CSS.escape(group)}"]`)];
+    if (over._dropBefore) tbody.insertBefore(dragged, over);
+    else tbody.insertBefore(dragged, over.nextSibling);
+    over._dropTarget = false;
+    const uids = rows.filter(t => t !== dragged)
+      .reduce((acc, t) => { acc.push(t.dataset.uid);
+        if (t === over && !over._dropBefore) acc.push(dragged.dataset.uid);
+        if (t === over && over._dropBefore) acc.splice(acc.indexOf(t.dataset.uid), 0, dragged.dataset.uid);
+        return acc; }, []);
+    const r = await api('/api/accounts/order', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({group, uids})
+    });
+    r.ok ? toast('优先级已保存，立即生效') : toast(r.error || '保存失败', false);
+    dragged.style.opacity = '';
+    dragged = null;
+  });
+}
+async function setDistribution(v) {
+  const r = await api('/api/settings/gateway', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({distribution: v})
+  });
+  if (!r.ok) return toast(r.error || '切换失败', false);
+  toast(v === 'priority' ? '已切换「按优先级」：拖 ☰ 排顺序，查余额后启用积分降级'
+        : v === 'balanced' ? '已切换「均衡负载」' : '已切换「轮换」');
+  loadAccounts();                                  // 重渲染（把手列/分组标题随策略变化）
+}
+async function saveThreshold(btn) {
+  await busy(btn, async () => {
+    const v = $('#thrInput').value;
+    const r = await api('/api/settings/gateway', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({priority_threshold: +v})
+    });
+    if (!r.ok) return toast(r.error || '保存失败', false);
+    _thr = r.data.priority_threshold;
+    toast(_thr > 0 ? `积分降级阈值已保存：${_thr}（热生效）` : '已关闭积分感知（阈值 0）');
+    loadAccounts();                                // 重渲染标红
+  });
 }
 async function loadCredits(btn) {
   const old = btn.textContent; btn.textContent = '查询中…'; btn.disabled = true;
@@ -660,7 +764,9 @@ async function loadCredits(btn) {
       const c = row.credits || {};
       const exp = c.nearest_expiry
         ? `<span class="tag">最快 ${new Date(c.nearest_expiry).toLocaleDateString()} 到期</span>` : '';
-      cell.innerHTML = `<b>${c.total ?? 0}</b> 积分 ${exp}`;
+      const t = typeof c.total === 'number' ? c.total : 0;
+      const low = t < _thr;
+      cell.innerHTML = `<b style="${low ? 'color:var(--bad)' : ''}">${t}</b> 积分 ${exp}${low ? ' ⚠低于阈值' : ''}`;
       cell.title = (c.packages || []).map(p =>
         `${p.name}: 剩 ${p.remain}/${p.size}${p.monthly ? '（月度）' : ''}`).join('\n') || '无有效套餐';
     }

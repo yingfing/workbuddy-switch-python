@@ -198,12 +198,52 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
 
     @app.get("/api/accounts")
     def api_accounts():
-        return _ok([{
-            "uid": d.uid, "label": d.label(), "region": d.region,
-            "api_ready": d.api_ready, "protected": d.protected_token,
-            "expires_at": d.token_expires_at, "domain": d.domain,
-            "channel": d.channel_name,
-        } for d in load_accounts()])
+        rows = []
+        credit_cache = pool._credits_cache()
+        for d in load_accounts():
+            rec = credit_cache.get(d.uid)
+            total = rec.get("total") if isinstance(rec, dict) else None
+            rows.append({
+                "uid": d.uid, "label": d.label(), "region": d.region,
+                "api_ready": d.api_ready, "protected": d.protected_token,
+                "expires_at": d.token_expires_at, "domain": d.domain,
+                "channel": d.channel_name,
+                # 分组键：同渠道同地区才允许拖拽排序（优先级只组内生效）
+                "group": f"{d.channel_id or '?'}:{d.region or ''}",
+                # 「查询余额」落盘的积分缓存（None = 从未查询）
+                "credits": total if isinstance(total, (int, float))
+                           and not isinstance(total, bool) else None,
+            })
+        # 组内按用户拖拽保存的顺序返回（组间保持原顺序）——前端展示顺序
+        # 即拖拽基准，拖完 POST 回来即可
+        order_map = pool._order_map()
+        groups: dict[str, list] = {}
+        for a in rows:
+            groups.setdefault(a["group"], []).append(a)
+        out: list = []
+        for g, accs in groups.items():
+            lst = order_map.get(g)
+            if isinstance(lst, list) and lst:
+                accs.sort(key=lambda a: lst.index(a["uid"])
+                          if a["uid"] in lst else len(lst))
+            out.extend(accs)
+        return _ok(out)
+
+    @app.post("/api/accounts/order")
+    async def accounts_order(request: Request):
+        """拖拽排序落盘：body {group, uids}。priority 策略下组内按此顺序取号。"""
+        body = await request.json()
+        try:
+            pool.set_priority_order(str(body.get("group") or ""),
+                                    body.get("uids"))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, str(exc))
+        uids = body.get("uids") or []
+        preview = (" → ".join(map(str, uids[:8]))
+                   + ("…" if len(uids) > 8 else "")) \
+            if isinstance(uids, list) and uids else "（空）"
+        _log(f"账号优先级已保存（{body.get('group')}）：{preview}")
+        return _ok()
 
     @app.delete("/api/accounts/{uid}")
     def api_account_remove(uid: str, domain: str = ""):
@@ -461,7 +501,10 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
                 row.update(error="加密凭据，请重新网页授权后查询")
             else:
                 try:
-                    row.update(credits=WorkBuddyClient(d).credits())
+                    credits = WorkBuddyClient(d).credits()
+                    row.update(credits=credits)
+                    # 落盘缓存 → priority 策略的积分降级、账号列表阈值标红都用它
+                    pool.remember_credits(d.uid, credits.get("total"))
                 except Exception as exc:
                     row.update(error=str(exc)[:120])
             out.append(row)
@@ -550,16 +593,23 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
             "enabled": bool(getattr(app.state, "gw_enabled", True)),
             "aggregate": bool(getattr(app.state, "gw_aggregate", True)),
             "vision": bool(getattr(app.state, "gw_vision", True)),
+            "distribution": str((cfg.get("gateway") or {}).get("distribution")
+                                or "round-robin"),
+            "priority_threshold": pool._priority_threshold(),
             "port": (cfg.get("web") or {}).get("port") or "",
             "current_port": cur,
         })
 
     @app.post("/api/settings/gateway")
     async def gateway_settings_set(request: Request):
-        """body: {enabled?: bool, aggregate?: bool, port?: str|int}
+        """body: {enabled?: bool, aggregate?: bool, vision?: bool,
+                  distribution?: str, priority_threshold?: number,
+                  port?: str|int}
 
         enabled  → 写 config gateway.enabled 并热生效（/v1 立即 404 或恢复）；
         aggregate → 写 config gateway.aggregate 并热生效（/v1/models 是否注入聚合渠道模型）；
+        distribution → 账号分配策略（round-robin/priority/balanced），热生效；
+        priority_threshold → priority 策略的积分降级阈值（0 = 关闭积分感知），热生效；
         port     → 校验 + 试绑检测（自己占着的当前端口除外）+ 落盘 config web.port，
                    重启服务后生效（restart_required=true 提示前端引导重启）。
         """
@@ -569,8 +619,29 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         result = {"enabled": bool(getattr(app.state, "gw_enabled", True)),
                   "aggregate": bool(getattr(app.state, "gw_aggregate", True)),
                   "vision": bool(getattr(app.state, "gw_vision", True)),
+                  "distribution": str((cfg.get("gateway") or {}).get("distribution")
+                                      or "round-robin"),
+                  "priority_threshold": pool._priority_threshold(),
                   "port": (cfg.get("web") or {}).get("port") or "",
                   "restart_required": False}
+
+        if "distribution" in body:
+            from .pool import DISTRIBUTIONS
+            dist = str(body.get("distribution") or "round-robin")
+            if dist not in DISTRIBUTIONS:
+                raise HTTPException(400, f"分发策略不认识（可选：{'/'.join(DISTRIBUTIONS)}）")
+            cfg.setdefault("gateway", {})["distribution"] = dist
+            result["distribution"] = dist
+            _log(f"账号分配策略：{dist}（热生效，下一次取号即按新策略）。")
+
+        if "priority_threshold" in body:
+            try:
+                thr = pool.set_priority_threshold(body.get("priority_threshold"))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            result["priority_threshold"] = thr
+            _log(f"积分降级阈值：{thr:g}（priority 策略热生效）"
+                 + ("，已关闭积分感知" if thr <= 0 else "") + "。")
 
         if "enabled" in body:
             enabled = bool(body.get("enabled"))
