@@ -1811,3 +1811,43 @@ class TestTokenExpiryGuard(unittest.TestCase):
         mults = [m.get("credit_multiplier") for m in r.json()["data"]
                  if m.get("credit_multiplier") is not None]
         self.assertTrue(all(isinstance(v, (int, float)) for v in mults))
+
+
+class TestGlobalLoginFlow(unittest.TestCase):
+    """WorkBuddy 国际版网页登录：白名单键名错位曾致 KeyError('workbuddy-ai')。
+
+    网页流程 _validate_login_url(url, platform) 传上游 platform 名
+    （workbuddy-ai），而 LOGIN_HOSTS 只收录 provider 名
+    （workbuddy-global）→ KeyError，管理端只见一行带引号的字符串。
+    CLI 路径传 provider 名，因此从未暴露。修复：白名单收录 platform
+    别名 + 未收录 provider 明确报 RuntimeError。
+    """
+
+    def test_validate_login_url_accepts_platform_alias(self):
+        from wbspy.login import _validate_login_url
+        url = "https://www.workbuddy.ai/login?state=abc"
+        self.assertEqual(_validate_login_url(url, "workbuddy-ai"), url)      # platform 别名
+        self.assertEqual(_validate_login_url(url, "workbuddy-global"), url)  # provider 本名
+        with self.assertRaises(RuntimeError) as cm:                          # 未收录 → 明确报错
+            _validate_login_url(url, "no-such-provider")
+        self.assertIn("白名单", str(cm.exception))
+
+    def test_international_start_does_not_crash(self):
+        from unittest.mock import MagicMock, patch
+        from wbspy.channels import get_channel
+        from wbspy.login_flows import workbuddy as wb_flow
+        from wbspy.login_flows.core import Ticket
+
+        resp = MagicMock(ok=True)
+        resp.json.return_value = {"data": {
+            "state": "s" * 20,
+            "authUrl": "https://www.workbuddy.ai/login?state=xyz"}}
+        channel = get_channel("workbuddy")
+        self.assertEqual(channel.name, "WorkBuddy 国际版")
+        ticket = Ticket(id="t1", channel_id="workbuddy", method="browser",
+                        expires_at=time.time() + 60)
+        with patch.object(wb_flow.requests, "post", return_value=resp):
+            wb_flow.start(channel, ticket)          # 旧代码在此 KeyError('workbuddy-ai')
+        self.assertEqual(ticket.auth_url, "https://www.workbuddy.ai/login?state=xyz")
+        self.assertEqual(ticket.platform, "workbuddy-ai")
+        self.assertTrue(ticket.qr_svg)              # 二维码同步生成

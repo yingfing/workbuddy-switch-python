@@ -35,9 +35,12 @@ LOGIN_TIMEOUT_SEC = 300
 POLL_INTERVAL_SEC = 3
 
 # 登录 URL 的白名单校验（对应原版 officialLoginURL）
+# 键兼容两种叫法：provider（workbuddy / workbuddy-global）与
+# 上游 platform（workbuddy / workbuddy-ai）——网页登录流程按 platform 传入。
 LOGIN_HOSTS = {
     "workbuddy": {"www.codebuddy.cn", "www.workbuddy.cn"},
     "workbuddy-global": {"www.workbuddy.ai", "workbuddy.ai"},
+    "workbuddy-ai": {"www.workbuddy.ai", "workbuddy.ai"},
 }
 
 
@@ -56,7 +59,11 @@ def _render_qr_in_terminal(content: str) -> None:
 
 def _validate_login_url(url: str, provider: str) -> str:
     parsed = urlparse(url)
-    hosts = LOGIN_HOSTS[provider]
+    hosts = LOGIN_HOSTS.get(provider)
+    if hosts is None:
+        # 未收录的 provider 名：明确报错，绝不裸抛 KeyError（否则管理端
+        # 只会看到一行带引号的字符串，无法定位）
+        raise RuntimeError(f"登录方式未收录域名白名单（provider={provider}）。")
     if parsed.scheme != "https" or parsed.hostname not in hosts or \
             parsed.username or parsed.password or parsed.port:
         raise ValueError("登录服务返回了无法信任的授权地址。")
