@@ -82,7 +82,9 @@ def _parse_ms(raw) -> float | None:
     绝不能让余额查询整个炸掉。
     """
     if isinstance(raw, (int, float)) and raw > 1e12:
-        return float(raw)
+        # 32 位平台（armhf 盒子）time_t 上限 2038 年：超过 2^31-1 秒的毫秒值
+        # 无法参与任何本地时间运算，统一按「无过期时间」处理，绝不往下游传。
+        return None if raw > (2**31 - 1) * 1000 else float(raw)
     if isinstance(raw, str) and raw:
         try:
             return time.mktime(time.strptime(raw, "%Y-%m-%d %H:%M:%S")) * 1000
@@ -367,7 +369,10 @@ class WorkBuddyClient:
         origin = self.doc.api
         now = time.localtime()
         fmt = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", t)          # noqa: E731
-        end = time.localtime(time.time() + 365 * 101 * 86400)
+        # 范围终点 +8 年（≈2034）：必须落在 32 位 time_t（2038 上限）内，
+        # 否则 armhf 盒子上 time.localtime 直接 OverflowError——查询还没发就炸。
+        # 套餐最长一年期，8 年对查询窗口绰绰有余。
+        end = time.localtime(time.time() + 8 * 365 * 86400)
         resp = self.http.post(
             f"{origin}/v2/billing/meter/get-user-resource",
             headers=self._meter_headers(),

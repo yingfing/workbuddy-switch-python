@@ -63,7 +63,7 @@ def poll(ticket: Ticket) -> "Document | None":
         try:
             exp_ms = int(time.mktime(time.strptime(
                 expires_raw[:19], "%Y-%m-%dT%H:%M:%S")) * 1000)
-        except ValueError:
+        except (ValueError, OverflowError, OSError):
             exp_ms = None
     doc = parse_auth({
         "account": {"uid": str(cred.get("user_id") or cred.get("domain_id")

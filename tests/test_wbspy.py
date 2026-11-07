@@ -1413,3 +1413,37 @@ class TestGatewayDebug(unittest.TestCase):
         self.assertTrue(app.state.req_log)
         self.assertEqual(c.delete("/api/debug-logs").status_code, 200)
         self.assertEqual(app.state.req_log, [])
+
+
+class TestCreditsRequestRange(unittest.TestCase):
+    """余额查询请求本身必须 32 位安全：范围终点 ≈2127 年会让 armhf 盒子上
+    time.localtime 直接 OverflowError（用户实测第二次余额全挂的根因）。"""
+
+    def test_query_window_within_32bit_time_t(self):
+        from unittest.mock import patch, MagicMock
+        from wbspy.document import parse_auth
+        from wbspy.upstream import WorkBuddyClient
+        doc = parse_auth({"account": {"uid": "rng", "nickname": "n"},
+                          "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}})
+        client = WorkBuddyClient(doc)
+        captured: dict = {}
+        resp = MagicMock(ok=True, status_code=200)
+        resp.json.return_value = {"code": 0, "data": {"Response": {"Data": {"Accounts": []}}}}
+
+        def fake_post(url, **kw):
+            captured["body"] = kw.get("data", "")
+            return resp
+
+        with patch.object(client.http, "post", side_effect=fake_post):
+            client.credits()
+        end = captured["body"]
+        # PackageEndTimeRangeEnd 必须在 2038 年内（32 位 time_t 上限）
+        year = int(end.split('"PackageEndTimeRangeEnd": "')[1][:4])
+        self.assertLessEqual(year, 2037, f"查询窗口终点 {year} 年超出 32 位范围：{end}")
+
+    def test_parse_ms_clamps_beyond_32bit(self):
+        """超大毫秒时间戳（9999 年等）钳为 None——下游 localtime 不再有机会炸。"""
+        from wbspy.upstream import _parse_ms
+        self.assertIsNone(_parse_ms(253402300799000))            # 9999-12-31 ms
+        self.assertIsNone(_parse_ms(float(2**31 * 1000)))        # 恰好越过 2038
+        self.assertEqual(_parse_ms(1762400000000), 1762400000000)  # 正常值不受影响
