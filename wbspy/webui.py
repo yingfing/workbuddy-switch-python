@@ -590,11 +590,17 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
                 rec = cache.get(d.uid)
                 total = rec.get("total") if isinstance(rec, dict) else None
                 if thr > 0 and isinstance(total, (int, float)) and total < thr:
+                    # 渠道没有 checkin 能力（如国际版 workbuddy，后端无签到
+                    # 接口）→ 积分只能消耗不能自动补，「去领取」是误导
+                    can_checkin = "checkin" in (d.capabilities or ())
                     alerts.append({
                         "level": "warn",
                         "title": f"「{d.label()}」积分 {int(total)} 低于降级阈值 {int(thr)}",
-                        "action": "到「积分自动化」页领取额度，或在账号池页调低阈值",
-                        "tab": "auto"})
+                        "action": ("到「积分自动化」页领取额度，或在账号池页调低阈值"
+                                   if can_checkin else
+                                   "该渠道无签到接口，积分无法自动补给——"
+                                   "建议在账号池页调低该号阈值，用完即止"),
+                        "tab": "auto" if can_checkin else "accounts"})
         for lane, st in lanes.items():
             if st["total"] and not st["alive"]:
                 alerts.append({"level": "error",

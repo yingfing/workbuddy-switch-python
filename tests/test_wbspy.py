@@ -3499,3 +3499,39 @@ class TestContextOverflow(unittest.TestCase):
         pool.documents = {("u", "d"): doc}
         pool.apply_error(doc, err, "deepseek-v4.1-flash")
         self.assertEqual(len(pool.dead_until), 0)
+
+
+class TestHealthAlertText(unittest.TestCase):
+    """低积分提醒的 action 按渠道能力区分（国际版无签到 → 不误导）。"""
+
+    def _health(self, domain):
+        import tempfile
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.document import parse_auth
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        doc = parse_auth({"account": {"uid": "u1", "nickname": "测试号"},
+                          "auth": {"accessToken": "t", "domain": domain}})
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("wbspy.webui.load_config",
+                       lambda: {"gateway": {"priority_threshold": 100,
+                                            "credits_cache": {"u1": {"total": 25}}}}), \
+                 patch("wbspy.webui.load_accounts", return_value=[doc]):
+                c = TestClient(create_web_app(AccountPool([]), api_key=""))
+                return c.get("/api/health").json()["data"]
+
+    def test_checkin_channel_suggests_automation(self):
+        """国内版（有签到）→ 指引去积分自动化页。"""
+        data = self._health("www.codebuddy.cn")
+        hit = [a for a in data["alerts"] if "低于降级阈值" in a["title"]]
+        self.assertEqual(len(hit), 1)
+        self.assertIn("积分自动化", hit[0]["action"])
+
+    def test_no_checkin_channel_suggests_threshold(self):
+        """国际版（后端无签到接口）→ 指引调阈值，不提积分自动化。"""
+        data = self._health("www.workbuddy.ai")
+        hit = [a for a in data["alerts"] if "低于降级阈值" in a["title"]]
+        self.assertEqual(len(hit), 1)
+        self.assertIn("无法自动补给", hit[0]["action"])
+        self.assertNotIn("积分自动化", hit[0]["action"])
