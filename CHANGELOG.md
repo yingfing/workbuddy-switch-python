@@ -2,6 +2,17 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.24] — 2026-11-09
+
+### 新增
+- **Qoder 泳道接入：wasm 加密推理**。Qoder 是唯一「有账号但 501」的渠道，本版补齐对话能力：
+  - **协议逆向**：`api2.qoder.sh`（端点由 wasm 下发）`/algo/api/v2/service/pro/sse/agent_chat_generation`，请求需 `Bearer COSY.<载荷>.<签名>`（wasm 生成）+ 加密请求体；响应为明文信封（`data: {"body": "<inner OpenAI chunk>"}`）逐层剥开即标准 OpenAI SSE；
+  - **wasmtime 运行时**（`_qoder_wasm.py`）：wasmtime-py + 手写精简 glue（31 个 import 精确映射、对象表 free 链、getRandomValues 双签名、_GlobalShim 让 getrandom 走 Web 分支），离线完成 runtime_auth 字段生成 → context_new → 请求体加密全流程；
+  - **payload 规范**（`build_infer_payload`）：必带 `business:{type:"agent"}`（缺了路由故障节点）、model_config 10 字段、顶层 tools 空数组、system 拎出顶层、history 过滤 system 消息；
+  - **流式适配**（`qoder_stream.py`）：信封逐行解包 → OpenAI SSE；流内业务错误转为内容 chunk 提示（对齐 zcode 策略）；
+  - **模型目录**：国际 17 / 国内 14 静态表接入泳道，网关 `/v1/models` 聚合自动含 Qoder 泳道模型（lane 判定已有）；
+  - **平台边界（诚实声明）**：wasmtime 在 armv7/armv6 无 wheel，pyproject 依赖带 platform marker 排除；此类平台（含玩客云 OneCloud）Qoder 泳道降级返回 501 并说明原因，其余渠道不受影响。
+
 ## [0.2.23] — 2026-11-08
 
 ### 修复

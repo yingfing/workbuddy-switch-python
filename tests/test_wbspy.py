@@ -485,7 +485,7 @@ class TestCapabilities(unittest.TestCase):
             doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
                               "auth": {"accessToken": "t", "domain": domain}})
             self.assertEqual(doc.capabilities, frozenset(), domain)
-        # qoder 声明 chat/models（目录可见 + 对话明确 501），但无 refresh/credits
+        # qoder 声明 chat/models（目录可见 + wasm 加密推理），但无 refresh/credits
         qd = parse_auth({"account": {"uid": "u", "nickname": "n"},
                          "auth": {"accessToken": "t", "domain": "qoder.cn"}})
         self.assertEqual(qd.capabilities, frozenset({"chat", "models"}))
@@ -1902,35 +1902,97 @@ class TestQoderLane(unittest.TestCase):
         self.assertIsInstance(_client_for(self._doc("qoder")), QoderClient)
         self.assertIsInstance(_client_for(self._doc("qodercn")), QoderClient)
 
-    def test_chat_reports_unsupported_not_workbuddy(self):
-        """qoder: 模型对话 → 明确 501，绝不误投 WorkBuddy 端点，也不换号。"""
+    def test_chat_routes_encrypted_infer(self):
+        """qoder: 模型对话 → wasm COSY 加密端点（v0.2.24 起真实接入）。"""
         from unittest.mock import patch
         from wbspy.pool import AccountPool
-        from wbspy.upstream import UpstreamError
+        from wbspy.qoder import QoderClient
         doc = self._doc("qoder")
         with patch("wbspy.store.save_account", lambda d: None):
             pool = AccountPool([doc])
-        with self.assertRaises(UpstreamError) as cm:
-            pool.clients[(doc.storage_scope, doc.uid)].chat({"model": "auto"})
-        self.assertEqual(cm.exception.status, 501)
-        self.assertIn("尚未在本版接入", cm.exception.message)
-        # 501 非上游 ≥500（upstream_status=0）且 kind=server → 不冷却不换号
-        pool.apply_error(doc, cm.exception, "auto")
-        self.assertEqual(len(pool.cooldowns._until), 0)
+        client = pool.clients[(doc.storage_scope, doc.uid)]
+        self.assertIsInstance(client, QoderClient)
+        # prepare 离线可跑（纯 wasm 计算）：拿到加密 URL + COSY 签名 + 密文
+        req = client.prepare({"model": "auto", "messages": [
+            {"role": "user", "content": "hi"}]})
+        self.assertIn("/algo/api/v2/service/pro/sse/agent_chat_generation", req["url"])
+        self.assertTrue(str(req["headers"].get("Authorization", ""))
+                        .startswith("Bearer COSY."))
+        self.assertGreater(len(req["body"]), 0)
+
+    def test_chat_stream_end_to_end_mocked(self):
+        """chat：信封流剥壳 → 标准 OpenAI SSE（聚合出内容与错误注记）。"""
+        import json as _json
+        from unittest.mock import patch
+        from wbspy.pool import AccountPool
+        doc = self._doc("qoder")
+        with patch("wbspy.store.save_account", lambda d: None):
+            pool = AccountPool([doc])
+
+        class FakeResp:
+            ok = True
+            status_code = 200
+            headers = {"content-type": "text/event-stream"}
+            def iter_content(self, chunk_size=None):
+                inner = _json.dumps({"choices": [
+                    {"delta": {"content": "你好"}, "index": 0}]})
+                yield (f'data: {{"body": { _json.dumps(inner) }}}\n').encode()
+                yield b'data: [DONE]\n'
+            def close(self): pass
+
+        with patch("requests.post", return_value=FakeResp()) as mp:
+            _, resp = pool.chat_failover(
+                {"model": "qoder:auto", "messages": [{"role": "user", "content": "hi"}]},
+                lane="qoder")
+            from wbspy.gateway import _sse_aggregate
+            body = _sse_aggregate(resp, "qoder:auto")
+        self.assertEqual(body["choices"][0]["message"]["content"], "你好")
+        url = mp.call_args.args[0]
+        self.assertIn("api2.qoder.sh", url)     # 真发到了加密端点
 
     def test_gateway_routes_qoder_lane(self):
-        """网关 qoder:auto → Qoder 泳道 → 501 透传明确文案。"""
-        from unittest.mock import MagicMock, patch
+        """网关 qoder:auto → Qoder 泳道 → 加密端点内容正常回客户端。"""
+        import json as _json
+        from unittest.mock import patch
         from wbspy.pool import AccountPool
         doc = self._doc("qoder")
         with patch("wbspy.store.save_account", lambda d: None):
             pool = AccountPool([doc])
         c, _app = _gw_client(pool)
-        r = c.post("/v1/chat/completions", json={"model": "qoder:auto", "messages": [
-            {"role": "user", "content": "hi"}]})
-        self.assertEqual(r.status_code, 501)
-        self.assertEqual(r.json()["error"]["type"], "qoder_infer_unsupported")
-        self.assertIn("尚未在本版接入", r.json()["error"]["message"])
+
+        class FakeResp:
+            ok = True
+            status_code = 200
+            headers = {"content-type": "text/event-stream"}
+            def iter_content(self, chunk_size=None):
+                inner = _json.dumps({"choices": [
+                    {"delta": {"content": "pong"}, "index": 0}]})
+                yield (f'data: {{"body": { _json.dumps(inner) }}}\n').encode()
+                yield b'data: [DONE]\n'
+            def close(self): pass
+
+        with patch("requests.post", return_value=FakeResp()):
+            r = c.post("/v1/chat/completions", json={"model": "qoder:auto", "messages": [
+                {"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["choices"][0]["message"]["content"], "pong")
+
+    def test_wasm_missing_reports_501(self):
+        """wasmtime 缺失（如 armv7）→ 明确 501，不误投其他端点。"""
+        from unittest.mock import patch
+        from wbspy._qoder_wasm import QoderWasmError
+        from wbspy.pool import AccountPool
+        from wbspy.upstream import UpstreamError
+        doc = self._doc("qoder")
+        with patch("wbspy.store.save_account", lambda d: None):
+            pool = AccountPool([doc])
+        with patch("wbspy._qoder_wasm.get_wasm",
+                   side_effect=QoderWasmError("no wasmtime")):
+            with self.assertRaises(UpstreamError) as cm:
+                pool.clients[(doc.storage_scope, doc.uid)].chat(
+                    {"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(cm.exception.status, 501)
+        self.assertIn("wasmtime", cm.exception.message)
 
 
 class TestVisionSwitch(unittest.TestCase):
