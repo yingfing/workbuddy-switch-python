@@ -105,12 +105,22 @@ LEDGER = UsageLedger()
 
 
 def estimate_tokens(messages: list) -> int:
-    """粗估 prompt tokens（中英混合约 2.2 字符/ token）。"""
+    """粗估 prompt tokens（中英混合约 2.2 字符/ token）。
+
+    tool_calls 的 arguments 必须计入：coding 会话里工具调用参数与
+    工具结果常占大头（0.8MB 会话实测），漏算会让上下文预算误判
+    「裁剪后已达标」，真实请求却超上游限制吃 11148。
+    """
     total = 0
     for msg in messages or []:
-        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
         if isinstance(content, str):
             total += len(content)
         elif isinstance(content, list):
             total += sum(len(p.get("text", "")) for p in content if isinstance(p, dict))
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {} if isinstance(tc, dict) else {}
+            total += len(str(fn.get("arguments") or "")) + len(str(fn.get("name") or ""))
     return int(total / 2.2)

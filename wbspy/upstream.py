@@ -446,6 +446,14 @@ def classify_business_error(status: int, body: str, retry_header: str = "",
         return UpstreamError(403, "upstream_access_denied",
                              f"上游渠道检查拒绝本次请求{official}。",
                              retry_after=retry, upstream_status=status, upstream_code=upstream_code)
+    if code == "11148":
+        # 2026-11-08 实战：0.8MB/191 工具大会话过审查后撞上下文墙。
+        # 网关已按窗口预算本地裁剪仍超——多半是尾部超大工具结果 +
+        # 大量工具 schema 的真实 token 超出模型窗口。换号无效，不重试。
+        return UpstreamError(400, "upstream_request_too_large",
+                             "官方判定请求超限（官方代码 11148）——上下文或请求体超出模型窗口。"
+                             "网关已本地裁剪历史仍超，建议新开会话；若为工具定义过多，需在客户端精简。",
+                             retry_after=0, upstream_status=status, upstream_code=upstream_code)
     if status == 404 or code in ("11102", "11134", "11158", "model_not_found", "unsupported_model"):
         return UpstreamError(404, "model_not_available", f"该账号暂不能使用所选模型{official}。",
                              retry_after=60, upstream_status=status, upstream_code=upstream_code)

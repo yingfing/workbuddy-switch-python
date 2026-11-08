@@ -3446,3 +3446,56 @@ class TestWebGuiDefang(unittest.TestCase):
         self.assertNotIn("Harness Web GUI", text)
         self.assertNotIn("Harness\u200b Web GUI", text)
         self.assertIn("Web Console", text)
+
+
+class TestContextOverflow(unittest.TestCase):
+    """11148 上下文超限：估算补 tool_calls + 语义化分类。"""
+
+    def test_estimate_counts_tool_calls(self):
+        """tool_calls arguments 必须计入估算（0.8MB 会话实测教训）。"""
+        from wbspy.usage import estimate_tokens
+        msgs = [{"role": "assistant", "content": None,
+                 "tool_calls": [{"function": {"name": "edit",
+                                              "arguments": "x" * 2200}}]}]
+        self.assertGreaterEqual(estimate_tokens(msgs), 1000)   # 2200B/2.2 = 1000
+
+    def test_trim_considers_tool_calls(self):
+        """裁剪决策看到 tool_calls 体积：尾条巨型 tool_calls 也要被裁。"""
+        from wbspy.context_budget import trim
+        big = "y" * 400_000
+        payload = {"model": "deepseek-v4.1-flash", "messages": [
+            {"role": "system", "content": "sys"},
+            *[{"role": "user", "content": f"q{i}"} for i in range(5)],
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"function": {"name": "read", "arguments": big}}]},
+            {"role": "tool", "content": big},
+            {"role": "user", "content": "continue"}]}
+        out, trimmed = trim(payload)
+        self.assertGreater(trimmed, 0)
+        est = __import__("wbspy.usage", fromlist=["estimate_tokens"]).estimate_tokens(out["messages"])
+        self.assertLessEqual(est, int(128_000 * 0.92))
+
+    def test_11148_classified(self):
+        """11148 → 400 upstream_request_too_large，文案含新开会话指引。"""
+        from wbspy.upstream import classify_business_error
+        err = classify_business_error(400, json.dumps(
+            {"error": {"code": "11148", "message": "too large"}}))
+        self.assertEqual(err.status, 400)
+        self.assertEqual(err.code, "upstream_request_too_large")
+        self.assertEqual(err.upstream_code, "11148")
+        self.assertIn("新开会话", err.message)
+        self.assertNotIn("unapproved", err.message)
+
+    def test_11148_no_failover_no_cooldown(self):
+        """11148 不换号、不给账号记冷却。"""
+        from wbspy.pool import AccountPool
+        from wbspy.upstream import classify_business_error
+        err = classify_business_error(400, json.dumps(
+            {"error": {"code": "11148"}}))
+        self.assertFalse(AccountPool._should_failover(err))
+        from unittest.mock import MagicMock as _MM
+        doc = _MM()
+        pool = AccountPool([doc])
+        pool.documents = {("u", "d"): doc}
+        pool.apply_error(doc, err, "deepseek-v4.1-flash")
+        self.assertEqual(len(pool.dead_until), 0)

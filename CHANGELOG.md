@@ -2,6 +2,15 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.28] — 2026-11-08
+
+### 修复
+- **11148 上下文超限：trim 盲区修复 + 语义化分类**。对策四生效后（11128 消失），0.8MB/191 工具的大会话撞上下一层墙——上游 400/11148「请求超限」。根因有二：
+  - **token 估算漏算 tool_calls**：`estimate_tokens` 只数 content 文本，coding 会话里 assistant 工具调用参数与工具结果才是体积大头（70 步/191 工具实测）。漏算让裁剪误判「已达标」；
+  - **trim 尾部保护盲区**：原「末两条」保护遇到「巨型 assistant(tool_calls) + 巨型 tool 结果」时裁不动——历史全裁光、这两条原样照发上游，真实 token 仍超窗口。现保护集缩为 **system 全部 + 末条**，其余从最旧裁剪，且 tool 链**成对删除**（assistant(tool_calls) 与紧随的 tool 结果同生共死，保 OpenAI 配对语义，不因裁剪制造孤儿 tool）；
+  - **11148 语义化**：分类器特判 → `400 upstream_request_too_large`，文案写明「网关已本地裁剪仍超，建议新开会话；工具定义过多需客户端精简」。换号无效（`_should_failover` False）、账号不记冷却不标死；
+  - 测试 236 项全绿（估算计 tool_calls、裁剪 sees 工具体积、11148 分类、不换号不冷却）。
+
 ## [0.2.27] — 2026-11-08
 
 ### 修复
