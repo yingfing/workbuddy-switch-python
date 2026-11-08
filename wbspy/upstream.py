@@ -235,11 +235,26 @@ CODEX_BANNER_REWRITES = (
 # DeepSeek Harness 零宽空格中和已覆盖 xdpool 改写表的前两条——
 # "powered by DeepSeek Harness" 与 "DeepSeek Harness Web GUI" 都含
 # "DeepSeek Harness" 连续子串，插零宽空格后子串即被破坏。
+# 11128 对策四（2026-11-08 实战取证，探针二分实锤）：DSH 新版模板的
+# 「Web GUI 双句指纹」——`You are interacting with the user through the
+# DeepSeek Harness Web GUI whose URL …` + `When the user refers to "this
+# page", "this GUI", or "this app" …` 两句成对出现即 11128。取证过程：
+# 0.8MB/688 条消息落盘 → 消息级二分锁 system#0 → 段落级二分锁第 18 段 →
+# leave-one-out 锁句 0+句 1 成对 → 子串消融 + 3/3 重复验证锁定 Web GUI。
+# 词组 DeepSeek Harness 中和后仍拒，正因如此对策三管不到它——指纹成分
+# 是 Web GUI 短语本身。改写：Harness Web GUI → Web Console（主体名
+# DeepSeek Harness 本就是要抹掉的痕迹，语义无损），只动
+# system/developer/assistant，user 不碰；幂等。
+WEB_GUI_FINGERPRINT = re.compile(
+    r"(?:DeepSeek[\u200b\s]+)?Harness\s+Web\s+GUI", re.I)
+WEB_GUI_REWRITE = "Web Console"
+
 DEFANG_ROLES = ("system", "developer", "assistant")
 
 
 def _defang_false_positive(text: str) -> str:
     text = FILE_REF_FINGERPRINT.sub(FILE_REF_REWRITE, text)
+    text = WEB_GUI_FINGERPRINT.sub(WEB_GUI_REWRITE, text)
     for pattern, rewrite in CODEX_BANNER_REWRITES:
         text = pattern.sub(rewrite, text)
     return text

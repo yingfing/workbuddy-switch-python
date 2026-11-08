@@ -3396,3 +3396,53 @@ class TestProbeEndpoint(unittest.TestCase):
         self.assertFalse(ok.json()["data"]["denied"])
         self.assertEqual(bad.status_code, 400)
         self.assertEqual(none.status_code, 400)
+
+
+class TestWebGuiDefang(unittest.TestCase):
+    """对策四：DSH Web GUI 双句指纹的等价改写。"""
+
+    def _defang(self, text):
+        from wbspy.upstream import _defang_false_positive
+        return _defang_false_positive(text)
+
+    def test_rewrites_post_neutralize_form(self):
+        """管线顺序：先零宽中和后 defang——匹配 DeepSeek\\u200b Harness Web GUI。"""
+        out = self._defang("through the DeepSeek\u200b Harness Web GUI whose URL")
+        self.assertNotIn("Harness", out)
+        self.assertIn("Web Console", out)
+
+    def test_rewrites_raw_form(self):
+        """未经中和的原始形态（理论路径）也能改写。"""
+        out = self._defang("the DeepSeek Harness Web GUI whose URL")
+        self.assertIn("Web Console", out)
+        self.assertNotIn("Harness", out)
+
+    def test_bare_harness_web_gui(self):
+        """无 DeepSeek 前缀的 Harness Web GUI 也覆盖。"""
+        self.assertIn("Web Console", self._defang("Harness Web GUI whose URL"))
+
+    def test_idempotent(self):
+        once = self._defang("through the DeepSeek\u200b Harness Web GUI whose URL")
+        self.assertEqual(self._defang(once), once)
+
+    def test_user_content_untouched(self):
+        """user 内容绝不改写（defang 只在 DEFANG_ROLES 调用）。"""
+        from wbspy.upstream import neutralize_keywords
+        msgs = [{"role": "user",
+                 "content": "the DeepSeek\u200b Harness Web GUI is down"}]
+        out = neutralize_keywords(msgs)
+        self.assertIn("Harness Web GUI", out[0]["content"])
+
+    def test_system_message_rewritten_in_pipeline(self):
+        """端到端：system 双句经 neutralize_keywords 后不再含指纹。"""
+        from wbspy.upstream import neutralize_keywords
+        s0 = ("You are interacting with the user through the DeepSeek Harness "
+              "Web GUI whose URL the runtime context names.")
+        s1 = ('When the user refers to "this page", "this GUI", or "this app" '
+              "without naming another target, they mean this GUI.")
+        out = neutralize_keywords([
+            {"role": "system", "content": s0 + " " + s1}])
+        text = out[0]["content"]
+        self.assertNotIn("Harness Web GUI", text)
+        self.assertNotIn("Harness\u200b Web GUI", text)
+        self.assertIn("Web Console", text)

@@ -2,6 +2,15 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.27] — 2026-11-08
+
+### 修复
+- **11128 对策四：DSH Web GUI 双句指纹（实战取证闭环首战告捷）**。0.8MB 大会话在三枚已知指纹全部中和后仍被拒——首次完整走通「抓现行 → 探针二分 → 定位 → 改写 → 验证」闭环：
+  - **取证**：0.8MB/688 条消息落盘（v0.2.25）→ 消息级二分：全部 688 条历史消息无罪，指纹在 system#0 模板 → 段落级二分：锁第 18 段（DSH 新版模板的 Web GUI 运行时说明段）→ leave-one-out：句 0（interacting…Web GUI whose URL…）与句 1（"this page"/"this GUI"/"this app" 引用说明）**成对**必要——去掉任一句即不触发；
+  - **消融**：拆 Harness 单词不解（对策三的盲区实锤——指纹成分是 `Web GUI` 短语本身，不在 DeepSeek Harness 词组内）；`Web GUI` → `Web Console` 改写后对照 3/3 denied vs 变体 3/3 ok 稳定复现；
+  - **对策**：`(?:DeepSeek[\u200b\s]+)?Harness\s+Web\s+GUI` → `Web Console`（主体名本就是要抹掉的痕迹，语义无损），加进 defang 管线（system/developer/assistant，user 绝不碰），在零宽中和之后运行、兼容已中和形态，幂等；
+  - **方法论沉淀**：探针探测时 11102（模型校验失败）是假阴性信号——请求没进审查层，一律当「没测到」；只有 denied+11128 判有罪；留一法（leave-one-out）比逐句探更能排除尺寸噪声。测试 232 项全绿（TestWebGuiDefang 6 项）。
+
 ## [0.2.26] — 2026-11-08
 
 ### 新增
