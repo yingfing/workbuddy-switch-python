@@ -26,10 +26,12 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
 
+import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -434,6 +436,54 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         if p.is_file():
             p.unlink()
         return _ok()
+
+    @app.post("/api/probe")
+    async def api_probe(request: Request):
+        """11128 取证探针：任意 messages 片段经完整出站管线发给上游，回传 200/403。
+
+        body: {"messages": [{"role": "user", "content": "..."}]}
+        用账号池活号发最小请求（max_tokens=1）。刻意绕开 chat() 的对策二
+        重试（system 降级会把「有罪」探成「无罪」）与 annotate_denial 落盘
+        （探针高频调用会把真实抓包挤出 denials 滚动窗口）。用途：把被拒
+        请求的消息对半拆开逐段探——403 的那半就是新指纹所在——这是
+        xdpool 同款定位法，从「猜」变成「看」。
+        """
+        body = await request.json()
+        msgs = body.get("messages")
+        if not isinstance(msgs, list) or not msgs:
+            return _err("messages 不能为空")
+        alive = pool.healthy("*")
+        if not alive:
+            return _err("账号池无可用账号", 503)
+        import uuid as _uuid
+        from .pool import _client_for
+        from .upstream import UpstreamError, classify_business_error, \
+            normalize_payload
+        client = _client_for(alive[0])
+        payload_text = json.dumps(
+            normalize_payload({"messages": msgs, "max_tokens": 1}))
+        t0 = time.monotonic()
+        try:
+            resp = client.http.post(
+                f"{client.doc.origin}/v2/chat/completions",
+                headers=client._chat_headers(str(_uuid.uuid4())),
+                data=payload_text, timeout=60, allow_redirects=False, stream=True)
+        except (requests.RequestException, UpstreamError) as exc:
+            return _err(f"探针请求失败：{exc}", 502)
+        status = resp.status_code
+        if resp.ok:
+            resp.close()
+            return _ok({"status": status, "denied": False,
+                        "latency_ms": int((time.monotonic() - t0) * 1000),
+                        "account": alive[0].label(), "message": ""})
+        err = classify_business_error(status, resp.text[:1024 * 1024],
+                                      resp.headers.get("Retry-After", ""),
+                                      resp.headers.get("Content-Type", ""))
+        resp.close()
+        return _ok({"status": status, "denied": err.status == 403,
+                    "upstream_code": err.upstream_code,
+                    "latency_ms": int((time.monotonic() - t0) * 1000),
+                    "account": alive[0].label(), "message": err.message[:300]})
 
     @app.get("/api/automation/status")
     def automation_status():

@@ -3320,3 +3320,79 @@ class TestDenialCapture(unittest.TestCase):
                 self.assertEqual(
                     c.delete(f"/api/denials/{rows[0]['name']}").status_code, 200)
                 self.assertEqual(c.get("/api/denials").json()["data"]["items"], [])
+
+
+class TestProbeEndpoint(unittest.TestCase):
+    """11128 取证探针：完整管线直发、不做对策二重试、不落盘。"""
+
+    def _pool(self):
+        from unittest.mock import MagicMock
+        from wbspy.document import parse_auth
+        from wbspy.pool import AccountPool
+        doc = parse_auth({"account": {"uid": "p1", "nickname": "探针号"},
+                          "auth": {"accessToken": "t",
+                                   "domain": "www.codebuddy.cn"}})
+        pool = AccountPool([doc])
+        client = MagicMock()
+        client.doc.origin = "https://www.codebuddy.cn"
+        client._chat_headers.return_value = {"X-Test": "1"}
+        return pool, doc, client
+
+    def test_probe_reports_denial(self):
+        """探针 403 → denied=True + upstream_code；且不写 denials 目录。"""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import MagicMock, patch
+        from fastapi.testclient import TestClient
+        from wbspy.webui import create_web_app
+        pool, doc, client = self._pool()
+        fake = MagicMock()
+        fake.ok = False
+        fake.status_code = 403
+        fake.text = json.dumps({"error": {"code": "11128", "message": "denied"}})
+        fake.headers = {}
+        client.http.post.return_value = fake
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("wbspy.upstream.DENIALS_DIR", Path(tmp)), \
+                 patch.object(pool, "healthy", return_value=[doc]), \
+                 patch("wbspy.pool._client_for", return_value=client):
+                c = TestClient(create_web_app(pool, api_key=""))
+                r = c.post("/api/probe", json={"messages": [
+                    {"role": "user", "content": "可疑内容"}]})
+        self.assertEqual(r.status_code, 200)
+        data = r.json()["data"]
+        self.assertTrue(data["denied"])
+        self.assertEqual(data["upstream_code"], "11128")
+        # 探针走完整出站管线（normalize_payload：首条强制 system + stream）
+        sent = json.loads(client.http.post.call_args.kwargs["data"])
+        self.assertEqual(sent["messages"][0]["role"], "system")
+        self.assertEqual(sent["messages"][1]["content"], "可疑内容")
+        self.assertEqual(sent["max_tokens"], 1)
+        self.assertTrue(sent["stream"])
+        self.assertEqual(list(Path(tmp).glob("*.json")), [])   # 不落盘
+
+    def test_probe_pass_and_validation(self):
+        """200 → denied=False；messages 缺失 → 400。"""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import MagicMock, patch
+        from fastapi.testclient import TestClient
+        from wbspy.webui import create_web_app
+        pool, doc, client = self._pool()
+        fake = MagicMock()
+        fake.ok = True
+        fake.status_code = 200
+        client.http.post.return_value = fake
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("wbspy.upstream.DENIALS_DIR", Path(tmp)), \
+                 patch.object(pool, "healthy", return_value=[doc]), \
+                 patch("wbspy.pool._client_for", return_value=client):
+                c = TestClient(create_web_app(pool, api_key=""))
+                ok = c.post("/api/probe", json={"messages": [
+                    {"role": "user", "content": "hello"}]})
+                bad = c.post("/api/probe", json={"messages": []})
+                none = c.post("/api/probe", json={})
+        self.assertEqual(ok.status_code, 200)
+        self.assertFalse(ok.json()["data"]["denied"])
+        self.assertEqual(bad.status_code, 400)
+        self.assertEqual(none.status_code, 400)
