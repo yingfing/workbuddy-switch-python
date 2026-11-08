@@ -2,6 +2,15 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.23] — 2026-11-08
+
+### 修复
+- **11128 对策对齐 dsh-xdpool 2.6.1 修复表**（同步上游 vendor 逆向确认，其 [xdpool-local] 注释带完整实测记录）：
+  - **新增 Codex CLI banner 改写**（实测 #112）：gate 按「首段」为单元比较——banner 前 184 字符过、+换行 185 挂、三句拆成三条消息全过，改写开头从句即可且有意保义；两条拼写变体全收；
+  - **改写范围扩到 assistant**：xdpool 实测明确上游扫描的是 system 和 assistant 两类内容（不止 system）——v0.2.22 只动 system/developer 存在盲区；user 内容两家都绝不碰；
+  - **首条 system 强制补齐全区域化**：11128 第二成因「first message is not system prompt」（伪装成安全策略拦截）与区域无关（xdpool 探测请求一律强制传 system）——原只在国际版补，现统一进 normalize_payload，整条请求没有 system 就补中性一条；
+  - 复用确认：`DeepSeek Harness Web GUI` 与 `powered by DeepSeek Harness` 变体已被 v0.2.21 的零宽空格中和自动覆盖（都含同一连续子串），无需重复改写。
+
 ## [0.2.22] — 2026-11-08
 
 ### 修复

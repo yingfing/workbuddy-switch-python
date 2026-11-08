@@ -2491,7 +2491,7 @@ class TestKeywordNeutralize(unittest.TestCase):
         from wbspy.upstream import normalize_payload
         payload = {"model": "m", "messages": [
             {"role": "user", "content": "x" * 2048 + " powered by DeepSeek Harness."}]}
-        out = normalize_payload(payload)["messages"][0]["content"]
+        out = normalize_payload(payload)["messages"][-1]["content"]  # [0] 是补的中性 system
         self.assertIn("DeepSeek\u200b Harness", out)
 
     def test_non_ascii_space_variant(self):
@@ -2527,11 +2527,12 @@ class TestFileRefDefang(unittest.TestCase):
             [{"role": "user", "content": self.SENT2}])[0]["content"]
         self.assertIn("resolve from the workspace root", out)   # 用户内容绝不改写
 
-    def test_assistant_content_untouched(self):
+    def test_assistant_content_rewritten(self):
+        # xdpool 实测：上游扫描 system 和 assistant 两类内容（不止 system）
         from wbspy.upstream import neutralize_keywords
         out = neutralize_keywords(
             [{"role": "assistant", "content": self.SENT2}])[0]["content"]
-        self.assertIn("resolve from the workspace root", out)
+        self.assertNotIn("resolve from the workspace root", out)
 
     def test_block_list_system_rewritten(self):
         from wbspy.upstream import neutralize_keywords
@@ -2559,6 +2560,77 @@ class TestFileRefDefang(unittest.TestCase):
         out = normalize_payload(payload)["messages"][0]["content"]
         self.assertIn("are resolved against the workspace root", out)
         self.assertNotIn("resolve from the workspace root", out)
+
+
+class TestCodexBannerDefang(unittest.TestCase):
+    """对策三·补充二：Codex CLI banner 改写（对齐 dsh-xdpool 2.6.1 实测 #112）。
+
+    gate 按首段整体比较：banner 前 184 字符过、+换行 185 挂、三句拆三条
+    消息全过——改写开头从句即可，保义不改写全文。
+    """
+
+    B1 = ("You are a coding agent running in the Codex CLI, a terminal-based "
+          "coding assistant. Keep responses concise.")
+    B2 = "You are a coding agent running in the Codex CLI"
+    B3 = "Codex CLI is an open source project led by OpenAI."
+
+    def test_system_banner_variants(self):
+        from wbspy.upstream import neutralize_keywords
+        for banner, gone in ((self.B1, "in the Codex CLI,"),
+                             (self.B2, "in the Codex CLI"),
+                             (self.B3, "led by OpenAI")):
+            out = neutralize_keywords(
+                [{"role": "system", "content": banner}])[0]["content"]
+            self.assertNotIn(gone, out, banner)
+
+    def test_assistant_banner_rewritten(self):
+        from wbspy.upstream import neutralize_keywords
+        out = neutralize_keywords(
+            [{"role": "assistant", "content": self.B2}])[0]["content"]
+        self.assertIn("running in this environment", out)
+
+    def test_user_banner_untouched(self):
+        from wbspy.upstream import neutralize_keywords
+        out = neutralize_keywords(
+            [{"role": "user", "content": self.B2}])[0]["content"]
+        self.assertIn("in the Codex CLI", out)      # 用户内容绝不改写
+
+    def test_web_gui_variant_covered_by_zwsp(self):
+        # "DeepSeek Harness Web GUI" 含 "DeepSeek Harness" 连续子串，
+        # 零宽空格中和自动覆盖，无需单独改写
+        from wbspy.upstream import neutralize_keywords
+        out = neutralize_keywords(
+            [{"role": "system", "content": "open DeepSeek Harness Web GUI"}])[0]["content"]
+        self.assertNotIn("DeepSeek Harness", out)
+
+
+class TestFirstSystemRequired(unittest.TestCase):
+    """对策四：首条必须是 system，否则 11128「first message is not system
+    prompt」（伪装成安全策略拦截，与区域无关——xdpool 探测器一律强制传）。
+    """
+
+    def test_no_system_prepended(self):
+        from wbspy.upstream import normalize_payload
+        payload = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        msgs = normalize_payload(payload)["messages"]
+        self.assertEqual(msgs[0]["role"], "system")
+        self.assertEqual(msgs[1]["role"], "user")
+
+    def test_system_elsewhere_left_in_place(self):
+        from wbspy.upstream import normalize_payload
+        payload = {"model": "m", "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "be nice"}]}
+        msgs = normalize_payload(payload)["messages"]
+        self.assertEqual(len([m for m in msgs if m["role"] == "system"]), 1)
+        self.assertNotEqual(msgs[0]["role"], "system")   # 不强行重排（lead_in 管内容）
+
+    def test_neutral_system_not_flagged_as_fingerprint(self):
+        from wbspy.upstream import normalize_payload
+        payload = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        first = normalize_payload(payload)["messages"][0]["content"]
+        from wbspy.upstream import is_third_party_opening
+        self.assertFalse(is_third_party_opening(first))  # 补的不是指纹，别再叠导语
 
 
 class TestDenialAnnotation(unittest.TestCase):
