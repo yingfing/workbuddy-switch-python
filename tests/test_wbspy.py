@@ -2501,6 +2501,66 @@ class TestKeywordNeutralize(unittest.TestCase):
         self.assertNotIn("DeepSeek\u00a0Harness", out)
 
 
+class TestFileRefDefang(unittest.TestCase):
+    """对策三·补充：DSH @文件引用双句指纹的等价改写。
+
+    实测（linux.do，15.8K system 同账号）：两句连用即 11128（成对才触发），
+    删第二句/同义改写/分开发均 200。网关对 system/developer 做
+    resolve from → are resolved against 等价改写，绝不碰 user/assistant。
+    """
+
+    SENT1 = "Tokens prefixed with @ are paths the user explicitly referenced."
+    SENT2 = "Relative paths resolve from the workspace root; " \
+            "absolute paths identify files or directories on the host."
+
+    def test_system_pair_rewritten(self):
+        from wbspy.upstream import neutralize_keywords
+        out = neutralize_keywords(
+            [{"role": "system", "content": self.SENT1 + " " + self.SENT2}])[0]["content"]
+        self.assertNotIn("resolve from the workspace root", out)
+        self.assertIn("are resolved against the workspace root", out)
+        self.assertIn(self.SENT1, out)                  # 首句不动（单独发是 200）
+
+    def test_user_content_untouched(self):
+        from wbspy.upstream import neutralize_keywords
+        out = neutralize_keywords(
+            [{"role": "user", "content": self.SENT2}])[0]["content"]
+        self.assertIn("resolve from the workspace root", out)   # 用户内容绝不改写
+
+    def test_assistant_content_untouched(self):
+        from wbspy.upstream import neutralize_keywords
+        out = neutralize_keywords(
+            [{"role": "assistant", "content": self.SENT2}])[0]["content"]
+        self.assertIn("resolve from the workspace root", out)
+
+    def test_block_list_system_rewritten(self):
+        from wbspy.upstream import neutralize_keywords
+        out = neutralize_keywords([{"role": "system", "content": [
+            {"type": "text", "text": self.SENT1 + "\n" + self.SENT2}]}])[0]["content"]
+        self.assertNotIn("resolve from the workspace root", out[0]["text"])
+
+    def test_case_insensitive(self):
+        from wbspy.upstream import neutralize_keywords
+        out = neutralize_keywords([{"role": "system", "content":
+            "relative paths Resolve From the Workspace root"}])[0]["content"]
+        self.assertNotIn("Resolve From the Workspace root", out)
+
+    def test_idempotent(self):
+        from wbspy.upstream import neutralize_keywords
+        msgs = [{"role": "system", "content": self.SENT1 + " " + self.SENT2}]
+        once = neutralize_keywords(msgs)[0]["content"]
+        twice = neutralize_keywords([{"role": "system", "content": once}])[0]["content"]
+        self.assertEqual(once, twice)
+
+    def test_normalize_payload_integrated(self):
+        from wbspy.upstream import normalize_payload
+        payload = {"model": "m", "messages": [
+            {"role": "system", "content": "x" * 2048 + self.SENT1 + " " + self.SENT2}]}
+        out = normalize_payload(payload)["messages"][0]["content"]
+        self.assertIn("are resolved against the workspace root", out)
+        self.assertNotIn("resolve from the workspace root", out)
+
+
 class TestDenialAnnotation(unittest.TestCase):
     """11128 审查拒错误消息的诊断注解：大小分档 + 对策状态 + 行动指引。
 

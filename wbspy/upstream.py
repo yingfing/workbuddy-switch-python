@@ -202,6 +202,22 @@ def apply_channel_lead_in(messages: list[dict]) -> list[dict]:
 KEYWORD_NEUTRALIZE = re.compile(
     r"(?<![\\/])(DeepSeek)[ \u00A0]+(Harness)(?![\\/])", re.I)
 
+# 11128 对策三·补充（feedbbs 转载 linux.do 实测，2026-10-30）：DSH @文件引用
+# 说明（FILE_REFERENCE_PROMPT）两句连用即指纹——"Tokens prefixed with @ …" +
+# "Relative paths resolve from the workspace root; absolute paths …"。
+# 实测（15.8K system、同一账号）：原样 11128×2；删第二句 / 同义改写 /
+# 两句各单独发全部 200——成对才触发。等价改写第二句 resolve from →
+# are resolved against（语义不变、@ 引用行为不受影响），与官方系
+# workbuddy-switch-plus 已验证 PR 同策略：只动 system/developer，
+# 绝不碰 user/assistant。
+FILE_REF_FINGERPRINT = re.compile(
+    r"Relative\s+paths\s+resolve\s+from\s+the\s+workspace\s+root", re.I)
+FILE_REF_REWRITE = "Relative paths are resolved against the workspace root"
+
+
+def _defang_false_positive(text: str) -> str:
+    return FILE_REF_FINGERPRINT.sub(FILE_REF_REWRITE, text)
+
 
 def _neutralize_text(text: str) -> str:
     # 替换串不能用 raw string：re 的 repl 语法不认 \uXXXX（bad escape），
@@ -216,20 +232,30 @@ def neutralize_keywords(messages: list) -> list:
     的 arguments——工具参数里出现该词组的场景基本是文件路径，负向断言
     保护的也是路径，改 JSON 字符串的收益小、风险大。替换后词组中间是
     U+200B+空格，正则不再命中，天然幂等。
+    DeepSeek Harness 词组中和作用于全部消息（零宽空格对任何语境无损）；
+    DSH 文件引用双句的等价改写只作用于 system/developer（对齐官方系
+    PR 策略——改写带语义，不能碰用户内容）。
     """
     out = []
     for msg in messages:
         if not isinstance(msg, dict):
             out.append(msg)
             continue
+        role = msg.get("role")
         content = msg.get("content")
         if isinstance(content, str):
-            out.append({**msg, "content": _neutralize_text(content)})
+            text = _neutralize_text(content)
+            if role in ("system", "developer"):
+                text = _defang_false_positive(text)
+            out.append({**msg, "content": text})
         elif isinstance(content, list):
             blocks = []
             for blk in content:
                 if isinstance(blk, dict) and isinstance(blk.get("text"), str):
-                    blocks.append({**blk, "text": _neutralize_text(blk["text"])})
+                    text = _neutralize_text(blk["text"])
+                    if role in ("system", "developer"):
+                        text = _defang_false_positive(text)
+                    blocks.append({**blk, "text": text})
                 else:
                     blocks.append(blk)
             out.append({**msg, "content": blocks})

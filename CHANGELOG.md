@@ -2,6 +2,15 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.22] — 2026-11-08
+
+### 修复
+- **11128 对策三·第二指纹：DSH @文件引用双句的等价改写**。linux.do 实测（feedbbs 转载）：DSH 启用 @文件引用时往 system 拼的两句说明（`FILE_REFERENCE_PROMPT`）**连在一起就是第三方客户端指纹**——原样 11128×2；删第二句 / 同义改写 / 两句各单独发全部 200（成对才触发）。这解释了 v0.2.21 后大会话仍被拒：`DeepSeek Harness` 词组中和管不到它。现网关对 system/developer 消息把第二句 `Relative paths resolve from the workspace root` 等价改写为 `are resolved against the workspace root`（语义不变、@ 引用行为不受影响），与官方系 workbuddy-switch-plus 已验证 PR 同策略：
+  - 只动 system/developer，绝不碰 user/assistant（改写带语义，不能碰用户内容）；
+  - DeepSeek Harness 词组中和继续作用于全部消息（零宽空格对任何语境无损）；
+  - 大小写不敏感、天然幂等；
+  - 帖主用真实失败请求（5 消息 + 71 工具 + 15.8K system）经同款反代重放返回 200，本修复同源同策略。
+
 ## [0.2.21] — 2026-11-08
 
 ### 修复
