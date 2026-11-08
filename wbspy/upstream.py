@@ -25,6 +25,7 @@ import json
 import re
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Iterable
 
 import requests
@@ -348,6 +349,30 @@ def normalize_payload(raw: dict) -> dict:
     return payload
 
 
+def capture_denial_body(body_text: str, status: int) -> str | None:
+    """11128 类内容审查被拒时，把出站请求体落盘「抓现行」。
+
+    关键词中和管不到上游新换的词——盲猜没有意义，直接保存被拒的完整
+    请求体供下载分析（token 不在请求体里，落盘无凭据泄露）。仅保留
+    最近 DENIALS_KEEP 份，磁盘占用可控。失败静默（不能因落盘挂掉对话）。
+    """
+    try:
+        DENIALS_DIR.mkdir(parents=True, exist_ok=True)
+        name = (time.strftime("%Y%m%d-%H%M%S") + f"-{status}"
+                + f"-{uuid.uuid4().hex[:6]}.json")
+        (DENIALS_DIR / name).write_text(body_text, encoding="utf-8")
+        olds = sorted(DENIALS_DIR.glob("*.json"))
+        for old in olds[:-DENIALS_KEEP]:
+            old.unlink(missing_ok=True)
+        return name
+    except Exception:
+        return None
+
+
+DENIALS_DIR = Path.home() / ".wbspy" / "denials"
+DENIALS_KEEP = 5
+
+
 def annotate_denial(error: UpstreamError, body_text: str, demoted: bool) -> UpstreamError:
     """11128 错误消息附诊断注解：请求体大小 + 已试过的对策 + 行动指引。
 
@@ -368,6 +393,10 @@ def annotate_denial(error: UpstreamError, body_text: str, demoted: bool) -> Upst
                 "unapproved channel 文案是误导；网关出站已默认用零宽空格中和关键词，"
                 "仍被拒说明上游换了词或命中其他内容规则")
     tips.append("建议新开会话；若仍被拒则调整本次发送的内容")
+    saved = capture_denial_body(body_text, error.status)
+    if saved:
+        tips.append(f"本次被拒请求体已留存：~/.wbspy/denials/{saved}，"
+                    "管理面板「诊断」可查看/下载，发回来即可定位新指纹")
     return UpstreamError(error.status, error.code,
                          error.message + "（" + "；".join(tips) + "）",
                          retry_after=error.retry_after,

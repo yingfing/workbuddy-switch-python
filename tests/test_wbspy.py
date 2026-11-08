@@ -2728,9 +2728,14 @@ class TestDenialAnnotation(unittest.TestCase):
         self.assertNotIn("降级", out.message)            # 没试过降级不冒功
 
     def test_small_body_no_size_section(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
         from wbspy.upstream import annotate_denial
-        out = annotate_denial(self._err(), "短消息", demoted=False)
-        self.assertNotIn("请求体", out.message)
+        with tempfile.TemporaryDirectory() as tmp:      # 落盘到临时目录，不污染 home
+            with patch("wbspy.upstream.DENIALS_DIR", Path(tmp)):
+                out = annotate_denial(self._err(), "短消息", demoted=False)
+        self.assertNotIn("KB", out.message)
         self.assertIn("新开会话", out.message)
 
     def test_chat_integrates_annotation(self):
@@ -3251,3 +3256,67 @@ class TestHealthPanel(unittest.TestCase):
         self.assertEqual(wipe[0]["level"], "error")
         self.assertIn("重新授权", wipe[0]["action"])
         self.assertEqual(out["alive"], 0)
+
+
+class TestDenialCapture(unittest.TestCase):
+    """11128 抓现行：被拒请求体落盘 + 面板端点可查看/下载/删除。"""
+
+    def test_capture_writes_and_prunes(self):
+        """落盘 JSON、仅保留最近 DENIALS_KEEP 份。"""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from wbspy import upstream
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(upstream, "DENIALS_DIR", Path(tmp)):
+                name = upstream.capture_denial_body('{"messages":[]}', 403)
+                self.assertTrue(name and "-403-" in name)
+                self.assertEqual((Path(tmp) / name).read_text(encoding="utf-8"),
+                                 '{"messages":[]}')
+                for i in range(upstream.DENIALS_KEEP + 3):
+                    upstream.capture_denial_body(f'{{"n":{i}}}', 403)
+                    time.sleep(0.01)
+                files = sorted(Path(tmp).glob("*.json"))
+                self.assertEqual(len(files), upstream.DENIALS_KEEP)
+            # 落盘失败静默：DIR 指向文件
+            with patch.object(upstream, "DENIALS_DIR", Path(tmp) / "f"):
+                (Path(tmp) / "f").write_text("x")
+                self.assertIsNone(upstream.capture_denial_body("{}", 403))
+
+    def test_annotate_mentions_saved_file(self):
+        """annotate_denial 附上留存文件名，指引面板下载。"""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from wbspy import upstream
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(upstream, "DENIALS_DIR", Path(tmp)):
+                err = upstream.annotate_denial(
+                    upstream.UpstreamError(403, "11128", "denied"), "x" * 100, False)
+                self.assertIn("~/.wbspy/denials/", err.message)
+                self.assertTrue((Path(tmp)).is_dir())
+
+    def test_webui_denial_endpoints(self):
+        """/api/denials 列表 + 下载 + 路径穿越拒绝。"""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy import upstream
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "20261108-114500-403.json").write_text('{"a":1}')
+            with patch.object(upstream, "DENIALS_DIR", Path(tmp)):
+                c = TestClient(create_web_app(AccountPool([]), api_key=""))
+                rows = c.get("/api/denials").json()["data"]["items"]
+                self.assertEqual(len(rows), 1)
+                self.assertIn("403", rows[0]["name"])
+                r = c.get(f"/api/denials/{rows[0]['name']}")
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.json(), {"a": 1})
+                self.assertEqual(c.get("/api/denials/..%2Fetc").status_code, 404)
+                self.assertEqual(c.get("/api/denials/nope.json").status_code, 404)
+                self.assertEqual(
+                    c.delete(f"/api/denials/{rows[0]['name']}").status_code, 200)
+                self.assertEqual(c.get("/api/denials").json()["data"]["items"], [])

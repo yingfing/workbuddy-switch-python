@@ -402,6 +402,39 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         """全局运行日志（悬浮面板用）：最近日志行 + 累计行数（未读徽标依据）。"""
         return _ok({"log": app.state.auto_log[-200:], "total": app.state.auto_total})
 
+    # -- 11128 抓现行（被拒请求体留存） -----------------------------------------
+
+    @app.get("/api/denials")
+    def api_denials():
+        from .upstream import DENIALS_DIR, DENIALS_KEEP
+        items = []
+        if DENIALS_DIR.is_dir():
+            for p in sorted(DENIALS_DIR.glob("*.json"), reverse=True):
+                items.append({"name": p.name, "size": p.stat().st_size,
+                              "at": time.strftime("%m-%d %H:%M:%S",
+                                                  time.localtime(p.stat().st_mtime))})
+        return _ok({"items": items[:DENIALS_KEEP], "dir": str(DENIALS_DIR)})
+
+    @app.get("/api/denials/{name}")
+    def api_denial_body(name: str):
+        from .upstream import DENIALS_DIR
+        if "/" in name or "\\" in name or ".." in name:
+            raise HTTPException(404, "not found")
+        p = DENIALS_DIR / name
+        if not p.is_file():
+            raise HTTPException(404, "not found")
+        return FileResponse(p, media_type="application/json", filename=name)
+
+    @app.delete("/api/denials/{name}")
+    def api_denial_delete(name: str):
+        from .upstream import DENIALS_DIR
+        if "/" in name or "\\" in name or ".." in name:
+            return _err("bad name", 404)
+        p = DENIALS_DIR / name
+        if p.is_file():
+            p.unlink()
+        return _ok()
+
     @app.get("/api/automation/status")
     def automation_status():
         auto = load_config().get("automation") or {}
