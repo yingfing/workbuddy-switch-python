@@ -269,7 +269,8 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         <span id="thrWrap" hidden>积分低于
           <input id="thrInput" type="number" min="0" step="10" style="width:64px;padding:2px 5px" value="100">
           自动换积分最高的
-          <button class="btn sm" onclick="saveThreshold(this)">保存</button>
+          <button class="btn sm" id="thrSaveBtn" onclick="saveThreshold(this)" hidden>保存</button>
+          <span class="tag" id="thrCleanTag" style="color:var(--ok)">✓ 阈值已生效</span>
         </span>
         <span class="hint" style="margin:0" id="distHint">「按优先级」时固定用排最前的账号，积分烧穿阈值自动换积分最高的，直到全部低于阈值（组间互不影响）。先<b>查询余额</b>再启用降级更准。</span>
       </div>
@@ -307,6 +308,13 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
           <th>调用 ID</th><th>名称</th><th>倍率 / 价格</th><th>可用账号</th>
         </tr></thead><tbody id="mymQoderTbody"></tbody></table>
       </details>
+      <details style="margin-top:12px" id="mymZcodeBox" hidden>
+        <summary><b>ZCode 智谱 GLM 渠道（模型 ID 带 <code>zcode:</code> 前缀）</b>
+          <span class="tag" id="mymZcodeCount">—</span></summary>
+        <table><thead><tr>
+          <th>调用 ID</th><th>名称</th><th>倍率 / 价格</th><th>可用账号</th>
+        </tr></thead><tbody id="mymZcodeTbody"></tbody></table>
+      </details>
       <div class="empty" id="mymEmpty" hidden>账号池为空或目录未就绪 —— 先去「登录」页添加账号</div>
       <h2 style="margin-top:16px">逐账号明细</h2>
       <table id="mymAccTable"><thead><tr>
@@ -323,7 +331,8 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         <input id="ckProvider" list="ckProviderList" placeholder="渠道 ID（如 open_router、nvidia-nim）" style="flex:1" autocomplete="off">
         <datalist id="ckProviderList"></datalist>
         <input id="ckKey" placeholder="API Key（免 Key 渠道留空）" style="flex:1">
-        <button class="btn" onclick="saveChannelKey(this)">💾 保存渠道 Key</button>
+        <button class="btn" id="ckSaveBtn" onclick="saveChannelKey(this)" hidden>💾 保存渠道 Key</button>
+        <span class="tag" id="ckCleanTag" style="color:var(--ok)">✓ 渠道密钥已保存</span>
       </div>
       <span class="tag">渠道 ID 可输入自动补全（76 家注册表）；Key 只落本机 <code>~/.wbspy/aggregate-keys.json</code>，不会上传，保存后网关目录即时刷新</span>
     </div>
@@ -358,13 +367,17 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         </select>
         <input id="pollCustom" type="number" min="5" max="1440" placeholder="分钟（5~1440）" style="width:150px" hidden>
         <input id="pollDaily" type="time" value="09:00" hidden>
-        <button class="btn" onclick="pollSave(this)">💾 保存并生效</button>
         <span class="tag">轮询模式：每轮查签到接口，未签自动补签，每天首轮全量托管；定点模式：每天该时刻跑一次全量托管</span>
       </div>
       <div class="row" style="margin-bottom:12px">
         <b>结果推送：</b>
         <input id="pollNotify" placeholder="webhook 地址（每轮托管完 POST JSON，留空关闭）" style="flex:1">
-        <span class="tag">填 Server酱/企业微信/自建接口等，保存时一并生效</span>
+        <span class="tag">填 Server酱/企业微信/自建接口等</span>
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <button class="btn" id="pollSaveBtn" onclick="pollSave(this)" hidden>💾 保存并生效</button>
+        <span class="pill" id="pollCleanTag" style="color:var(--ok)">✓ 节奏与推送已保存并生效</span>
+        <span class="tag">改上面任意一项后，这里会亮起保存按钮——没亮就是没改动</span>
       </div>
       <div class="pill">实时与历史日志看右下角悬浮的 📜 按钮（任何页面都可查看）。</div>
     </div>
@@ -415,7 +428,8 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         <div class="gwTitle">访问密钥</div>
         <div class="row">
           <input id="gwKeyInput" placeholder="自定义密钥（留空恢复默认 workbuddy）" style="flex:1">
-          <button class="btn" onclick="gwKeySave(this)">保存密钥</button>
+          <button class="btn" id="gwKeySaveBtn" onclick="gwKeySave(this)" hidden>保存密钥</button>
+          <span class="tag" id="gwKeyCleanTag" style="color:var(--ok)">✓ 当前密钥已生效</span>
         </div>
         <div class="hint">客户端调用需带 <code>Authorization: Bearer &lt;key&gt;</code>；保存立即生效，无需重启。</div>
       </div>
@@ -439,7 +453,8 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         <div class="gwTitle">服务端口 <span class="tag" id="gwPortNow">—</span></div>
         <div class="row">
           <input id="gwPortInput" placeholder="新端口（1-65535，重启后生效）" style="flex:1">
-          <button class="btn" onclick="gwPortSave(this)">保存端口</button>
+          <button class="btn" id="gwPortSaveBtn" onclick="gwPortSave(this)" hidden>保存端口</button>
+          <span class="tag" id="gwPortCleanTag" style="color:var(--ok)">✓ 当前端口已生效</span>
         </div>
         <div class="hint">保存前自动试绑：端口被占用会拒绝保存；保存后按提示重启服务即切换到新端口。</div>
       </div>
@@ -537,6 +552,39 @@ async function busy(btn, fn) {
   btn.disabled = true; btn.textContent = '处理中…';
   try { await fn(); } finally { btn.disabled = false; btn.textContent = old; }
 }
+
+// -- 「未保存更改」指示：保存类表单统一干净=灰 tag、脏=亮起保存按钮（同位置切换）。
+//    用户诉求：没改动时不要摆一个保存按钮，让人分不清「现在到底存没存」。
+//    cur() 返回当前表单值指纹，与基线比对；改动才显示按钮，保存/回填后调 snap() 归位。--
+const DirtyUI = {
+  forms: {},
+  make(key, btnId, tagId, cur, tagClean) {
+    const btn = document.getElementById(btnId), tag = document.getElementById(tagId);
+    if (tagClean) tag.textContent = tagClean;
+    const f = this.forms[key] = {
+      base: null,
+      isDirty: () => f.base !== null && cur() !== f.base,
+      paint: () => { const d = f.isDirty(); btn.hidden = !d; tag.hidden = d; },
+      snap: () => { f.base = cur(); f.paint(); }        // 打基线并归位（保存成功/回填后调用）
+    };
+    f.snap();
+    return f;
+  }
+};
+/** 给一组输入框绑监听，值一变就重绘按钮/标签状态。 */
+function watchDirty(form, ids) {
+  ids.split(',').forEach(id => {
+    const el = document.getElementById(id.trim());
+    if (!el) return;
+    const h = () => form.paint();
+    el.addEventListener('input', h);
+    el.addEventListener('change', h);
+  });
+}
+// 兜底：还有没保存的更改就关页面/刷新时，浏览器弹确认，防手滑丢配置
+window.addEventListener('beforeunload', e => {
+  if (Object.values(DirtyUI.forms).some(f => f.isDirty())) { e.preventDefault(); e.returnValue = ''; }
+});
 
 // -- 健康总览（首屏报警：哪里不行、怎么搞） --
 async function loadHealth() {
@@ -694,6 +742,11 @@ async function loadAccounts() {
   const [r, gs] = await Promise.all([api('/api/accounts'), api('/api/settings/gateway')]);
   const list = r.data || [];
   _thr = (gs.data && gs.data.priority_threshold) ?? 100;
+  if (!window._thrLoaded) {          // 阈值输入框只在首次载入时对齐服务端真值——
+    $('#thrInput').value = _thr;     // 之前一直显示硬编码 100，实际生效值可能是别的，纯误导
+    window._thrLoaded = true;
+    if (DirtyUI.forms.thr) DirtyUI.forms.thr.snap();
+  }
   const dist = (gs.data && gs.data.distribution) || 'round-robin';
   $('#distSel').value = dist;
   $('#thrWrap').hidden = dist !== 'priority';      // 阈值只在优先级策略下有意义
@@ -798,6 +851,8 @@ async function saveThreshold(btn) {
     });
     if (!r.ok) return toast(r.error || '保存失败', false);
     _thr = r.data.priority_threshold;
+    $('#thrInput').value = _thr;                   // 对齐服务端真值（防越界值回显偏差）
+    if (DirtyUI.forms.thr) DirtyUI.forms.thr.snap();
     toast(_thr > 0 ? `积分降级阈值已保存：${_thr}（热生效）` : '已关闭积分感知（阈值 0）');
     loadAccounts();                                // 重渲染标红
   });
@@ -879,6 +934,7 @@ async function pollSave(btn) {
       ? `每天 ${r.data.daily_at} 定点`
       : `每 ${r.data.interval_minutes} 分钟轮询`;
     toast(`托管节奏已保存并生效：${desc}` + (r.data.notify_url ? '，推送已配置' : ''));
+    if (DirtyUI.forms.poll) DirtyUI.forms.poll.snap();    // 保存成功 → 按钮归位成「已保存」tag
   });
 }
 async function serviceRestart() {
@@ -918,6 +974,7 @@ async function pollAuto() {
     $('#pollNotify').value = r.data.notify_url || '';
     pollModeUi();
     window._pollCfgLoaded = true;
+    if (DirtyUI.forms.poll) DirtyUI.forms.poll.snap();   // 服务端值回填完打基线，此后改动才算「未保存」
   }
   const hist = r.data.history || [];
   $('#autoHistEmpty').hidden = hist.length > 0;
@@ -1213,6 +1270,7 @@ async function saveChannelKey(btn) {
       body: JSON.stringify({provider: pid, key})});
     if (!r.ok) return toast(r.error, false);
     $('#ckProvider').value = ''; $('#ckKey').value = '';
+    if (DirtyUI.forms.ck) DirtyUI.forms.ck.paint();
     toast(pid + ' 渠道已保存，网关模型目录已刷新');
     loadChannelKeys();
   });
@@ -1277,6 +1335,7 @@ async function gwKeySave(btn) {
     });
     if (!r.ok) return toast(r.error, false);
     $('#gwKeyInput').value = '';
+    if (DirtyUI.forms.gwKey) DirtyUI.forms.gwKey.paint();   // 清空即归位（程序赋值不触发 input）
     toast(r.data.is_default
       ? `访问密钥已恢复内置默认（${r.data.key}），立即生效`
       : `访问密钥已保存并生效：${r.data.key.slice(0, 2) + '•••' + r.data.key.slice(-2)}`);
@@ -1376,6 +1435,7 @@ async function gwPortSave(btn) {
     });
     if (!r.ok) return toast(r.error, false);
     $('#gwPortInput').value = '';
+    if (DirtyUI.forms.gwPort) DirtyUI.forms.gwPort.paint();
     if (r.data.restart_required) {
       if (confirm(`服务端已保存端口 ${r.data.port}。重启服务后生效，现在就重启吗？`)) {
         await api('/api/system/restart', {method: 'POST'});
@@ -1391,6 +1451,31 @@ async function gwPortSave(btn) {
     gwLoad();
   });
 }
+
+// -- 五处保存表单接入「未保存更改」指示（干净=绿 tag，改动=亮保存按钮） --
+// 托管节奏：指纹与 pollSave 提交体同源取值，当前模式无关的字段变化不误报
+function _pollFp() {
+  const mode = $('#pollMode').value;
+  const b = {mode, notify_url: $('#pollNotify').value.trim()};
+  if (mode === 'daily') b.daily_at = $('#pollDaily').value || '09:00';
+  else {
+    const v = $('#pollPreset').value;
+    const mins = v === 'custom' ? parseInt($('#pollCustom').value) : parseInt(v);
+    b.interval_minutes = isNaN(mins) ? null : mins;
+  }
+  return JSON.stringify(b);
+}
+DirtyUI.make('poll', 'pollSaveBtn', 'pollCleanTag', _pollFp, '✓ 节奏与推送已保存并生效');
+watchDirty(DirtyUI.forms.poll, 'pollMode, pollPreset, pollCustom, pollDaily, pollNotify');
+DirtyUI.make('thr', 'thrSaveBtn', 'thrCleanTag', () => $('#thrInput').value, '✓ 阈值已生效');
+watchDirty(DirtyUI.forms.thr, 'thrInput');
+DirtyUI.make('gwKey', 'gwKeySaveBtn', 'gwKeyCleanTag', () => $('#gwKeyInput').value.trim(), '✓ 当前密钥已生效');
+watchDirty(DirtyUI.forms.gwKey, 'gwKeyInput');
+DirtyUI.make('gwPort', 'gwPortSaveBtn', 'gwPortCleanTag', () => $('#gwPortInput').value.trim(), '✓ 当前端口已生效');
+watchDirty(DirtyUI.forms.gwPort, 'gwPortInput');
+DirtyUI.make('ck', 'ckSaveBtn', 'ckCleanTag',
+  () => $('#ckProvider').value.trim() + '\u0000' + $('#ckKey').value.trim(), '✓ 渠道密钥已保存');
+watchDirty(DirtyUI.forms.ck, 'ckProvider, ckKey');
 
 loadChannels();
 </script>
