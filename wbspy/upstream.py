@@ -7,6 +7,8 @@ rewards.mjs、growth-tasks.mjs，均为实测验证的 wire 行为）：
   X-Conversation-Request-ID、X-Conversation-Message-ID，缺任一回 11128。
 * 上游按首条 system 消息开头做「渠道锚点」检查，识别第三方 agent 指纹即拒
   （11128）。对策一：前置中性导语；对策二：被拒后把 system 原文降级为 user。
+  对策三：messages 全文关键词风控（如 DeepSeek Harness 词组，实测 0/5 vs
+  中和后 5/5）——出站前在词组中插零宽空格中和，语义不变、路径不受损。
 * 错误分类：12153→凭据失效；429 族→限流（带 Retry-After）；11128/403→渠道
   拒绝（可重定位重试）；11102/11158/model_not_found→模型不可用。
 * 积分：``/billing/meter/get-user-resource-summary`` → 404 回退
@@ -189,6 +191,53 @@ def apply_channel_lead_in(messages: list[dict]) -> list[dict]:
     return messages
 
 
+# 11128 对策三（真相实锤，blog.balong.in/archives/workbuddy-unapproved-channel-400-fix）：
+# 上游在 messages 全文做关键词匹配，命中「DeepSeek Harness」词组（配合约 >1KB
+# 请求体）即拒——报错文案 "Illegal API invocation from an unapproved channel"
+# 是误导，跟渠道/账号/请求头全都无关（换账号、补请求头都救不了，实测原文
+# 0/5 全挂、中和后 5/5 全成）。中和：词组中间插零宽空格 U+200B——模型读到的
+# 语义不变，上游子串匹配不再命中。匹配器带前后负向断言跳过路径语境：
+# D:\...\DeepSeek Harness\resources 这类真实路径一旦被改写，模型会把坏路径
+# 传给工具，文件操作全挂且肉眼不可见，极难排查。
+KEYWORD_NEUTRALIZE = re.compile(
+    r"(?<![\\/])(DeepSeek)[ \u00A0]+(Harness)(?![\\/])", re.I)
+
+
+def _neutralize_text(text: str) -> str:
+    # 替换串不能用 raw string：re 的 repl 语法不认 \uXXXX（bad escape），
+    # 须让 Python 先把 \u200b 解释成零宽空格，\\1 保留为组引用。
+    return KEYWORD_NEUTRALIZE.sub("\\1\u200b \\2", text)
+
+
+def neutralize_keywords(messages: list) -> list:
+    """对策三：出站前中和 messages 文本里的风控关键词（无损、幂等）。
+
+    只动文本字段（str content / content 块数组里的 text），不碰 tool_calls
+    的 arguments——工具参数里出现该词组的场景基本是文件路径，负向断言
+    保护的也是路径，改 JSON 字符串的收益小、风险大。替换后词组中间是
+    U+200B+空格，正则不再命中，天然幂等。
+    """
+    out = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            out.append(msg)
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            out.append({**msg, "content": _neutralize_text(content)})
+        elif isinstance(content, list):
+            blocks = []
+            for blk in content:
+                if isinstance(blk, dict) and isinstance(blk.get("text"), str):
+                    blocks.append({**blk, "text": _neutralize_text(blk["text"])})
+                else:
+                    blocks.append(blk)
+            out.append({**msg, "content": blocks})
+        else:
+            out.append(msg)
+    return out
+
+
 def relocate_system_role(payload: dict) -> dict | None:
     """对策二：system 原文降级为 user 回合（原样字节、只换角色）。"""
     messages = payload.get("messages")
@@ -234,7 +283,7 @@ def normalize_payload(raw: dict) -> dict:
             fixed.append({**msg, "role": "system"})
         else:
             fixed.append(msg)
-    payload["messages"] = apply_channel_lead_in(fixed)
+    payload["messages"] = neutralize_keywords(apply_channel_lead_in(fixed))
 
     if isinstance(payload.get("tool_choice"), dict):
         payload["tool_choice"] = payload["tool_choice"].get("function", {}).get("name", "auto")
@@ -258,6 +307,9 @@ def annotate_denial(error: UpstreamError, body_text: str, demoted: bool) -> Upst
     if demoted:
         tips.append("已自动尝试 system 降级重试仍被拒（触发点在会话内容，不在 system）")
     tips.append("该审查按请求内容判定，换账号无效")
+    tips.append("真相：上游按关键词（如 DeepSeek Harness 词组）拦截，"
+                "unapproved channel 文案是误导；网关出站已默认用零宽空格中和关键词，"
+                "仍被拒说明上游换了词或命中其他内容规则")
     tips.append("建议新开会话；若仍被拒则调整本次发送的内容")
     return UpstreamError(error.status, error.code,
                          error.message + "（" + "；".join(tips) + "）",

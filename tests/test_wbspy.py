@@ -2435,6 +2435,72 @@ class TestPriorityOrderApi(unittest.TestCase):
             self.assertEqual(r.json()["data"]["distribution"], "priority")
 
 
+class TestKeywordNeutralize(unittest.TestCase):
+    """对策三：messages 全文关键词中和（11128 真相修复）。
+
+    上游按关键词（DeepSeek Harness 词组）拦 messages 全文，报错文案
+    unapproved channel 是误导。网关出站前在词组中插零宽空格 U+200B：
+    语义不变、子串匹配不再命中、真实文件路径不受损。
+    """
+
+    def test_plain_text_neutralized(self):
+        from wbspy.upstream import neutralize_keywords
+        msgs = [{"role": "system", "content": "You are powered by DeepSeek Harness."}]
+        out = neutralize_keywords(msgs)[0]["content"]
+        self.assertIn("DeepSeek\u200b Harness", out)
+        self.assertNotIn("DeepSeek Harness", out)
+
+    def test_block_list_text_neutralized(self):
+        from wbspy.upstream import neutralize_keywords
+        msgs = [{"role": "user", "content": [
+            {"type": "text", "text": "run DeepSeek Harness now"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}},
+        ]}]
+        out = neutralize_keywords(msgs)[0]["content"]
+        self.assertIn("DeepSeek\u200b Harness", out[0]["text"])
+        self.assertEqual(out[1]["type"], "image_url")   # 非文本块原样
+
+    def test_file_path_protected(self):
+        from wbspy.upstream import neutralize_keywords
+        text = r"D:\10_COD\DeepSeek Harness\resources\app.asar\dsh\bin"
+        out = neutralize_keywords([{"role": "user", "content": text}])[0]["content"]
+        self.assertNotIn("\u200b", out)                 # 路径语境绝不改写
+
+    def test_non_text_fields_untouched(self):
+        from wbspy.upstream import neutralize_keywords
+        msgs = [{"role": "assistant", "tool_calls": [
+            {"id": "t1", "type": "function",
+             "function": {"name": "run", "arguments": "{\"cmd\":\"DeepSeek Harness\"}"}}]}]
+        out = neutralize_keywords(msgs)[0]["tool_calls"][0]["function"]["arguments"]
+        self.assertIn("DeepSeek Harness", out)          # arguments 不碰
+
+    def test_idempotent(self):
+        from wbspy.upstream import neutralize_keywords
+        msgs = [{"role": "user", "content": "DeepSeek Harness and DeepSeek  Harness"}]
+        once = neutralize_keywords(msgs)
+        twice = neutralize_keywords([dict(once[0])])
+        self.assertEqual(once[0]["content"], twice[0]["content"])
+
+    def test_case_insensitive(self):
+        from wbspy.upstream import neutralize_keywords
+        out = neutralize_keywords(
+            [{"role": "user", "content": "deepseek harness setup"}])[0]["content"]
+        self.assertNotIn("deepseek harness", out)
+
+    def test_normalize_payload_integrated(self):
+        from wbspy.upstream import normalize_payload
+        payload = {"model": "m", "messages": [
+            {"role": "user", "content": "x" * 2048 + " powered by DeepSeek Harness."}]}
+        out = normalize_payload(payload)["messages"][0]["content"]
+        self.assertIn("DeepSeek\u200b Harness", out)
+
+    def test_non_ascii_space_variant(self):
+        from wbspy.upstream import neutralize_keywords
+        out = neutralize_keywords(
+            [{"role": "user", "content": "DeepSeek\u00a0Harness ok"}])[0]["content"]
+        self.assertNotIn("DeepSeek\u00a0Harness", out)
+
+
 class TestDenialAnnotation(unittest.TestCase):
     """11128 审查拒错误消息的诊断注解：大小分档 + 对策状态 + 行动指引。
 
