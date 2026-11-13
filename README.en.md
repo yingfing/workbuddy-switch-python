@@ -42,6 +42,15 @@ Then open `http://127.0.0.1:8178` — everything else (login, check-ins, gateway
 | **Web console** | QR login, account pool, model catalog, automation logs, usage stats; Fluent-style dark/light themes |
 | **Self-update** | `wbspy update` checks GitHub releases; on CN networks it automatically falls back Aliyun DoH → Google DoH → curated IPs |
 
+## Screenshots
+
+| | |
+|---|---|
+| [![Login providers](docs/screenshots/login.png)](docs/screenshots/login.png) | [![Account pool](docs/screenshots/accounts.png)](docs/screenshots/accounts.png) |
+| [![Automation](docs/screenshots/auto.png)](docs/screenshots/auto.png) | [![Gateway](docs/screenshots/gateway.png)](docs/screenshots/gateway.png) |
+
+*Login provider wall · account pool (priority strategy + health overview) · automation bot (schedule + run history) · OpenAI-compatible gateway. Captured with demo data.*
+
 ## Quick start
 
 ```bash
