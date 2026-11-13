@@ -44,12 +44,14 @@ Then open `http://127.0.0.1:8178` — everything else (login, check-ins, gateway
 
 ## Screenshots
 
+[![Login providers](docs/screenshots/login.png)](docs/screenshots/login.png)
+
 | | |
 |---|---|
-| [![Login providers](docs/screenshots/login.png)](docs/screenshots/login.png) | [![Account pool](docs/screenshots/accounts.png)](docs/screenshots/accounts.png) |
-| [![Automation](docs/screenshots/auto.png)](docs/screenshots/auto.png) | [![Gateway](docs/screenshots/gateway.png)](docs/screenshots/gateway.png) |
+| [![Account pool](docs/screenshots/accounts.png)](docs/screenshots/accounts.png) | [![Automation](docs/screenshots/auto.png)](docs/screenshots/auto.png) |
+| [![Gateway](docs/screenshots/gateway.png)](docs/screenshots/gateway.png) | [![Log drawer](docs/screenshots/log_drawer.png)](docs/screenshots/log_drawer.png) |
 
-*Login provider wall · account pool (priority strategy + health overview) · automation bot (schedule + run history) · OpenAI-compatible gateway. Captured with demo data.*
+*Login provider wall · account pool (priority strategy + health overview) · automation bot (schedule + run history) · OpenAI-compatible gateway · global log drawer (live log / run history / debug, opened from the floating button on any page). Captured with demo data.*
 
 ## Quick start
 

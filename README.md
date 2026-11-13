@@ -16,12 +16,14 @@
 
 ## 界面预览
 
+[![登录渠道](docs/screenshots/login.png)](docs/screenshots/login.png)
+
 | | |
 |---|---|
-| [![登录渠道](docs/screenshots/login.png)](docs/screenshots/login.png) | [![账号池](docs/screenshots/accounts.png)](docs/screenshots/accounts.png) |
-| [![积分自动化](docs/screenshots/auto.png)](docs/screenshots/auto.png) | [![网关](docs/screenshots/gateway.png)](docs/screenshots/gateway.png) |
+| [![账号池](docs/screenshots/accounts.png)](docs/screenshots/accounts.png) | [![积分自动化](docs/screenshots/auto.png)](docs/screenshots/auto.png) |
+| [![网关](docs/screenshots/gateway.png)](docs/screenshots/gateway.png) | [![日志抽屉](docs/screenshots/log_drawer.png)](docs/screenshots/log_drawer.png) |
 
-*登录渠道墙 · 账号池（优先级策略 + 健康总览）· 积分自动化（托管节奏 + 运行历史）· OpenAI 兼容网关。以上为演示数据截图。*
+*登录渠道墙 · 账号池（优先级策略 + 健康总览）· 积分自动化（托管节奏 + 运行历史）· OpenAI 兼容网关 · 全局日志抽屉（实时日志/历史轮次/调试日志，任意页面右下角唤出）。以上为演示数据截图。*
 
 ## 安装（按你的平台挑一个）
 
