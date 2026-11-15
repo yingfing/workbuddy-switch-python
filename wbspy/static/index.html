@@ -379,7 +379,13 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         <span class="pill" id="pollCleanTag" style="color:var(--ok)">✓ 节奏与推送已保存并生效</span>
         <span class="tag">改上面任意一项后，这里会亮起保存按钮——没亮就是没改动</span>
       </div>
-      <div class="pill">实时与历史日志看右下角悬浮的 📜 按钮（任何页面都可查看）。</div>
+      <div class="pill">历史轮次看下面的「运行历史」；右下角 📜 悬浮钮任何页面可开日志抽屉。</div>
+    </div>
+    <div class="card">
+      <h2>运行日志 <span class="tag" id="autoLogTag">实时刷新 · 最近 60 行</span></h2>
+      <pre id="autoLogBox" style="max-height:340px;overflow:auto;background:var(--panel-2);
+        border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;margin:0;
+        color:var(--log-fg);font:11.5px/1.7 ui-monospace,Consolas,monospace;white-space:pre-wrap">暂无日志。</pre>
     </div>
     <div class="card">
       <h2>运行历史 <span class="tag">最近 10 轮 · 落盘 ~/.wbspy/automation-history.json</span></h2>
@@ -993,16 +999,34 @@ async function pollAuto() {
   $('#autoHistEmpty').hidden = hist.length > 0;
   $('#autoHistTable').style.display = hist.length ? '' : 'none';
   $('#autoHistTable tbody').innerHTML = histRowsHtml(hist);
+  // 日志主体实时刷新：内容签名没变就跳过重绘，贴底跟随手动上翻
+  const lb = $('#autoLogBox');
+  if (lb) {
+    const lines = r.data.log || [];
+    const txt = lines.join('\n') || '暂无日志。';
+    $('#autoLogTag').textContent = r.data.running ? '● 运行中 · 实时刷新' : '实时刷新 · 最近 60 行';
+    if (lb.textContent !== txt) {
+      const stick = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
+      lb.textContent = txt;
+      if (stick) lb.scrollTop = lb.scrollHeight;
+    }
+  }
   if ($('#tab-auto').hidden === false) setTimeout(pollAuto, 2500);
 }
 
 // -- 全局日志抽屉（右下角悬浮按钮，任何页面可看实时与历史日志） --
 let logDrawerOpen = false, logSeenTotal = 0, logTabCur = 'live';
+let _liveTimer = null, _liveSig = '';
+function livePoll(on) {
+  if (on && !_liveTimer) _liveTimer = setInterval(loadLogDrawer, 2000);
+  else if (!on && _liveTimer) { clearInterval(_liveTimer); _liveTimer = null; }
+}
 function toggleLogDrawer(force) {
   logDrawerOpen = force !== undefined ? force : !logDrawerOpen;
   $('#logDrawer').classList.toggle('on', logDrawerOpen);
   $('#logDrawerBg').classList.toggle('on', logDrawerOpen);
   dbgPoll(logDrawerOpen && logTabCur === 'debug');   // 关抽屉即停轮询
+  livePoll(logDrawerOpen && logTabCur === 'live');   // 实时日志：抽屉开着就持续刷新
   if (logDrawerOpen) loadLogDrawer();
 }
 function logTab(t) {
@@ -1013,6 +1037,7 @@ function logTab(t) {
   $('#ldHist').hidden = t !== 'hist';
   $('#ldDebug').hidden = t !== 'debug';
   dbgPoll(t === 'debug');                    // 调试标签激活期间自动刷新
+  livePoll(logDrawerOpen && t === 'live');   // 切回实时标签恢复轮询
   if (t === 'hist') loadHistToDrawer();
   if (t === 'debug') loadDebugToDrawer();
 }
@@ -1024,8 +1049,14 @@ async function loadLogDrawer() {
   $('#logCount').textContent = logSeenTotal ? `累计 ${logSeenTotal} 行` : '';
   if (logTabCur === 'live') {
     const el = $('#ldLive');
-    el.textContent = (r.data.log || []).join('\n') || '暂无日志。';
-    el.scrollTop = el.scrollHeight;
+    const log = r.data.log || [];
+    const last = log.length ? log[log.length - 1] : '';
+    const sig = logSeenTotal + '|' + log.length + '|' + last;
+    if (sig === _liveSig) return;            // 内容没变：跳过重绘
+    _liveSig = sig;
+    const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    el.textContent = log.join('\n') || '暂无日志。';
+    if (stick) el.scrollTop = el.scrollHeight;
   }
 }
 async function loadHistToDrawer() {
