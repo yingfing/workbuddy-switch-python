@@ -776,6 +776,46 @@ class WorkBuddyClient:
                 return "今日活跃不足，领养任务未完成（明天再试）"
             raise
 
+    # -- Buddy 盲盒（能量开新 Buddy；须在旅行空档调用）--------------------------
+
+    def buddy_box_open(self) -> str:
+        """能量攒够就开 Buddy 盲盒；返回描述，无可开项或查询失败返回 ""。
+
+        契约（2026-11 对照 88lin/workbuddy-auto-signin 实测）：GET
+        /activity/growth/buddy/quota 给 affordable（可开数）与 max_open_count
+        （单次上限）；POST /buddy/open 必须带防重放 client_token，缺了直接 400。
+        开 Buddy 会覆盖旅行记录——调用方必须确保旅行处于 idle（礼物已领、
+        尚未出发）。open 的失败在这里就地转成文字返回，不让 travel 托管段
+        整体重试（claim/depart 已经做过，重跑会重复出发）。
+        """
+        try:
+            data, _ = self._reward_request("/activity/growth/buddy/quota", method="GET")
+        except UpstreamError:
+            return ""                      # 活动未开放（404）等，静默跳过
+        data = data if isinstance(data, dict) else {}
+        try:
+            affordable = int(data.get("affordable") or 0)
+            max_open = int(data.get("max_open_count") or 1) or 1
+        except (TypeError, ValueError):
+            return ""
+        if affordable <= 0:
+            return ""
+        count = max(1, min(affordable, max_open))
+        try:
+            body, _ = self._reward_request("/activity/growth/buddy/open",
+                                           body={"count": count,
+                                                 "client_token": str(uuid.uuid4())})
+        except UpstreamError as exc:
+            return f"开 Buddy 盲盒失败：{exc.message}"
+        body = body if isinstance(body, dict) else {}
+        name = body.get("buddy") or body.get("name")
+        if isinstance(name, dict):
+            name = name.get("name")
+        if not name and body.get("buddies"):
+            buds = body["buddies"]
+            name = f"{len(buds)} 只" if isinstance(buds, list) else "新 Buddy"
+        return f"开 Buddy 盲盒 ×{count}" + (f"（{name}）" if name else "")
+
     # -- 连登兑换（streak tiers）-------------------------------------------------
 
     def streak_full(self) -> dict:

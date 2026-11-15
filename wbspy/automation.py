@@ -131,9 +131,17 @@ def run_once(doc: Document, log: Callable[[str], None] = print) -> dict:
             claim = client.travel_claim(state.get("record_id"))
             summary["travel"] = f"领取 +{claim.get('credit')} 积分"
             state = client.travel_status()
-        if state["state"] == "idle" and not state.get("daily_limit_reached"):
-            client.travel_depart(4)
-            return summary.get("travel") or "已出发（古镇客栈）"
+        if state["state"] == "idle":
+            # 领完礼物、出发前的空档开能量盲盒：开 Buddy 会覆盖旅行记录（88lin
+            # 契约），只有明确 idle 才能开；名额用完不出发但盲盒照开。
+            # 返回值非 str（异常兜底）时忽略，失败不挡出发。
+            box = client.buddy_box_open()
+            if isinstance(box, str) and box:
+                summary["buddy_box"] = box
+            if not state.get("daily_limit_reached"):
+                client.travel_depart(4)
+                return summary.get("travel") or "已出发（古镇客栈）"
+            return summary.get("travel") or "今日旅行名额已用完"
         return summary.get("travel") or f"状态：{state['state']}"
     result = _retry(_travel, "travel", log, summary)
     if result:

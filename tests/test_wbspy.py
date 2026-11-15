@@ -5,6 +5,7 @@ import time
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -541,6 +542,121 @@ class TestAutomationHistory(unittest.TestCase):
             self.assertEqual(hist[0]["results"][0]["uid"], "h1")
             self.assertTrue(hist[0]["log"])             # 日志行也入档
             self.assertIn("checkin", out["h1"])
+
+
+class TestBuddyBox(unittest.TestCase):
+    """能量开 Buddy 盲盒（契约对照 88lin/workbuddy-auto-signin 实测）。"""
+
+    def _client(self):
+        from wbspy.document import parse_auth
+        from wbspy.upstream import WorkBuddyClient
+        doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
+                          "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}})
+        return WorkBuddyClient(doc)
+
+    @staticmethod
+    def _resp(payload, status=200):
+        from unittest.mock import MagicMock
+        resp = MagicMock(ok=True, status_code=status)
+        resp.json.return_value = payload
+        return resp
+
+    def _run(self, quota_payload, open_payload=None, open_status=200):
+        client = self._client()
+        calls = []
+
+        def _fake(method, url, **kw):
+            calls.append((method, url.rsplit("/activity/growth/", 1)[-1], kw.get("data")))
+            if "/buddy/quota" in url:
+                return self._resp({"code": 0, "data": quota_payload})
+            return self._resp({"code": 404, "msg": "not found"} if open_status == 404
+                              else {"code": 0, "data": open_payload}, status=open_status)
+
+        with patch.object(client.http, "request", side_effect=_fake):
+            out = client.buddy_box_open()
+        return out, calls
+
+    def test_no_energy_stays_silent(self):
+        out, calls = self._run({"affordable": 0, "max_open_count": 1})
+        self.assertEqual(out, "")
+        self.assertEqual(len(calls), 1)          # 没能量就不打 open
+
+    def test_opens_up_to_max_and_names_buddy(self):
+        out, calls = self._run({"affordable": 3, "max_open_count": 2},
+                               {"buddy": {"name": "橘座"}})
+        self.assertIn("×2", out)                 # 数量取 affordable 与单次上限的较小值
+        self.assertIn("橘座", out)
+        self.assertEqual(calls[1][0], "POST")
+        self.assertIn("client_token", calls[1][2])   # 防重放 token 必带（缺了 400）
+
+    def test_buddies_list_fallback(self):
+        out, _ = self._run({"affordable": 1, "max_open_count": 1},
+                           {"buddies": [{"name": "a"}, {"name": "b"}, {"name": "c"}]})
+        self.assertIn("3 只", out)
+
+    def test_quota_404_silent(self):
+        out, _ = self._run(None, open_status=404)
+        self.assertEqual(out, "")                # 活动未开放静默跳过
+
+    def test_open_failure_returns_text_not_raise(self):
+        client = self._client()
+
+        def _fake(method, url, **kw):
+            if "/buddy/quota" in url:
+                return self._resp({"code": 0, "data": {"affordable": 1, "max_open_count": 1}})
+            return self._resp({"code": 500, "msg": "能量不足"})
+
+        with patch.object(client.http, "request", side_effect=_fake):
+            out = client.buddy_box_open()
+        self.assertIn("失败", out)               # 就地转文字，不向 travel 托管段抛
+
+    def test_travel_idle_window_calls_box_before_depart(self):
+        """automation 旅行空档顺序：领礼物 → 开盲盒 → 出发（开 Buddy 覆盖
+        旅行记录，只有明确 idle 才能开——88lin 契约）。"""
+        from wbspy import automation
+        from wbspy.document import parse_auth
+        doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
+                          "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}})
+        client = MagicMock()
+        client.buddy_ensure.return_value = "已有猫猫"
+        client.checkin_status.return_value = {"checked_in": True}
+        client.growth_tasks.return_value = []
+        client.streak_full.return_value = {"days": 0, "tiers": [], "makeup_cards": 0}
+        client.redeem_streak_available.return_value = []
+        client.lottery_draw_all.return_value = []
+        client.heatmap_missed_yesterday.return_value = None
+        client.travel_status.side_effect = [
+            {"state": "arrived", "record_id": "9", "daily_limit_reached": False},
+            {"state": "idle", "daily_limit_reached": False}]
+        client.travel_claim.return_value = {"credit": 30}
+        client.buddy_box_open.return_value = "开 Buddy 盲盒 ×1（橘座）"
+        with patch.object(automation, "WorkBuddyClient", return_value=client):
+            summary = automation.run_once(doc, log=lambda *_: None)
+        self.assertEqual(summary.get("buddy_box"), "开 Buddy 盲盒 ×1（橘座）")
+        seq = [name for name, _args, _kw in client.method_calls
+               if name in ("travel_claim", "buddy_box_open", "travel_depart")]
+        self.assertEqual(seq, ["travel_claim", "buddy_box_open", "travel_depart"])
+
+    def test_box_failure_does_not_block_depart(self):
+        """盲盒失败（非 str 返回）不挡出发，名额用完时也不出发。"""
+        from wbspy import automation
+        from wbspy.document import parse_auth
+        doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
+                          "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}})
+        client = MagicMock()
+        client.buddy_ensure.return_value = "已有猫猫"
+        client.checkin_status.return_value = {"checked_in": True}
+        client.growth_tasks.return_value = []
+        client.streak_full.return_value = {"days": 0, "tiers": [], "makeup_cards": 0}
+        client.redeem_streak_available.return_value = []
+        client.lottery_draw_all.return_value = []
+        client.heatmap_missed_yesterday.return_value = None
+        client.travel_status.return_value = {"state": "idle", "daily_limit_reached": False}
+        client.buddy_box_open.return_value = 12345      # 非字符串 → 忽略
+        with patch.object(automation, "WorkBuddyClient", return_value=client):
+            summary = automation.run_once(doc, log=lambda *_: None)
+        self.assertNotIn("buddy_box", summary)
+        self.assertIn("travel", summary)                # 出发照常
 
 
 class TestGatewayModels(unittest.TestCase):
