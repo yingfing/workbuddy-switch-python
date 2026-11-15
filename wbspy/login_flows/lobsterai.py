@@ -55,7 +55,7 @@ def start(channel, ticket: Ticket) -> None:
     first_keyfrom = str(int(time.time() * 1000))
 
     sharecode = os.environ.get("WBSPY_PUBLIC_SHARECODE", "")
-    callback = f"{_public_base()}/authorize"
+    callback = f"{_public_base(ticket)}/authorize"
     if sharecode:
         callback += f"?sharecode={quote_plus(sharecode)}"
 

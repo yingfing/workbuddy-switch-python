@@ -39,10 +39,11 @@ USER_INFO_PATH = "/cloudide/api/v3/trae/GetUserInfo"
 PKCE_EXCHANGE_PATH = "/trae/api/v3/oauth/ExchangeToken"
 
 
-def _public_base() -> str:
-    """回调基地址：环境变量优先（公网部署），否则本机 web 端口。"""
-    return (os.environ.get("WBSPY_PUBLIC_ORIGIN") or
-            "http://127.0.0.1:8178").rstrip("/")
+def _public_base(ticket: "Ticket | None" = None) -> str:
+    """回调基地址：显式环境变量 > 登录请求推导（跟随面板部署地址）> 本机默认。"""
+    return (os.environ.get("WBSPY_PUBLIC_ORIGIN")
+            or (ticket.origin_hint if ticket else "")
+            or "http://127.0.0.1:8178").rstrip("/")
 
 
 def _pkce() -> tuple[str, str]:
@@ -59,7 +60,7 @@ def start(channel, ticket: Ticket) -> None:
     verifier, challenge = _pkce()
 
     sharecode = os.environ.get("WBSPY_PUBLIC_SHARECODE", "")
-    callback = f"{_public_base()}/authorize"
+    callback = f"{_public_base(ticket)}/authorize"
     if sharecode:
         callback += f"?sharecode={quote_plus(sharecode)}"
 

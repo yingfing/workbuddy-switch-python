@@ -37,6 +37,7 @@ class Ticket:
     message: str = ""
     # 会话状态（各流程自行约定语义）
     state: str = ""
+    origin_hint: str = ""             # 发起登录的面板地址（回调跟随部署位置）
     code: str = ""
     origin: str = ""
     platform: str = ""

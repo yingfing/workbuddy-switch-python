@@ -2,6 +2,11 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.31] — 2026-11-15
+
+### 修复
+- **TRAE / LobsterAI 授权回调跟随面板部署地址**。此前回调基址 `_public_base()` 硬编码 `http://127.0.0.1:8178`，只有设了环境变量 `WBSPY_PUBLIC_ORIGIN` 才会变——部署在局域网主机（如 192.168.0.6:8080）时，TRAE 授权页把回调拼成 `127.0.0.1:8178/authorize`，浏览器跳回的是用户本机而非服务器，回调必然断线。本次修复：`/api/login/start` 从请求的 `base_url` 自动推导面板地址并透传到登录票据（`Ticket.origin_hint`），回调优先级改为 **`WBSPY_PUBLIC_ORIGIN`（显式配置，反向代理场景用）> 请求推导 > 本机默认**——部署在哪回调就跟到哪，零配置。测试 242 项全绿（TestCallbackOrigin 4 项：hint 生效、env 覆盖、CLI 回落、透传链路）。
+
 ## [0.2.30] — 2026-11-15
 
 ### 修复

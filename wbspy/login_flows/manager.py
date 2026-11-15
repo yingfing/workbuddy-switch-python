@@ -47,20 +47,24 @@ class LoginSessionManager:
 
     # -- 启动 -----------------------------------------------------------------
 
-    def start(self, channel_id: str, method: str | None = None) -> dict:
+    def start(self, channel_id: str, method: str | None = None,
+              origin: str | None = None) -> dict:
+        """origin：发起登录的面板地址（如 http://192.168.0.6:8080），回调回它。"""
         channel = get_channel(channel_id)
         chosen = method or methods_of(channel)[0]
         errors: list[str] = []
         for m in ([chosen] if method else methods_of(channel)):
             try:
-                return self._start_one(channel, m)
+                return self._start_one(channel, m, origin=origin)
             except Exception as exc:
                 errors.append(f"{m}: {exc}")
         raise RuntimeError(f"渠道 {channel.name} 暂无可用登录方式（{'；'.join(errors)}）")
 
-    def _start_one(self, channel: Channel, method: str) -> dict:
+    def _start_one(self, channel: Channel, method: str,
+                   origin: str | None = None) -> dict:
         ticket = Ticket(id=uuid.uuid4().hex[:16], channel_id=channel.id,
-                        method=method, expires_at=time.time() + LOGIN_TIMEOUT_SEC)
+                        method=method, expires_at=time.time() + LOGIN_TIMEOUT_SEC,
+                        origin_hint=(origin or "").rstrip("/"))
         if method == "local":
             doc = local_login(channel.id)
             save_account(doc)

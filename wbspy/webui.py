@@ -171,8 +171,11 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
     @app.post("/api/login/start")
     async def login_start(request: Request):
         body = await request.json()
+        # 回调基址跟随本次请求的面板地址（反向代理请设 WBSPY_PUBLIC_ORIGIN）
+        origin = str(request.base_url).rstrip("/")
         try:
-            result = sessions.start(body.get("channel", ""), body.get("method"))
+            result = sessions.start(body.get("channel", ""), body.get("method"),
+                                    origin=origin)
             if result.get("kind") == "browser" and "accounts.google.com" in (result.get("auth_url") or ""):
                 _ensure_gemini_listener()
             return _ok(result)

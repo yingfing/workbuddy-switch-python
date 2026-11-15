@@ -3535,3 +3535,56 @@ class TestHealthAlertText(unittest.TestCase):
         self.assertEqual(len(hit), 1)
         self.assertIn("无法自动补给", hit[0]["action"])
         self.assertNotIn("积分自动化", hit[0]["action"])
+
+
+class TestCallbackOrigin(unittest.TestCase):
+    """TRAE/LobsterAI 回调基址跟随面板部署地址（不再硬编码 127.0.0.1）。"""
+
+    def test_origin_hint_beats_default(self):
+        """无环境变量时用登录请求推导的地址。"""
+        import os
+        from unittest.mock import patch
+        from wbspy.login_flows.trae import _public_base
+        from wbspy.login_flows.core import Ticket
+        t = Ticket(id="x", channel_id="trae", method="browser-callback",
+                   origin_hint="http://192.168.0.6:8080")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_public_base(t), "http://192.168.0.6:8080")
+
+    def test_env_overrides_hint(self):
+        """WBSPY_PUBLIC_ORIGIN 显式配置优先于请求推导（反向代理场景）。"""
+        import os
+        from unittest.mock import patch
+        from wbspy.login_flows.trae import _public_base
+        from wbspy.login_flows.core import Ticket
+        t = Ticket(id="x", channel_id="trae", method="browser-callback",
+                   origin_hint="http://192.168.0.6:8080")
+        with patch.dict(os.environ, {"WBSPY_PUBLIC_ORIGIN": "https://wbspy.example.com"}):
+            self.assertEqual(_public_base(t), "https://wbspy.example.com")
+
+    def test_fallback_default(self):
+        """无 hint 无环境变量（CLI 旧路径）回落本机默认。"""
+        import os
+        from unittest.mock import patch
+        from wbspy.login_flows.trae import _public_base
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_public_base(), "http://127.0.0.1:8178")
+
+    def test_manager_passes_origin(self):
+        """manager.start 透传 origin 到 ticket。"""
+        from unittest.mock import patch, MagicMock
+        from wbspy.login_flows.manager import LoginSessionManager
+        mgr = LoginSessionManager()
+        captured = {}
+        real_start_one = mgr._start_one
+
+        def spy(channel, method, origin=None):
+            captured["origin"] = origin
+            return real_start_one(channel, method, origin=origin)
+
+        with patch.object(mgr, "_start_one", side_effect=spy), \
+             patch("wbspy.login_flows.manager.local_login") as ll, \
+             patch("wbspy.login_flows.manager.save_account"):
+            ll.return_value = MagicMock()
+            mgr.start("trae", "local", origin="http://192.168.0.6:8080/")
+        self.assertEqual(captured["origin"], "http://192.168.0.6:8080/")
