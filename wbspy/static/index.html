@@ -466,6 +466,16 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       </div>
 
       <div class="gwSec">
+        <div class="gwTitle">面板访问密钥 <span class="tag" id="pkStateTag">—</span></div>
+        <div class="row">
+          <input id="pkInput" type="password" placeholder="留空 = 关闭（默认，家人局域网不设防）" style="flex:1">
+          <button class="btn" id="pkSaveBtn" onclick="panelKeySave(this)" hidden>保存密钥</button>
+          <button class="btn ghost" onclick="panelKeyClear(this)">一键关闭</button>
+        </div>
+        <div class="hint">可选功能，<b>默认关闭</b>。开启后本面板所有管理接口要求密钥（网关 /v1 不受影响）；输入一次本浏览器自动记住，不影响日常使用。用家庭路由器做设备隔离已足够时无需开启。</div>
+      </div>
+
+      <div class="gwSec">
         <div class="gwTitle">11128 取证 <button class="btn sm" onclick="loadForensics()">刷新留存</button></div>
         <div class="hint">对话被 11128 拒时自动把出站请求体留存在服务器 <code>~/.wbspy/denials/</code>（最近 5 份）；
           把可疑消息段贴进探针逐段验证——403 的那段就是新指纹所在，200 的排除。</div>
@@ -553,7 +563,22 @@ function applyTheme(t){
 applyTheme((()=>{ try{ return localStorage.getItem('wbspy-theme') || 'dark'; }catch(e){ return 'dark'; } })());
 themeBtn.onclick = () =>
   applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
-const api = (p, opt) => fetch(p + (p.includes('?') ? '&' : '?') + location.search.slice(1), opt).then(r => r.json());
+const _panelKey = () => localStorage.getItem('wbspyPanelKey') || '';
+const api = (p, opt) => {
+  opt = opt || {};
+  if (_panelKey()) {
+    opt.headers = Object.assign({'X-Panel-Key': _panelKey()}, opt.headers || {});
+  }
+  return fetch(p + (p.includes('?') ? '&' : '?') + location.search.slice(1), opt)
+    .then(async r => {
+      if (r.status === 401 && p.startsWith('/api/')) {
+        const k = prompt('本面板已开启访问密钥，请输入（输入后本浏览器会记住）');
+        if (k) { localStorage.setItem('wbspyPanelKey', k.trim());
+                 return api(p, opt); }
+      }
+      return r.json();
+    });
+};
 let pollTimer = null;
 
 // -- 操作结果提示：所有写操作成功后弹出（文案来自服务端响应，即落盘确认）--
@@ -1329,6 +1354,7 @@ async function delKey(pid) {
 
 // -- 网关 --
 async function loadGateway() {
+  panelKeyLoad();
   const u = await api('/api/usage');
   const days = Object.entries(u.data || {});
   $('#usageEmpty').hidden = days.length > 0;
@@ -1516,6 +1542,43 @@ async function probeRun(btn) {
   $('#probeOut').textContent = d.denied
     ? `⛔ 403 被拒（${d.upstream_code || d.status}，${d.latency_ms}ms）——这段内容就是指纹`
     : `✅ ${d.status} 通过（${d.latency_ms}ms）——这段无罪`;
+}
+
+async function panelKeySave(btn) {
+  await busy(btn, async () => {
+    const v = $('#pkInput').value.trim();
+    const r = await api('/api/settings/panel-key', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({panel_key: v})
+    });
+    if (!r.ok) return toast(r.error, false);
+    localStorage.setItem('wbspyPanelKey', v);      // 本浏览器立刻记住，免输
+    $('#pkInput').value = '';
+    paintPanelKey(!!v);
+    toast(v ? '面板密钥已开启，本浏览器已记住' : '面板密钥已关闭');
+  });
+}
+async function panelKeyClear(btn) {
+  await busy(btn, async () => {
+    const r = await api('/api/settings/panel-key', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({panel_key: ''})
+    });
+    if (!r.ok) return toast(r.error, false);
+    localStorage.removeItem('wbspyPanelKey');
+    paintPanelKey(false);
+    toast('面板密钥已关闭（默认不设防状态）');
+  });
+}
+function paintPanelKey(on) {
+  $('#pkStateTag').textContent = on ? '● 已开启' : '○ 关闭（默认）';
+  $('#pkStateTag').style.color = on ? 'var(--ok)' : 'var(--dim)';
+}
+async function panelKeyLoad() {
+  const r = await api('/api/settings/panel-key');
+  if (r.ok) paintPanelKey(!!r.data.enabled);
 }
 
 async function gwPortSave(btn) {

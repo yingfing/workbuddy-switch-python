@@ -727,6 +727,43 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         _log(f"网关访问密钥已更新（{'内置默认' if effective == DEFAULT_API_KEY else '自定义'}），立即生效。")
         return _ok({"key": effective, "is_default": effective == DEFAULT_API_KEY})
 
+    @app.get("/api/settings/panel-key")
+    def panel_key_get():
+        key = (load_config().get("panel_key") or "").strip()
+        return _ok({"enabled": bool(key)})
+
+    @app.post("/api/settings/panel-key")
+    async def panel_key_set(request: Request):
+        """面板访问密钥开关：默认关闭（家人局域网不设防）。开启后所有 /api/*
+        管理端点要求 X-Panel-Key（?key= 亦可），/v1 网关不受影响（有自己的
+        api_key）。设空 = 一键关闭。热生效，无需重启。"""
+        body = await request.json()
+        new_key = str(body.get("panel_key") or "").strip()
+        cfg = load_config()
+        if new_key:
+            if len(new_key) < 4:
+                return _err("密钥至少 4 个字符")
+            cfg["panel_key"] = new_key
+        else:
+            cfg.pop("panel_key", None)               # 一键关闭
+        save_config(cfg)
+        _log("面板访问密钥已" + ("开启（本浏览器自动记住）" if new_key else "关闭"))
+        return _ok({"enabled": bool(new_key), "key": new_key})
+
+    @app.middleware("http")
+    async def _panel_guard(request: Request, call_next):
+        """面板密钥守卫：空配置时零开销直通（默认行为与旧版完全一致）。"""
+        key = (load_config().get("panel_key") or "").strip()
+        p = request.url.path
+        if key and (p.startswith("/api/") or p == "/authorize"):
+            supplied = (request.headers.get("x-panel-key")
+                        or request.query_params.get("key") or "")
+            if supplied != key:
+                from fastapi.responses import JSONResponse
+                return JSONResponse({"ok": False, "error": "面板密钥不匹配"},
+                                    status_code=401)
+        return await call_next(request)
+
     # -- 网关开关 + 服务端口（开关立即生效；端口保存前试绑校验，重启生效）--------
 
     @app.get("/api/settings/gateway")

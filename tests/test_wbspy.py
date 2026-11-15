@@ -3588,3 +3588,72 @@ class TestCallbackOrigin(unittest.TestCase):
             ll.return_value = MagicMock()
             mgr.start("trae", "local", origin="http://192.168.0.6:8080/")
         self.assertEqual(captured["origin"], "http://192.168.0.6:8080/")
+
+
+class TestPanelKey(unittest.TestCase):
+    """面板访问密钥：可选功能，默认关闭（空配置零行为变化）；开启后全端点生效。"""
+
+    def _client(self, cfg):
+        import tempfile
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        return TestClient(create_web_app(AccountPool([]), api_key="")), \
+            tempfile.TemporaryDirectory, patch, cfg
+
+    def test_disabled_by_default(self):
+        """默认（无 panel_key）所有端点直通——与旧版行为完全一致。"""
+        import tempfile
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        with patch("wbspy.webui.load_config", lambda: {}):
+            c = TestClient(create_web_app(AccountPool([]), api_key=""))
+            self.assertEqual(c.get("/api/pool").status_code, 200)
+            self.assertEqual(c.get("/api/logs").status_code, 200)
+
+    def test_enabled_requires_key(self):
+        """开启后 /api/* 与 /authorize 无 key 401，带 header 或 ?key= 均通过。"""
+        import tempfile
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        with patch("wbspy.webui.load_config",
+                   lambda: {"panel_key": "secret1"}):
+            c = TestClient(create_web_app(AccountPool([]), api_key=""))
+            self.assertEqual(c.get("/api/pool").status_code, 401)
+            self.assertEqual(
+                c.get("/api/pool", headers={"X-Panel-Key": "secret1"}).status_code, 200)
+            self.assertEqual(c.get("/api/pool?key=secret1").status_code, 200)
+            self.assertEqual(c.get("/api/pool?key=wrong").status_code, 401)
+            # 网关 /v1 与静态页不受面板密钥管（网关有自己的 api_key）
+            self.assertIn(c.get("/v1/models").status_code, (200, 401))   # 网关自身校验
+            self.assertEqual(c.get("/").status_code, 200)
+            self.assertEqual(c.get("/authorize").status_code, 401)       # 回调同样受保护
+
+    def test_set_and_clear(self):
+        """设置端点：开→关一键清除，热生效。"""
+        import tempfile
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        cfg = {}
+        with patch("wbspy.webui.load_config", lambda: cfg), \
+             patch("wbspy.webui.save_config", lambda c: cfg.update(c)):
+            c = TestClient(create_web_app(AccountPool([]), api_key=""))
+            r = c.post("/api/settings/panel-key",
+                       json={"panel_key": "secret1"})
+            self.assertTrue(r.json()["data"]["enabled"])
+            self.assertEqual(cfg.get("panel_key"), "secret1")    # 落盘
+            self.assertEqual(c.get("/api/pool").status_code, 401)  # 热生效
+            r = c.post("/api/settings/panel-key", json={"panel_key": ""},
+                       headers={"X-Panel-Key": "secret1"})
+            self.assertFalse(r.json()["data"]["enabled"])
+            self.assertNotIn("panel_key", cfg)                   # 一键关闭不残留
+            self.assertEqual(c.get("/api/pool").status_code, 200)
+            short = c.post("/api/settings/panel-key", json={"panel_key": "abc"})
+            self.assertEqual(short.status_code, 400)             # 太短拒绝
