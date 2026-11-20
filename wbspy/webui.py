@@ -15,6 +15,8 @@
     GET    /api/automation/status       自动化日志与运行状态
     POST   /api/automation/toggle       自动签到开关（持久化）
     POST   /api/automation/config       托管节奏配置（保存即自动生效）
+    GET    /api/mobile/connection       手机连接网关状态（设备身份）
+    POST   /api/mobile/connection       手机连接开关（开启后手机 App 可直连）
     POST   /api/system/restart          重启服务进程
     GET    /api/snapshots               快照列表
     POST   /api/switch/save             保存当前桌面登录
@@ -39,6 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from .automation import run_all, poll_worker
 from .channels import CHANNELS, WELFARE, get_channel, methods_of, welfare_group
 from .document import parse_auth
+from .edge_sync import MobileGateway
 from .gateway import create_app
 from .login_session import GEMINI_CALLBACK_CODES, LoginSessionManager
 from .pool import AccountPool
@@ -285,6 +288,47 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
 
     if (load_config().get("automation") or {}).get("enabled"):
         _start_poll()                                    # 服务重启后恢复之前的开关状态
+
+    # -- 手机连接网关（edge-sync 伪装桌面端）----------------------------------
+
+    from .store import ROOT as _store_root
+    app.state.mobile_gateway = MobileGateway(pool, log=_log,
+                                             state_dir=_store_root / "data")
+
+    def _mobile_sync() -> dict:
+        """按 config.mobile.enabled 同步网关线程状态。"""
+        enabled = bool((load_config().get("mobile") or {}).get("enabled"))
+        gw = app.state.mobile_gateway
+        if enabled:
+            gw.start()
+        elif gw.status()["running"]:
+            gw.stop()
+        return {"enabled": enabled, **gw.status()}
+
+    @app.get("/api/mobile/connection")
+    def mobile_connection_status():
+        cfg = load_config().get("mobile") or {}
+        gw = app.state.mobile_gateway
+        dev = gw.device()                            # 惰性生成也在此暴露给面板
+        return _ok({"enabled": bool(cfg.get("enabled")),
+                    **gw.status(),
+                    "device_id": dev["device_id"],
+                    "device_name": dev["device_name"]})
+
+    @app.post("/api/mobile/connection")
+    async def mobile_connection_toggle(request: Request):
+        """手机连接开关：开 = wbspy 伪装桌面端上线，手机 App 可直连派任务。"""
+        body = await request.json()
+        enabled = bool(body.get("enabled"))
+        cfg = load_config()
+        cfg.setdefault("mobile", {})["enabled"] = enabled
+        save_config(cfg)
+        state = _mobile_sync()
+        _log("手机连接：已开启（手机 App「连接电脑端」可检测到本机）"
+             if enabled else "手机连接：已关闭")
+        return _ok(state)
+
+    _mobile_sync()                                       # 服务重启后恢复开关状态
 
     @app.post("/api/automation/run")
     def automation_run():

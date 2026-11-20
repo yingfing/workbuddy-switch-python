@@ -25,12 +25,21 @@ class WsError(Exception):
     """WebSocket 层失败（握手/中断/超时）。"""
 
 
+class WsTimeout(WsError):
+    """读消息超时（连接本身可能仍然健康，调用方可安全重试）。"""
+
+
 class MiniWs:
     """单连接文本帧 WebSocket 客户端（client → server 方向掩码）。"""
 
-    def __init__(self, host: str, port: int, path: str, timeout: float = 30.0):
+    def __init__(self, host: str, port: int, path: str, timeout: float = 30.0,
+                 use_tls: bool = False):
         self.timeout = timeout
         self.sock = socket.create_connection((host, port), timeout=timeout)
+        if use_tls:
+            import ssl as _ssl
+            self.sock = _ssl.create_default_context().wrap_socket(
+                self.sock, server_hostname=host)
         key = base64.b64encode(secrets.token_bytes(16)).decode()
         req = (f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
                f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
@@ -84,7 +93,7 @@ class MiniWs:
         frags: list[bytes] = []
         while True:
             if time.time() > deadline:
-                raise WsError("读消息超时")
+                raise WsTimeout("读消息超时")
             b1, b2 = self._read(2)
             opcode, n = b1 & 0x0F, b2 & 0x7F
             if n == 126:

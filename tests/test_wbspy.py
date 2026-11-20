@@ -5,10 +5,11 @@ import time
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from wbspy.cdp import WsTimeout  # noqa: E402
 from wbspy.document import api_origin, parse_auth, workbuddy_origin  # noqa: E402
 from wbspy.switch import merge_auth  # noqa: E402
 from wbspy.upstream import (  # noqa: E402
@@ -4204,3 +4205,267 @@ class TestPanelKey(unittest.TestCase):
             self.assertEqual(c.get("/api/pool").status_code, 200)
             short = c.post("/api/settings/panel-key", json={"panel_key": "abc"})
             self.assertEqual(short.status_code, 400)             # 太短拒绝
+
+
+# ---------------------------------------------------------------------------
+# 手机连接网关（edge-sync 协议复刻）
+# ---------------------------------------------------------------------------
+
+class _FakeMiniWs:
+    """替代 MiniWs：记录发出的帧，按脚本回帧，验证 Centrifuge 帧序列。"""
+
+    def __init__(self, host, port, path, timeout=30.0, use_tls=False,
+                 script=None):
+        self.host, self.port, self.path = host, port, path
+        self.use_tls = use_tls
+        self.sent: list[dict] = []
+        self.script = list(script or [])          # 每次读帧弹出一个响应对象
+        self.closed = False
+
+    def send_text(self, text: str) -> None:
+        self.sent.append(json.loads(text))
+
+    def recv_message(self, deadline=None):
+        if not self.script:
+            raise WsTimeout("读消息超时")
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return json.dumps(item)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestEdgeSync(unittest.TestCase):
+    """手机连接：credentials 请求、Centrifuge 帧、指令路由、设备持久化。"""
+
+    # -- HTTP 两步 -------------------------------------------------------------
+
+    def _doc(self):
+        from wbspy.document import Document
+        return Document(raw={}, uid="u-123", token="tok-abc", domain="www.workbuddy.cn")
+
+    class _FakeHttp:
+        def __init__(self, status=200, body=None):
+            self.status = status
+            self.body = body if body is not None else {"data": {"connectToken": "ct",
+                                                    "cfWsUrl": "wss://x/cf-connect/websocket",
+                                                    "heartbeatIntervalMs": 30000}}
+            self.calls = []
+
+        def _call(self, method, url, **kw):
+            self.calls.append({"method": method, "url": url, **kw})
+            r = unittest.mock.Mock()
+            r.status_code = self.status
+            r.text = json.dumps(self.body)
+            r.json.return_value = self.body
+            return r
+
+        def post(self, url, **kw):
+            return self._call("POST", url, **kw)
+
+        def put(self, url, **kw):
+            return self._call("PUT", url, **kw)
+
+    def test_credentials_request_shape(self):
+        """credentials：URL/鉴权头/请求体字段与逆向协议一致。"""
+        from wbspy.edge_sync import fetch_credentials
+        http = self._FakeHttp()
+        cred = fetch_credentials(self._doc(), http, "dev-1", "host-a")
+        call = http.calls[0]
+        self.assertEqual(call["method"], "POST")
+        self.assertTrue(call["url"].endswith("/edge-cloud/credentials"))
+        self.assertEqual(call["headers"]["Authorization"], "Bearer tok-abc")
+        self.assertEqual(call["headers"]["X-User-Id"], "u-123")
+        body = call["json"]
+        self.assertEqual(body["userId"], "u-123")
+        self.assertEqual(body["deviceId"], "dev-1")
+        self.assertEqual(body["clientType"], "desktop")
+        self.assertEqual(body["chSdkVersion"], "2.3.7")
+        self.assertTrue(body["useDefaultScopes"])
+        self.assertEqual(cred["connectToken"], "ct")
+        self.assertEqual(cred["cfWsUrl"], "wss://x/cf-connect/websocket")
+
+    def test_credentials_error_statuses(self):
+        from wbspy.edge_sync import fetch_credentials, MobileGatewayError
+        with self.assertRaises(MobileGatewayError):
+            fetch_credentials(self._doc(), self._FakeHttp(401), "d", "h")
+        with self.assertRaises(MobileGatewayError):
+            fetch_credentials(self._doc(), self._FakeHttp(403), "d", "h")
+        with self.assertRaises(MobileGatewayError):  # 缺 connectToken/cfWsUrl
+            fetch_credentials(self._doc(), self._FakeHttp(200, {"data": {}}), "d", "h")
+
+    def test_remote_view_request(self):
+        """remote-view：PUT {deviceId, flag:1}（1=允许移动端连接）。"""
+        from wbspy.edge_sync import set_remote_view
+        http = self._FakeHttp(200, {})
+        set_remote_view(self._doc(), http, "dev-1", flag=1)
+        call = http.calls[0]
+        self.assertEqual(call["method"], "PUT")
+        self.assertTrue(call["url"].endswith(
+            "/console/as/conversation-sync/devices/remote-view"))
+        self.assertEqual(call["json"], {"deviceId": "dev-1", "flag": 1})
+
+    # -- Centrifuge 帧 ----------------------------------------------------------
+
+    def _ws(self, script):
+        from wbspy import edge_sync
+        fake = _FakeMiniWs("www.workbuddy.cn", 443, "/cf-connect/websocket",
+                           use_tls=True, script=script)
+        with patch.object(edge_sync, "MiniWs", lambda *a, **kw: fake):
+            ws = edge_sync.CentrifugeWs("wss://www.workbuddy.cn/cf-connect/websocket"
+                                        "?untrusted_uid=u-123")
+        self.assertTrue(fake.use_tls)
+        return ws
+
+    def test_centrifuge_connect_subscribe_publish(self):
+        """connect(token)→subscribe(channel)→publish(data) 帧序列与参数。"""
+        ws = self._ws([
+            {"id": 1, "connect": {"client": "cli-1", "ping": 25000}},
+            {"id": 2, "subscribe": {"channel": "user:u-123:devices"}},
+            {"id": 3, "publish": {}},
+        ])
+        info = ws.connect("ct-token")
+        self.assertEqual(info["client"], "cli-1")
+        ws.subscribe("user:u-123:devices", token="sub-t")
+        ws.publish("user:u-123:devices", {"type": "device.online"})
+        frames = ws._ws.sent
+        self.assertEqual(frames[0]["method"], "connect")
+        self.assertEqual(frames[0]["params"]["token"], "ct-token")
+        self.assertEqual(frames[0]["params"]["name"], "js")
+        self.assertEqual(frames[1]["method"], "subscribe")
+        self.assertEqual(frames[1]["params"]["channel"], "user:u-123:devices")
+        self.assertEqual(frames[1]["params"]["token"], "sub-t")
+        self.assertEqual(frames[2]["method"], "publish")
+        self.assertEqual(frames[2]["params"]["data"]["type"], "device.online")
+
+    def test_centrifuge_server_error_surfaces(self):
+        """服务端拒帧（error 字段）→ 抛 MobileGatewayError 带码。"""
+        from wbspy.edge_sync import MobileGatewayError
+        ws = self._ws([{"id": 1, "error": {"code": 4100, "message": "bad token"}}])
+        with self.assertRaises(MobileGatewayError) as ctx:
+            ws.connect("bad")
+        self.assertIn("4100", str(ctx.exception))
+
+    def test_centrifuge_push_cached_and_server_ping_acked(self):
+        """request 途中的 push 进缓存供 next_message 取；服务端 ping 自动回。"""
+        ws = self._ws([
+            {"id": 1, "connect": {}},
+            {"ping": {}},                                # 服务端 ping（无 id）
+            {"push": {"channel": "user:u-123:devices",
+                      "pub": {"data": {"type": "wb:models:list"}}}},
+            {"id": 2, "ping": {}},                       # 我方 ping 的应答帧占位
+        ])
+        ws.connect("ct")
+        msg = ws.next_message(timeout=0.1)
+        self.assertEqual(msg["push"]["pub"]["data"]["type"], "wb:models:list")
+        pings = [f for f in ws._ws.sent if f.get("method") == "ping"]
+        self.assertTrue(pings, "收到服务端 ping 应回客户端 ping")
+
+    def test_centrifuge_disconnect_raises(self):
+        from wbspy.edge_sync import MobileGatewayError
+        ws = self._ws([{"disconnect": {"code": 3000, "reason": "expired"}}])
+        with self.assertRaises(MobileGatewayError):
+            ws.next_message(timeout=0.1)
+
+    # -- 指令路由 ---------------------------------------------------------------
+
+    def test_router_normalizes_result(self):
+        """handler 返回值归一化 {success:true,...}；异常转 {success:false}。"""
+        from wbspy.edge_sync import CommandRouter
+        router = CommandRouter()
+        router.on("a", lambda cmd: {"x": 1})
+        router.on("b", lambda cmd: None)
+        router.on("c", lambda cmd: 1 / 0)
+        self.assertEqual(router.dispatch({"type": "a"}),
+                         {"success": True, "x": 1})
+        self.assertEqual(router.dispatch({"type": "b"}), {"success": True})
+        self.assertFalse(router.dispatch({"type": "c"})["success"])
+        self.assertFalse(router.dispatch({"type": "zzz"})["success"])
+
+    def test_default_handlers_shape(self):
+        """内置指令面：capabilities 报不支持远程画面；models/list 走池。"""
+        from unittest.mock import patch
+        from wbspy.edge_sync import make_default_handlers
+        from wbspy.pool import AccountPool
+
+        class _P:
+            def models(self):
+                return [{"id": "workbuddy:fast-model"}]
+
+            def chat_failover(self, payload, session=None, lane="workbuddy"):
+                doc = self._doc
+                resp = Mock()
+                resp.json.return_value = {"choices": [
+                    {"message": {"content": "回复文本"}}]}
+                return doc, resp
+
+        pool = _P()
+        pool._doc = self._doc()
+        handlers = make_default_handlers(pool, log=lambda *_: None)
+        self.assertIn("wb:conversations:send", handlers)
+        cap = handlers["remoteDesktop.capabilities"]({})
+        self.assertFalse(cap["supported"])
+        with patch.object(_P, "models", return_value=[{"id": "m1"}]):
+            row = handlers["wb:models:list"]({})
+        self.assertEqual(row["models"], [{"id": "m1"}])
+        out = handlers["wb:conversations:send"](
+            {"args": [{"text": "你好"}], "requestId": "r1"})
+        self.assertTrue(out["success"])
+        self.assertEqual(out["content"], "回复文本")
+        empty = handlers["wb:conversations:send"]({"args": [{"text": ""}]})
+        self.assertFalse(empty["success"])
+
+    # -- 设备身份 + 生命周期 ------------------------------------------------------
+
+    def test_device_identity_persisted(self):
+        """设备 uuid 持久化：同一目录两次取值一致；不同目录不同。"""
+        import tempfile
+        from wbspy.edge_sync import MobileGateway
+        from wbspy.pool import AccountPool
+        with tempfile.TemporaryDirectory() as tmp:
+            gw = MobileGateway(AccountPool([]), log=lambda *_: None,
+                               state_dir=Path(tmp))
+            d1 = gw.device()
+            d2 = MobileGateway(AccountPool([]), log=lambda *_: None,
+                               state_dir=Path(tmp)).device()
+            self.assertEqual(d1["device_id"], d2["device_id"])
+            self.assertTrue(len(d1["device_id"]) == 36)
+        other = MobileGateway(AccountPool([]), log=lambda *_: None,
+                              state_dir=Path(tempfile.mkdtemp())).device()
+        self.assertNotEqual(d1["device_id"], other["device_id"])
+
+    def test_heartbeat_payload_shape(self):
+        """心跳 payload：type/deviceId/clientType/ts（毫秒）。"""
+        from wbspy.edge_sync import MobileGateway
+        p = MobileGateway._heartbeat_payload({"device_id": "d1"})
+        self.assertEqual(p, {"type": "device.online", "deviceId": "d1",
+                             "clientType": "desktop", "ts": p["ts"]})
+
+    def test_webui_mobile_connection_toggle(self):
+        """WebUI 开关：POST 切换持久化 config.mobile.enabled 并启停线程。"""
+        import tempfile
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy import webui as webui_mod
+        from wbspy.pool import AccountPool
+        from wbspy import store as store_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(store_mod, "CONFIG_PATH", Path(tmp) / "config.json"), \
+                 patch.object(store_mod, "ROOT", Path(tmp)):
+                app = webui_mod.create_web_app(AccountPool([]), api_key="")
+                c = TestClient(app)
+                st = c.get("/api/mobile/connection").json()["data"]
+                self.assertFalse(st["enabled"])
+                self.assertFalse(st["running"])
+                self.assertTrue(st["device_id"])
+                on = c.post("/api/mobile/connection", json={"enabled": True})
+                self.assertTrue(on.json()["data"]["enabled"])
+                self.assertTrue(on.json()["data"]["running"])
+                cfg = json.loads((Path(tmp) / "config.json").read_text())
+                self.assertTrue(cfg["mobile"]["enabled"])
+                off = c.post("/api/mobile/connection", json={"enabled": False})
+                self.assertFalse(off.json()["data"]["enabled"])
+                self.assertFalse(off.json()["data"]["running"])
