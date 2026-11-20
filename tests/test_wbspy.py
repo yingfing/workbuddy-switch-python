@@ -820,6 +820,42 @@ class TestBenefits(unittest.TestCase):
         self.assertIn("暂无签到托管", checkin_other(doc)["skip"])
 
 
+class TestWelfareTags(unittest.TestCase):
+    """福利类型标签：五分类（持续签到/周期发放/活跃奖励/一次性/有门槛）。"""
+
+    def test_tags_valid_and_consistent(self):
+        from wbspy.channels import CHANNELS, WELFARE
+        for cid, ch in CHANNELS.items():
+            self.assertTrue(ch.welfare, f"{cid} 未打福利标签")
+            for w in ch.welfare:
+                self.assertIn(w, WELFARE, f"{cid} 未知标签 {w}")
+            if "daily" in ch.welfare:
+                self.assertTrue(ch.credits_claim, f"{cid} 标了 daily 却没有签到")
+            if "gated" in ch.welfare:
+                self.assertNotIn("checkin", ch.capabilities,
+                                 f"{cid} 标了 gated（自动化接不了）却声明了 checkin")
+
+    def test_managed_matches_capabilities(self):
+        """已托管=渠道声明 checkin 能力；四渠道 + buddy 应为已托管。"""
+        from wbspy.channels import CHANNELS
+        managed = {cid for cid, ch in CHANNELS.items() if "checkin" in ch.capabilities}
+        self.assertEqual(managed, {"buddy", "trae", "qoder", "qodercn", "minimax", "lobsterai"})
+
+    def test_api_channels_exposes_welfare(self):
+        from fastapi.testclient import TestClient
+        from wbspy.webui import create_web_app
+        from wbspy.pool import AccountPool
+        app = create_web_app(AccountPool([]), api_key="")
+        client = TestClient(app)
+        data = client.get("/api/channels").json()["data"]
+        buddy = next(c for c in data if c["id"] == "buddy")
+        self.assertEqual([w["id"] for w in buddy["welfare"]], ["daily", "monthly", "activity"])
+        self.assertTrue(buddy["managed"])
+        gemini = next(c for c in data if c["id"] == "gemini")
+        self.assertEqual([w["id"] for w in gemini["welfare"]], ["oneoff"])
+        self.assertFalse(gemini["managed"])
+
+
 class TestGatewayModels(unittest.TestCase):
     """`/v1/models` 只暴露当前真正可调用的模型。"""
 

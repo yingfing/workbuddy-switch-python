@@ -37,7 +37,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .automation import run_all, poll_worker
-from .channels import CHANNELS, get_channel, methods_of
+from .channels import CHANNELS, WELFARE, get_channel, methods_of
 from .document import parse_auth
 from .gateway import create_app
 from .login_session import GEMINI_CALLBACK_CODES, LoginSessionManager
@@ -166,6 +166,8 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
             "id": ch.id, "name": ch.name, "org": ch.org, "note": ch.note,
             "methods": methods_of(ch), "origin": ch.origin,
             "checkin": ch.credits_claim,
+            "welfare": [{"id": w, "label": WELFARE[w]} for w in ch.welfare if w in WELFARE],
+            "managed": "checkin" in ch.capabilities,
         } for ch in CHANNELS.values()])
 
     @app.post("/api/login/start")

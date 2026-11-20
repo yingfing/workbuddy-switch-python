@@ -690,12 +690,17 @@ document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
 // -- 渠道列表 --
 async function loadChannels() {
   const r = await api('/api/channels');
+  const wcolor = {daily:'var(--ok-bg);color:var(--ok-fg)', monthly:'#e8f0fe;color:#1a56db',
+                  activity:'#e0f2f1;color:#00695c', oneoff:'#f1f3f5;color:#5b6670',
+                  gated:'#fff4e5;color:#b26a00'};
   $('#channels').innerHTML = r.data.map(c => `
     <div class="chan">
       <b>${c.name}</b><span class="org">${c.org}</span>
       <div style="margin:4px 0">${c.methods.map(m =>
         `<span class="badge">${{qr:'扫码',browser:'网页',local:'本机'}[m]||m}</span>`).join('')}
-        ${c.checkin ? `<span class="badge" style="background:var(--ok-bg);color:var(--ok-fg)">${c.id === 'buddy' ? '每日签到·已托管' : '有签到·未托管'}</span>` : ''}
+        ${(c.welfare||[]).map(w =>
+          `<span class="badge" style="background:${(wcolor[w.id]||'').split(';')[0]};${(wcolor[w.id]||'').split(';')[1]||''}">${w.label}</span>`).join('')}
+        ${c.managed ? '<span class="badge" style="background:var(--ok-bg);color:var(--ok-fg)">签到·已托管</span>' : ''}
       </div>
       <p>${c.note}</p>
       <div class="row">

@@ -33,6 +33,17 @@ class Channel:
     login_kind: str = "qr"           # method 的细分实现键
     capabilities: tuple[str, ...] = ()   # 运行期能力声明：chat/models/refresh/checkin/credits
                                              # pool 与网关路由前必查，杜绝拿 A 渠道凭据打 B 渠道接口
+    welfare: tuple[str, ...] = ()    # 福利类型标签（见 WELFARE 文案表），渠道墙展示用
+
+
+# 福利类型标签：按「怎么薅」给免费渠道分类
+WELFARE: dict[str, str] = {
+    "daily": "持续签到",       # 每天都能领，长期薅
+    "monthly": "周期发放",     # 每月自动白送，无需任何操作
+    "activity": "活跃奖励",    # 当天有使用行为就送分，不用签到
+    "oneoff": "一次性",        # 注册/绑定即给，领完即止
+    "gated": "有门槛",         # 有福利但需验证码/桌面端签名，自动化暂接不了
+}
 
 
 CHANNELS: dict[str, Channel] = {c.id: c for c in (
@@ -41,60 +52,61 @@ CHANNELS: dict[str, Channel] = {c.id: c for c in (
             origin="https://www.codebuddy.cn", auth_platform="workbuddy",
             note="DeepSeek · Kimi · GLM 免费线，每日赠送积分；桌面客户端可读本机快照",
             credits_claim=True, credits_status=True, login_kind="workbuddy-state",
-            capabilities=("chat", "models", "refresh", "checkin", "credits")),
+            capabilities=("chat", "models", "refresh", "checkin", "credits"),
+            welfare=("daily", "monthly", "activity")),
     Channel("workbuddy", "WorkBuddy 国际版", "腾讯", "browser+local",
             origin="https://www.workbuddy.ai", auth_platform="workbuddy-ai",
             note="独立端点与账号体系，积分与国内版不互通；后端没有每日签到接口",
-            credits_status=True, login_kind="workbuddy-state",
+            credits_status=True, login_kind="workbuddy-state", welfare=("activity",),
             capabilities=("chat", "models", "refresh", "credits")),
     # --- 扫码直登（协议级二维码轮询，来自 dsh-xdpool channel pack）---
     Channel("raccoon", "Raccoon", "商汤", "qr",
             origin="https://api.raccoon.sensetime.com",
             note="扫码直登：终端出二维码，手机小浣熊 App 扫一扫；短信验证码备用",
-            login_kind="raccoon-qr"),
+            login_kind="raccoon-qr", welfare=("oneoff",)),
     # --- 其余 browser 渠道（打开厂商登录页，完成后按各自协议接 token）---
     Channel("codearts", "CodeArts", "华为云", "browser",
             origin="https://www.huaweicloud.com", login_kind="codearts-ticket",
             note="免费体验套餐自动续期不收费；新人积分 + DeepSeek · GLM · openPangu 每日免费额度",
-            credits_claim=True),
+            credits_claim=True, welfare=("daily", "gated")),
     Channel("lobsterai", "LobsterAI", "有道", "browser",
             login_kind="lobsterai-callback", origin="https://lobsterai.youdao.com",
             note="每日签到领积分，积分换模型调用额度", credits_claim=True,
-            capabilities=("checkin",)),
+            capabilities=("checkin",), welfare=("daily",)),
     Channel("qoder", "Qoder 国际版", "阿里云", "browser",
             login_kind="qoder-device", origin="https://qoder.com",
             note="每日 100 Credits，加密推理端点（wasm auth）", credits_claim=True,
-            capabilities=("chat", "models", "checkin")),
+            capabilities=("chat", "models", "checkin"), welfare=("daily",)),
     Channel("qodercn", "Qoder 国内版", "阿里云", "browser",
             login_kind="qoder-device", origin="https://qoder.com",
             note="每日 100 Credits，国内端点与模型池（wasm auth）", credits_claim=True,
-            capabilities=("chat", "models", "checkin")),
+            capabilities=("chat", "models", "checkin"), welfare=("daily",)),
     Channel("trae", "TRAE", "字节跳动", "local+browser",
             login_kind="trae-callback", origin="https://www.trae.cn", capabilities=("checkin",),
             note="手机号注册即送免费额度；本机有 Trae CN 客户端可直接读快照切换",
-            credits_claim=True),
+            credits_claim=True, welfare=("daily", "monthly")),
     Channel("cline", "Cline", "Cline Bot", "browser",
             login_kind="cline-device", origin="https://cline.bot",
             note="绑定 GitHub 账号后送美元计价免费额度；OpenAI 兼容 API（api.cline.bot）可直接调模型",
-            capabilities=("chat", "models", "refresh"), unit="dollars"),
+            capabilities=("chat", "models", "refresh"), unit="dollars", welfare=("oneoff",)),
     Channel("loomy", "Loomy", "讯飞星火", "qr",
             login_kind="loomy-wechat", origin="https://xinghuo.xfyun.cn",
             note="星火模型每日免费额度；登录页自带扫码或手机号入口",
-            credits_claim=True),
+            credits_claim=True, welfare=("daily", "gated")),
     Channel("minimax", "MiniMax Code", "MiniMax", "qr",
             origin="https://account.minimax.cn",
             note="设备码 + PKCE 登录：网页显示设备码与验证链接，每日签到领额度",
             credits_claim=True, credits_status=True, login_kind="minimax-device",
-            capabilities=("checkin",)),
+            capabilities=("checkin",), welfare=("daily",)),
     Channel("zcode", "ZCode", "智谱", "qr",
             login_kind="zcode-oauth", origin="https://chatglm.cn",
             note="GLM 模型按 token 计免费额度；CLI OAuth 自动轮询，扫码或浏览器均可",
             credits_claim=True, unit="tokens",
-            capabilities=("chat", "models", "credits")),
+            capabilities=("chat", "models", "credits"), welfare=("daily", "gated")),
     Channel("gemini", "Gemini Code Assist", "Google", "browser",
             origin="https://codeassist.google.com",
             note="个人 Google 账号免费配额，本地回调 OAuth（网页出授权链接）",
-            quota=True, login_kind="gemini-oauth"),
+            quota=True, login_kind="gemini-oauth", welfare=("oneoff",)),
 )}
 
 
