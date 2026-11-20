@@ -849,11 +849,15 @@ class TestWelfareTags(unittest.TestCase):
         client = TestClient(app)
         data = client.get("/api/channels").json()["data"]
         buddy = next(c for c in data if c["id"] == "buddy")
-        self.assertEqual([w["id"] for w in buddy["welfare"]], ["daily", "monthly", "activity"])
+        self.assertEqual([(w["id"], w["group"]) for w in buddy["welfare"]],
+                         [("daily", "auto"), ("monthly", "auto"), ("activity", "auto")])
         self.assertTrue(buddy["managed"])
         gemini = next(c for c in data if c["id"] == "gemini")
-        self.assertEqual([w["id"] for w in gemini["welfare"]], ["oneoff"])
+        self.assertEqual([(w["id"], w["group"]) for w in gemini["welfare"]],
+                         [("oneoff", "manual")])
         self.assertFalse(gemini["managed"])
+        codearts = next(c for c in data if c["id"] == "codearts")
+        self.assertEqual([w["group"] for w in codearts["welfare"]], ["auto", "manual"])
 
 
 class TestGatewayModels(unittest.TestCase):

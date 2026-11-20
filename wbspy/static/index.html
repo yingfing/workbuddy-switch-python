@@ -693,13 +693,18 @@ async function loadChannels() {
   const wcolor = {daily:'var(--ok-bg);color:var(--ok-fg)', monthly:'#e8f0fe;color:#1a56db',
                   activity:'#e0f2f1;color:#00695c', oneoff:'#f1f3f5;color:#5b6670',
                   gated:'#fff4e5;color:#b26a00'};
-  $('#channels').innerHTML = r.data.map(c => `
+  $('#channels').innerHTML = r.data.map(c => {
+    const wf = c.welfare || [];
+    const seg = g => wf.filter(w => w.group === g).map(w =>
+      `<span class="badge" style="background:${(wcolor[w.id]||'').split(';')[0]};${(wcolor[w.id]||'').split(';')[1]||''}">${w.label}</span>`).join('');
+    const divider = wf.some(w => w.group === 'manual') && wf.some(w => w.group === 'auto')
+      ? '<span style="opacity:.35;margin:0 3px">|</span>' : '';
+    return `
     <div class="chan">
       <b>${c.name}</b><span class="org">${c.org}</span>
       <div style="margin:4px 0">${c.methods.map(m =>
         `<span class="badge">${{qr:'扫码',browser:'网页',local:'本机'}[m]||m}</span>`).join('')}
-        ${(c.welfare||[]).map(w =>
-          `<span class="badge" style="background:${(wcolor[w.id]||'').split(';')[0]};${(wcolor[w.id]||'').split(';')[1]||''}">${w.label}</span>`).join('')}
+        ${seg('auto')}${divider}${seg('manual')}
         ${c.managed ? '<span class="badge" style="background:var(--ok-bg);color:var(--ok-fg)">签到·已托管</span>' : ''}
       </div>
       <p>${c.note}</p>
@@ -707,7 +712,8 @@ async function loadChannels() {
         ${c.methods.map(m => `<button class="btn sm" onclick="startLogin('${c.id}','${m}')">${
           {qr:'扫码登录',browser:'网页登录',local:'读本机'}[m]}</button>`).join('')}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 // -- 登录流程 --

@@ -45,6 +45,16 @@ WELFARE: dict[str, str] = {
     "gated": "有门槛",         # 有福利但需验证码/桌面端签名，自动化暂接不了
 }
 
+# 标签分组：auto 组自动化能持续薅（积分托管覆盖）；manual 组靠人工或领完即止
+WELFARE_GROUPS: dict[str, tuple[str, ...]] = {
+    "auto": ("daily", "monthly", "activity"),
+    "manual": ("oneoff", "gated"),
+}
+
+
+def welfare_group(w: str) -> str:
+    return "auto" if w in WELFARE_GROUPS["auto"] else "manual"
+
 
 CHANNELS: dict[str, Channel] = {c.id: c for c in (
     # --- WorkBuddy 两个区（网页授权 + 本机凭据双通道，协议来自 WorkBuddy-Switch）---
