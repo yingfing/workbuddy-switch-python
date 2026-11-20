@@ -382,6 +382,22 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       <div class="pill">历史轮次看下面的「运行历史」；右下角 📜 悬浮钮任何页面可开日志抽屉。</div>
     </div>
     <div class="card">
+      <h2>手机连接 <span class="tag">手机 App「连接电脑端」直连本网关 · edge-sync 协议</span></h2>
+      <div class="row" style="margin-bottom:12px">
+        <button class="btn ghost" id="mobileConn" onclick="mobileToggle()">手机连接：关</button>
+        <span class="pill" id="mobileState"></span>
+        <span class="tag">开启后本机伪装成一台桌面端上线：手机「连接电脑端」即可检测到并派任务（消耗账号池额度）</span>
+      </div>
+      <div class="row" style="margin-bottom:4px">
+        <b>设备：</b><span id="mobileDevice" style="color:var(--dim)">—</span>
+        <span class="tag">设备身份持久化，对手机始终是同一台电脑</span>
+      </div>
+      <div class="row" id="mobileErrRow" style="margin-bottom:4px" hidden>
+        <b style="color:var(--bad)">最近异常：</b><span id="mobileErr" style="color:var(--bad)"></span>
+      </div>
+      <div class="pill">手机端入口：WorkBuddy App → 设置 → 连接电脑端。指令集见 <code>docs/mobile-pairing-protocol.md</code>。</div>
+    </div>
+    <div class="card">
       <h2>运行日志 <span class="tag" id="autoLogTag">实时刷新 · 最近 60 行</span></h2>
       <pre id="autoLogBox" style="max-height:340px;overflow:auto;background:var(--panel-2);
         border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;margin:0;
@@ -673,6 +689,8 @@ function gotoTab(t) {
 }
 setInterval(loadHealth, 10000);
 loadHealth();
+setInterval(pollMobile, 10000);              // 手机连接状态轻量刷新
+pollMobile();
 
 // -- 标签页 --
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
@@ -681,7 +699,7 @@ document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   ['login','accounts','free','auto','switch','gateway'].forEach(t =>
     $('#tab-' + t).hidden = t !== b.dataset.tab);
   if (b.dataset.tab === 'accounts') loadAccounts();
-  if (b.dataset.tab === 'auto') pollAuto();
+  if (b.dataset.tab === 'auto') { pollAuto(); pollMobile(); }
   if (b.dataset.tab === 'switch') loadSnapshots();
   if (b.dataset.tab === 'gateway') { loadGateway(); loadForensics(); }
   if (b.dataset.tab === 'free') loadFree();
@@ -955,6 +973,36 @@ async function autoToggle() {
   if (!r.ok) return toast(r.error, false);
   pollAuto();
   toast('自动签到托管已' + (r.data.enabled ? '开启（config 已保存）' : '关闭'), true);
+}
+// -- 手机连接 --
+async function mobileToggle() {
+  const on = $('#mobileConn').textContent.includes('关');
+  const r = await api('/api/mobile/connection', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled: on})
+  });
+  if (!r.ok) return toast(r.error, false);
+  pollMobile();
+  toast(on ? '手机连接已开启：手机 App「连接电脑端」现在能检测到本网关'
+           : '手机连接已关闭', true);
+}
+function pollMobile() {
+  api('/api/mobile/connection').then(r => {
+    if (!r.ok) return;
+    const d = r.data;
+    $('#mobileConn').textContent = d.enabled ? '手机连接：开' : '手机连接：关';
+    $('#mobileConn').className = 'btn ' + (d.enabled ? '' : 'ghost');
+    const dev = (d.device_name || 'wbspy') + ' · ' + (d.device_id || '').slice(0, 8) + '…';
+    $('#mobileDevice').textContent = d.uid ? dev + ' · 账号 ' + d.uid.slice(0, 8) + '…' : dev;
+    const online = d.enabled && d.connected;
+    $('#mobileState').textContent = online ? '● 已上线（手机可连接）'
+      : (d.enabled ? (d.running ? ' connecting…' : '未上线') : '已关闭');
+    $('#mobileState').style.color = online ? 'var(--ok)' : '';
+    const err = d.last_error || '';
+    $('#mobileErrRow').hidden = !err;
+    $('#mobileErr').textContent = err;
+  });
 }
 function pollModeUi() {
   const daily = $('#pollMode').value === 'daily';
