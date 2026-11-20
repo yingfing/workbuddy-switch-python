@@ -29,6 +29,12 @@ def _cmd_login(args) -> int:
     return 0
 
 
+def _cmd_codearts_login(_args) -> int:
+    """码道 CodeArts：弹有头浏览器登录一次，Cookie 落持久 profile 供每日 headless 签到。"""
+    from .codearts_browser import interactive_login
+    return interactive_login(log=print)
+
+
 def _cmd_channels(_args) -> int:
     print(f"{'渠道':<22}{'方式':<18}{'说明'}")
     for ch in CHANNELS.values():
@@ -255,6 +261,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("channels", help="列出全部登录渠道与方式")
     p.set_defaults(fn=_cmd_channels)
+
+    p = sub.add_parser("codearts-login", help="码道签到：弹浏览器登录一次（持久 profile）")
+    p.set_defaults(fn=_cmd_codearts_login)
 
     p = sub.add_parser("login", help="登录并入库（qr 优先，自动回退）")
     p.add_argument("channel", choices=sorted(CHANNELS))

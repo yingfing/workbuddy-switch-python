@@ -77,8 +77,9 @@ CHANNELS: dict[str, Channel] = {c.id: c for c in (
     # --- 其余 browser 渠道（打开厂商登录页，完成后按各自协议接 token）---
     Channel("codearts", "CodeArts", "华为云", "browser",
             origin="https://www.huaweicloud.com", login_kind="codearts-ticket",
-            note="免费体验套餐自动续期不收费；新人积分 + DeepSeek · GLM · openPangu 每日免费额度",
-            credits_claim=True, welfare=("daily", "gated")),
+            note="免费体验套餐自动续期不收费；每日活动福利签到（CDP 驱动系统浏览器，先跑 wbspy codearts-login）",
+            credits_claim=True, welfare=("daily",),
+            capabilities=("checkin",)),
     Channel("lobsterai", "LobsterAI", "有道", "browser",
             login_kind="lobsterai-callback", origin="https://lobsterai.youdao.com",
             note="每日签到领积分，积分换模型调用额度", credits_claim=True,

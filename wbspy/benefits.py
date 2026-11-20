@@ -66,7 +66,7 @@ class TraeCheckin:
     BASE = "https://api.trae.cn"
     PATH = "/trae/api/v2/ug/checkin_credits"
 
-    def __init__(self, doc):
+    def __init__(self, doc, log=print):
         self.doc = doc
         # 登录时落盘的设备号优先；老账号用 uid 派生，保持恒定。
         self.device_id = str((doc.raw.get("device_id") or "")
@@ -114,7 +114,7 @@ class QoderCheckin:
 
     _DAILY = re.compile(r"daily|check.?in|每日|每天|签到", re.I)
 
-    def __init__(self, doc):
+    def __init__(self, doc, log=print):
         self.doc = doc
         self.base = _QODER_SITES.get(doc.channel_id or "", _QODER_SITES["qoder"])
         self.machine_id = _stable_device(f"qoder|{doc.uid}")
@@ -175,7 +175,7 @@ class MiniMaxCheckin:
     BASE = "https://agent.minimaxi.com"
     _SALT = "I*7Cf%WZ#S&%1RlZJ&C2"
 
-    def __init__(self, doc):
+    def __init__(self, doc, log=print):
         self.doc = doc
 
     def _request(self, path: str, body: str = "") -> tuple[str, dict]:
@@ -237,7 +237,7 @@ class LobsterCheckin:
     BASE = "https://lobsterai-server.youdao.com"
     VERSION = "2026.9.4"
 
-    def __init__(self, doc):
+    def __init__(self, doc, log=print):
         self.doc = doc
         self.s = requests.Session()
         self.s.headers.update(_bearer_headers(doc.token, f"LobsterAI/{self.VERSION}"))
@@ -297,20 +297,35 @@ class LobsterCheckin:
         return {"checkin": f"签到成功 +{granted} 积分" if granted else "签到成功"}
 
 
+# -- 码道 CodeArts ------------------------------------------------------------
+
+class CodeartsCheckin:
+    """码道活动福利每日领取：CDP 驱动系统浏览器（无 token 体系，走持久 profile）。"""
+
+    def __init__(self, doc, log=print):
+        self.doc = doc
+        self.log = log
+
+    def run(self) -> dict:
+        from .codearts_browser import checkin_by_browser
+        return checkin_by_browser(self.log)
+
+
 # -- 分派 ----------------------------------------------------------------------
 
 _OTHER = {"trae": TraeCheckin, "qoder": QoderCheckin, "qodercn": QoderCheckin,
-          "minimax": MiniMaxCheckin, "lobsterai": LobsterCheckin}
+          "minimax": MiniMaxCheckin, "lobsterai": LobsterCheckin,
+          "codearts": CodeartsCheckin}
 
 
-def checkin_other(doc) -> dict:
+def checkin_other(doc, log=print) -> dict:
     """非 WorkBuddy 渠道的签到入口；渠道未接入返回 skip 说明。"""
     cls = _OTHER.get(doc.channel_id or "")
     if cls is None:
         return {"skip": f"渠道 {doc.channel_name} 暂无签到托管"}
-    return cls(doc).run()
+    return cls(doc, log=log).run()
 
 
-def sweep_other(doc) -> dict:
+def sweep_other(doc, log=print) -> dict:
     """签到兜底轮询入口：与 run 相同（各渠道实现本身幂等）。"""
-    return checkin_other(doc)
+    return checkin_other(doc, log=log)

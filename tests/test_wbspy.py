@@ -490,7 +490,7 @@ class TestCapabilities(unittest.TestCase):
         trae = parse_auth({"account": {"uid": "u", "nickname": "n"},
                            "auth": {"accessToken": "t", "domain": "api.trae.com.cn"}})
         self.assertEqual(trae.capabilities, frozenset({"checkin"}))
-        for domain in ("api.raccoon.sensetime.com", "www.huaweicloud.com"):
+        for domain in ("api.raccoon.sensetime.com", "xinghuo.xfyun.cn"):
             doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
                               "auth": {"accessToken": "t", "domain": domain}})
             self.assertEqual(doc.capabilities, frozenset(), domain)
@@ -834,12 +834,16 @@ class TestWelfareTags(unittest.TestCase):
             if "gated" in ch.welfare:
                 self.assertNotIn("checkin", ch.capabilities,
                                  f"{cid} 标了 gated（自动化接不了）却声明了 checkin")
+            if "checkin" in ch.capabilities:
+                self.assertIn("daily", ch.welfare,
+                              f"{cid} 声明了 checkin 却没标 daily")
 
     def test_managed_matches_capabilities(self):
         """已托管=渠道声明 checkin 能力；四渠道 + buddy 应为已托管。"""
         from wbspy.channels import CHANNELS
         managed = {cid for cid, ch in CHANNELS.items() if "checkin" in ch.capabilities}
-        self.assertEqual(managed, {"buddy", "trae", "qoder", "qodercn", "minimax", "lobsterai"})
+        self.assertEqual(managed, {"buddy", "trae", "qoder", "qodercn", "minimax",
+                                   "lobsterai", "codearts"})
 
     def test_api_channels_exposes_welfare(self):
         from fastapi.testclient import TestClient
@@ -856,8 +860,104 @@ class TestWelfareTags(unittest.TestCase):
         self.assertEqual([(w["id"], w["group"]) for w in gemini["welfare"]],
                          [("oneoff", "manual")])
         self.assertFalse(gemini["managed"])
-        codearts = next(c for c in data if c["id"] == "codearts")
-        self.assertEqual([w["group"] for w in codearts["welfare"]], ["auto", "manual"])
+        loomy = next(c for c in data if c["id"] == "loomy")
+        self.assertEqual([w["group"] for w in loomy["welfare"]], ["auto", "manual"])
+
+
+class TestCodeartsBrowser(unittest.TestCase):
+    """码道签到：CDP 驱动系统浏览器（无 Playwright、无自带浏览器二进制）。"""
+
+    def _doc(self, uid="c1"):
+        from wbspy.document import parse_auth
+        doc = parse_auth({"account": {"uid": uid, "nickname": "码道"},
+                          "auth": {"accessToken": "st", "domain": "codearts.huaweicloud.com"}})
+        return doc
+
+    def test_browser_discovery_no_download(self):
+        from wbspy.codearts_browser import BROWSERS
+        for name in BROWSERS:
+            self.assertNotIn("playwright", name.lower())
+        from wbspy.cdp import MiniWs          # CDP 是手写零依赖，不引 playwright 包
+
+    def test_claim_flow_success(self):
+        from unittest.mock import patch as mp
+        from wbspy import codearts_browser as cb
+        logs = []
+        camp = {"campaignId": "daily-100", "campaignName": "每日签到",
+                "claimable": True, "status": "ELIGIBLE"}
+        done = dict(camp, claimable=False, status="CLAIMED")
+        evals = []
+
+        class FakeCdp:
+            def call(self, method, params=None, timeout=30):
+                self.last = params
+                return {}
+            def evaluate(self, expr, timeout=60):
+                evals.append(expr)
+                if "readyState" in expr:
+                    return "complete"
+                return {"ok": True, "name": "华为云小工具",
+                        "results": [{"claimed": True, "name": "每日签到",
+                                     "confirmOk": True}]}
+            def close(self):
+                pass
+
+        with mp.object(cb, "find_browser", return_value="/usr/bin/chromium"), \
+             mp.object(cb, "_launch", return_value=MagicMock(poll=lambda: None)), \
+             mp.object(cb, "_wait_devtools", return_value=9222), \
+             mp.object(cb, "_connect_page", return_value=FakeCdp()), \
+             mp.object(cb, "profile_dir"), \
+             patch.object(cb.subprocess, "Popen", return_value=MagicMock()):
+            out = cb.checkin_by_browser(log=logs.append)
+        self.assertIn("领取成功 1 项（每日签到）", out["checkin"])
+        self.assertTrue(any("fetch(" in e for e in evals))     # 页面内 fetch 走 ops 接口
+
+    def test_login_required_prints_log(self):
+        """登录态失效：打日志、summary 带失败说明，绝不静默。"""
+        from unittest.mock import patch as mp
+        from wbspy import codearts_browser as cb
+        logs = []
+
+        class FakeCdp:
+            def call(self, *a, **k):
+                return {}
+            def evaluate(self, expr, timeout=60):
+                if "readyState" in expr:
+                    return "complete"
+                return {"ok": False, "reason": "login-required",
+                        "url": "https://accounts.huaweicloud.com/..."}
+            def close(self):
+                pass
+
+        with mp.object(cb, "find_browser", return_value="/usr/bin/chromium"), \
+             mp.object(cb, "_launch", return_value=MagicMock(poll=lambda: None)), \
+             mp.object(cb, "_wait_devtools", return_value=9222), \
+             mp.object(cb, "_connect_page", return_value=FakeCdp()), \
+             patch.object(cb.subprocess, "Popen", return_value=MagicMock()):
+            out = cb.checkin_by_browser(log=logs.append)
+        self.assertIn("登录态失效", str(logs))
+        self.assertIn("失败", out["checkin"])
+
+    def test_no_browser_reports_and_skips(self):
+        from unittest.mock import patch as mp
+        from wbspy import codearts_browser as cb
+        logs = []
+        with mp.object(cb, "find_browser", return_value=None):
+            out = cb.checkin_by_browser(log=logs.append)
+        self.assertIn("未找到系统浏览器", out["checkin"])
+        self.assertTrue(logs)                            # 失败必须留痕
+
+    def test_dispatch_and_registration(self):
+        from wbspy.channels import CHANNELS
+        ch = CHANNELS["codearts"]
+        self.assertIn("checkin", ch.capabilities)
+        self.assertEqual(ch.welfare, ("daily",))         # 门槛已除，转正为 daily
+        from wbspy.benefits import _OTHER, CodeartsCheckin
+        self.assertIs(_OTHER["codearts"], CodeartsCheckin)
+        from wbspy.document import parse_auth
+        doc = parse_auth({"account": {"uid": "c", "nickname": "n"},
+                          "auth": {"accessToken": "t", "domain": "codearts.huaweicloud.com"}})
+        self.assertIn("checkin", doc.capabilities)
 
 
 class TestGatewayModels(unittest.TestCase):

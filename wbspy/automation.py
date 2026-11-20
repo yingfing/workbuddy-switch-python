@@ -63,7 +63,7 @@ def run_once(doc: Document, log: Callable[[str], None] = print) -> dict:
         from .benefits import checkin_other
         log(f"· {doc.label()}：")
         try:
-            summary.update(checkin_other(doc))
+            summary.update(checkin_other(doc, log=log))
         except UpstreamError as exc:
             summary["checkin"] = f"失败：{exc.message}"
             log(f"    checkin: 失败 - {exc.message}")
@@ -310,7 +310,7 @@ def checkin_sweep(documents: list[Document],
             if doc.channel_id != "buddy":
                 # 非 WorkBuddy 渠道：状态与领取合在签到客户端里，幂等
                 from .benefits import sweep_other
-                r = sweep_other(doc)
+                r = sweep_other(doc, log=log)
                 if "skip" in r:
                     continue
                 got = str(r.get("checkin") or "")
