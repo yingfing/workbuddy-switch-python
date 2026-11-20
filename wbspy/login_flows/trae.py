@@ -231,4 +231,7 @@ def poll(ticket: Ticket) -> "Document | None":
                  "expiresAt": exp_ms or int(time.time() * 1000 + 14 * 86400 * 1000)},
     })
     doc.raw.setdefault("channel", "trae")
+    # 设备号落盘：签到接口必带 x-device-id（缺了 claim 返回 9004）；
+    # PKCE 路径沿用换票设备，其余路径现场生成（签到侧同账号恒定派生兜底）。
+    doc.raw.setdefault("device_id", secrets.token_hex(16))
     return doc

@@ -8,7 +8,7 @@
 
 **[English](README.en.md)** | 简体中文
 
-> 多账号切换 · 13 家渠道扫码登录 · 积分自动托管（签到/猫猫旅行/任务）· 统一 OpenAI 兼容网关（76 家厂商 470+ 免费模型）
+> 多账号切换 · 13 家渠道扫码登录 · 积分自动托管（WorkBuddy 全套成长中心 + TRAE / Qoder / MiniMax / LobsterAI 每日签到）· 统一 OpenAI 兼容网关（76 家厂商 470+ 免费模型）
 >
 > **一次克隆，三端运行**：纯 Python 实现、零编译、零外部服务，3.9~3.13 全兼容。
 > 基于 [WorkBuddy Switch](https://github.com/koi128bit/WorkBuddy-Switch) by koi128bit ·
@@ -44,7 +44,7 @@
 |---|---|
 | **多账号切换** | 保存/恢复桌面客户端登录快照，多号党秒切；切换前自动备份可随时还原 |
 | **13 家渠道登录** | WorkBuddy 国内/国际版、Raccoon、MiniMax、Cline、Loomy、Qoder 双版、CodeArts、TRAE、LobsterAI、ZCode、Gemini——协议级真实现，扫码/网页/本机凭据三级回退 |
-| **积分自动托管** | 每日签到、成长任务、连登兑换、幸运抽奖、猫猫养成与旅行、能量开 Buddy 盲盒、补签卡，一轮跑完 |
+| **积分自动托管** | WorkBuddy：每日签到、成长任务、连登兑换、幸运抽奖、猫猫养成与旅行、能量开 Buddy 盲盒、补签卡；TRAE / Qoder（国内·国际）/ MiniMax Code / LobsterAI：每日签到 |
 | **统一 API 网关** | OpenAI 兼容端点（`/v1/chat/completions`）穿透 76 家厂商 470+ 免费模型，账号池自动轮换、按错误类型冷却、跨厂商 failover，流式/非流式双模 |
 | **Web 控制台** | 扫码登录、账号池、模型目录、自动化日志、用量统计全部可视化；Fluent 风格深浅双主题 |
 | **自我更新** | `wbspy update` 一条命令检查新版本；国内网络自动走阿里 DoH → Google DoH → 优选 IP 多通道择优 |

@@ -58,6 +58,16 @@ def run_once(doc: Document, log: Callable[[str], None] = print) -> dict:
     if "checkin" not in doc.capabilities or not doc.api_ready:
         summary["skip"] = f"渠道 {doc.channel_name} 未声明签到能力或无明文 token，跳过活动"
         return summary
+    if doc.channel_id != "buddy":
+        # 非 WorkBuddy 渠道：各渠道专用签到客户端（benefits.py），本身幂等
+        from .benefits import checkin_other
+        log(f"· {doc.label()}：")
+        try:
+            summary.update(checkin_other(doc))
+        except UpstreamError as exc:
+            summary["checkin"] = f"失败：{exc.message}"
+            log(f"    checkin: 失败 - {exc.message}")
+        return summary
     client = WorkBuddyClient(doc)
     log(f"· {doc.label()}：")
 
@@ -297,6 +307,19 @@ def checkin_sweep(documents: list[Document],
         if "checkin" not in doc.capabilities or not doc.api_ready:
             continue
         try:
+            if doc.channel_id != "buddy":
+                # 非 WorkBuddy 渠道：状态与领取合在签到客户端里，幂等
+                from .benefits import sweep_other
+                r = sweep_other(doc)
+                if "skip" in r:
+                    continue
+                got = str(r.get("checkin") or "")
+                if "已签" in got or "已领" in got:
+                    continue                     # 已签的不打扰（与 buddy 渠道同语义）
+                out[doc.uid] = got
+                log(f"· {doc.label()}：{got}")
+                acted = True
+                continue
             client = WorkBuddyClient(doc)
             if client.checkin_status().get("checked_in"):
                 continue

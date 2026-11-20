@@ -370,14 +370,18 @@ class TestAutomationScope(unittest.TestCase):
     """自动化只对 WorkBuddy 国内版账号生效（其他渠道跳过，不发无效请求）。"""
 
     def test_third_party_account_skipped(self):
+        """TRAE 已接签到托管（走 benefits 分派）；qodercn 用 patch 验证分派。"""
         from unittest.mock import patch, MagicMock
         from wbspy import automation
         trae = parse_auth({"account": {"uid": "t", "nickname": "TRAE 号"},
                            "auth": {"accessToken": "tt", "domain": "api.trae.com.cn"}})
-        with patch.object(automation, "WorkBuddyClient") as MockClient:
+        with patch("wbspy.benefits.TraeCheckin") as MC, \
+             patch("wbspy.benefits._OTHER", {"trae": MC}), \
+             patch.object(automation, "WorkBuddyClient") as WC:
+            MC.return_value.run.return_value = {"checkin": "今日已签"}
             summary = automation.run_once(trae, log=lambda *_: None)
-            self.assertIn("skip", summary)
-            MockClient.assert_not_called()          # 一个上游请求都不该发
+            self.assertEqual(summary.get("checkin"), "今日已签")
+            WC.assert_not_called()                  # TRAE 凭据绝不打 WorkBuddy 接口
 
     def test_buddy_account_runs(self):
         from unittest.mock import patch, MagicMock
@@ -481,15 +485,19 @@ class TestCapabilities(unittest.TestCase):
                          frozenset({"chat", "models", "refresh", "checkin", "credits"}))
 
     def test_third_party_empty(self):
+        """渠道能力声明：TRAE/MiniMax/LobsterAI 已接签到（checkin）；完全未接入的渠道仍为空。"""
         from wbspy.document import parse_auth
-        for domain in ("api.trae.com.cn",):
+        trae = parse_auth({"account": {"uid": "u", "nickname": "n"},
+                           "auth": {"accessToken": "t", "domain": "api.trae.com.cn"}})
+        self.assertEqual(trae.capabilities, frozenset({"checkin"}))
+        for domain in ("api.raccoon.sensetime.com", "www.huaweicloud.com"):
             doc = parse_auth({"account": {"uid": "u", "nickname": "n"},
                               "auth": {"accessToken": "t", "domain": domain}})
             self.assertEqual(doc.capabilities, frozenset(), domain)
-        # qoder 声明 chat/models（目录可见 + wasm 加密推理），但无 refresh/credits
+        # qoder 声明 chat/models/checkin（目录 + wasm 推理 + 每日积分活动）
         qd = parse_auth({"account": {"uid": "u", "nickname": "n"},
                          "auth": {"accessToken": "t", "domain": "qoder.cn"}})
-        self.assertEqual(qd.capabilities, frozenset({"chat", "models"}))
+        self.assertEqual(qd.capabilities, frozenset({"chat", "models", "checkin"}))
 
     def test_cline_capabilities(self):
         """Cline 已接 OpenAI 兼容 API：chat/models/refresh 有、签到/余额无。"""
@@ -657,6 +665,159 @@ class TestBuddyBox(unittest.TestCase):
             summary = automation.run_once(doc, log=lambda *_: None)
         self.assertNotIn("buddy_box", summary)
         self.assertIn("travel", summary)                # 出发照常
+
+
+class TestBenefits(unittest.TestCase):
+    """多渠道签到客户端（TRAE / Qoder / MiniMax / LobsterAI，协议 2026-11 逆向）。"""
+
+    def _doc(self, domain, uid="u1"):
+        from wbspy.document import parse_auth
+        return parse_auth({"account": {"uid": uid, "nickname": "n"},
+                           "auth": {"accessToken": "tok", "domain": domain}})
+
+    @staticmethod
+    def _resp(payload, status=200):
+        resp = MagicMock(ok=True, status_code=status)
+        resp.json.return_value = payload
+        return resp
+
+    def test_trae_already_and_success(self):
+        from wbspy.benefits import TraeCheckin
+        doc = self._doc("api.trae.com.cn", uid="t1")
+        c = TraeCheckin(doc)
+        self.assertTrue(c.device_id)                    # 老账号派生兜底也不为空
+        with patch("wbspy.benefits.requests.post",
+                   side_effect=[self._resp({"code": 0, "enable": True, "checked_in": True,
+                                            "credits": 200})]):
+            self.assertIn("已签", c.run()["checkin"])
+        with patch("wbspy.benefits.requests.post", side_effect=[
+                self._resp({"code": 0, "enable": True, "checked_in": False, "credits": 200}),
+                self._resp({"code": 0}),                    # claim 空 200
+                self._resp({"code": 0, "enable": True, "checked_in": True, "credits": 200})]):
+            self.assertIn("签到成功 +200", c.run()["checkin"])
+
+    def test_trae_claim_requires_device_header(self):
+        from wbspy.benefits import TraeCheckin
+        c = TraeCheckin(self._doc("api.trae.com.cn", uid="t2"))
+        seen = {}
+
+        def _fake(url, **kw):
+            seen["device"] = kw["headers"].get("x-device-id")
+            seen["auth"] = kw["headers"].get("Authorization")
+            return self._resp({"code": 0, "enable": False})
+
+        with patch("wbspy.benefits.requests.post", side_effect=_fake):
+            c.run()
+        self.assertTrue(seen["device"])                 # 缺了 claim 返回 9004，必须带
+        self.assertTrue(seen["auth"].startswith("Cloud-IDE-JWT "))
+
+    def test_qoder_campaigns_claim_flow(self):
+        from wbspy.benefits import QoderCheckin
+        doc = self._doc("openapi.qoder.com.cn", uid="q1")
+        self.assertEqual(doc.channel_id, "qodercn")
+        c = QoderCheckin(doc)
+        self.assertEqual(c.base, "https://openapi.qoder.com.cn")
+        camp = {"campaignId": "daily-1", "actionType": "CLAIM_BENEFIT",
+                "claimStatus": "CLAIMABLE", "title": "每日签到",
+                "benefit": {"kind": "CREDITS", "amount": 100}}
+        claimed = dict(camp, claimStatus="CLAIMED")
+        with patch("wbspy.benefits.requests.get", side_effect=[
+                self._resp({"code": 0, "data": {"campaigns": [camp, {"campaignId": "x",
+                            "actionType": "CLAIM_BENEFIT", "title": "活动礼包",
+                            "benefit": {"kind": "CREDITS"}, "claimStatus": "CLAIMABLE"}]}}),
+                self._resp({"code": 0, "data": {"campaigns": [claimed]}})]), \
+             patch("wbspy.benefits.requests.post", return_value=self._resp({"code": 0})):
+            out = c.run()["checkin"]
+        self.assertIn("+100", out)                      # 只领每日项，普通活动不动
+
+    def test_qoder_global_site(self):
+        from wbspy.benefits import QoderCheckin
+        c = QoderCheckin(self._doc("openapi.qoder.sh", uid="q2"))
+        self.assertEqual(c.base, "https://openapi.qoder.sh")
+
+    def test_minimax_signature_headers(self):
+        from wbspy.benefits import MiniMaxCheckin
+        doc = self._doc("account.minimax.cn", uid="m1")
+        self.assertEqual(doc.channel_id, "minimax")
+        c = MiniMaxCheckin(doc)
+        panel = {"days": [{"day_no": 1, "is_today": True, "status": 2, "points": 150}]}
+        seen = {}
+
+        def _fake_post(url, **kw):
+            seen.update(kw["headers"])
+            return self._resp({"base_resp": {"status_code": 0},
+                               "data": {"claim_result": 1, "points": 150}})
+
+        def _fake_get(url, **kw):
+            return self._resp({"base_resp": {"status_code": 0}, "data": {"panel": panel}})
+
+        with patch("wbspy.benefits.requests.get", side_effect=_fake_get), \
+             patch("wbspy.benefits.requests.post", side_effect=_fake_post):
+            out = c.run()["checkin"]
+        self.assertIn("+150", out)
+        self.assertTrue(seen.get("yy") and seen.get("x-signature") and seen.get("x-timestamp"))
+        self.assertTrue(seen["Authorization"].startswith("Bearer "))
+
+    def test_minimax_already_signed(self):
+        from wbspy.benefits import MiniMaxCheckin
+        c = MiniMaxCheckin(self._doc("account.minimax.cn", uid="m2"))
+        panel = {"days": [{"day_no": 1, "is_today": True, "status": 3}]}
+        with patch("wbspy.benefits.requests.get",
+                   return_value=self._resp({"base_resp": {"status_code": 0},
+                                            "data": {"panel": panel}})), \
+             patch("wbspy.benefits.requests.post") as mp:
+            out = c.run()["checkin"]
+        self.assertIn("已签", out)
+        mp.assert_not_called()
+
+    def test_lobster_full_flow(self):
+        from wbspy.benefits import LobsterCheckin
+        c = LobsterCheckin(self._doc("lobsterai-server.youdao.com", uid="l1"))
+        self.assertEqual(c.doc.channel_id, "lobsterai")
+        slot = {"slotState": "available",
+                "activity": {"activityCode": "check_in", "configRevision": 3}}
+        ctx = {"configRevision": 3, "state": {"claimedToday": False, "claimedDays": 4,
+               "totalDays": 30, "streakDays": 4}, "actions": ["check_in"]}
+        after = {"configRevision": 3, "state": {"claimedToday": True, "claimedDays": 5}}
+        with patch.object(c.s, "get", side_effect=[
+                self._resp({"code": 0, "data": slot}),
+                self._resp({"code": 0, "data": ctx}),
+                self._resp({"code": 0, "data": after})]), \
+             patch.object(c.s, "post",
+                          return_value=self._resp({"code": 0, "data": {"creditsGranted": 100}})):
+            out = c.run()["checkin"]
+        self.assertIn("+100", out)
+
+    def test_lobster_already(self):
+        from wbspy.benefits import LobsterCheckin
+        c = LobsterCheckin(self._doc("lobsterai-server.youdao.com", uid="l2"))
+        slot = {"slotState": "available",
+                "activity": {"activityCode": "check_in", "configRevision": 1}}
+        ctx = {"configRevision": 1, "state": {"claimedToday": True, "streakDays": 9},
+               "actions": ["check_in"]}
+        with patch.object(c.s, "get", side_effect=[
+                self._resp({"code": 0, "data": slot}),
+                self._resp({"code": 0, "data": ctx})]), \
+             patch.object(c.s, "post") as mp:
+            out = c.run()["checkin"]
+        self.assertIn("连登 9 天", out)
+        mp.assert_not_called()
+
+    def test_run_once_dispatches_trae(self):
+        """automation 按 channel 分派：TRAE 账号走 benefits，不再撞 WorkBuddy 接口。"""
+        from wbspy import automation
+        doc = self._doc("api.trae.com.cn", uid="t3")
+        self.assertIn("checkin", doc.capabilities)      # 渠道注册表已声明
+        with patch("wbspy.benefits.TraeCheckin") as MC, \
+             patch("wbspy.benefits._OTHER", {"trae": MC}):
+            MC.return_value.run.return_value = {"checkin": "签到成功 +200 积分"}
+            summary = automation.run_once(doc, log=lambda *_: None)
+        self.assertEqual(summary.get("checkin"), "签到成功 +200 积分")
+
+    def test_unsupported_channel_skips(self):
+        from wbspy.benefits import checkin_other
+        doc = self._doc("chatglm.cn", uid="z1")         # zcode：验证码依赖，暂未接入
+        self.assertIn("暂无签到托管", checkin_other(doc)["skip"])
 
 
 class TestGatewayModels(unittest.TestCase):
@@ -1299,10 +1460,11 @@ class TestCheckinPoller(unittest.TestCase):
             client.checkin.assert_called_once()          # 未签：补签
 
     def test_sweep_skips_other_channels_and_offline(self):
-        """非 WorkBuddy 渠道、无明文 token 的账号完全不发请求。"""
+        """国际版 TRAE（.ai 域）不在注册表 checkin 范围、无明文 token 不发请求。"""
         from unittest.mock import patch, MagicMock
         from wbspy import automation
-        docs = [self._doc("p2", domain="api.trae.ai"), self._doc("p3", api_ready=False)]
+        docs = [self._doc("p2", domain="api.raccoon.sensetime.com"),
+                self._doc("p3", api_ready=False)]
         with patch.object(automation, "WorkBuddyClient") as MC:
             out = automation.checkin_sweep(docs, log=lambda *_: None)
             self.assertEqual(out, {})
