@@ -843,7 +843,7 @@ class TestWelfareTags(unittest.TestCase):
         from wbspy.channels import CHANNELS
         managed = {cid for cid, ch in CHANNELS.items() if "checkin" in ch.capabilities}
         self.assertEqual(managed, {"buddy", "trae", "qoder", "qodercn", "minimax",
-                                   "lobsterai", "codearts"})
+                                   "lobsterai", "codearts", "loomy", "zcode"})
 
     def test_api_channels_exposes_welfare(self):
         from fastapi.testclient import TestClient
@@ -861,7 +861,9 @@ class TestWelfareTags(unittest.TestCase):
                          [("oneoff", "manual")])
         self.assertFalse(gemini["managed"])
         loomy = next(c for c in data if c["id"] == "loomy")
-        self.assertEqual([w["group"] for w in loomy["welfare"]], ["auto", "manual"])
+        self.assertEqual([w["group"] for w in loomy["welfare"]], ["auto"])
+        raccoon = next(c for c in data if c["id"] == "raccoon")
+        self.assertEqual([w["group"] for w in raccoon["welfare"]], ["manual"])
 
 
 class TestCodeartsBrowser(unittest.TestCase):
@@ -958,6 +960,133 @@ class TestCodeartsBrowser(unittest.TestCase):
         doc = parse_auth({"account": {"uid": "c", "nickname": "n"},
                           "auth": {"accessToken": "t", "domain": "codearts.huaweicloud.com"}})
         self.assertIn("checkin", doc.capabilities)
+
+
+class TestLoomyZcode(unittest.TestCase):
+    """Loomy first-login 签到与 ZCode 活动领取（协议 2026-11 逆向互证）。"""
+
+    def _resp(self, payload, status=200):
+        resp = MagicMock(ok=status < 400, status_code=status)
+        resp.json.return_value = payload
+        return resp
+
+    def _doc(self, domain, uid, raw_extra=None):
+        from wbspy.document import parse_auth
+        doc = parse_auth({"account": {"uid": uid, "nickname": "n"},
+                          "auth": {"accessToken": "tok", "domain": domain}})
+        if raw_extra:
+            doc.raw.update(raw_extra)
+        return doc
+
+    # -- Loomy ---------------------------------------------------------------
+
+    def test_loomy_success_then_idempotent(self):
+        from wbspy.benefits import LoomyCheckin
+        doc = self._doc("account.xfinfr.com", "l1")
+        c = LoomyCheckin(doc)
+        with patch("wbspy.benefits.requests.post",
+                   return_value=self._resp({"code": "000000", "data": {
+                       "alreadyProcessed": False, "currentBalance": 500,
+                       "dailyBalance": 100}})):
+            self.assertIn("签到成功", c.run()["checkin"])
+            self.assertIn("500", c.run()["checkin"])
+            self.assertIn("100", c.run()["checkin"])
+        with patch("wbspy.benefits.requests.post",
+                   return_value=self._resp({"code": "000000", "data": {
+                       "alreadyProcessed": True}})):
+            self.assertIn("已领", c.run()["checkin"])
+
+    def test_loomy_session_expired_maps_to_auth_error(self):
+        from wbspy.benefits import LoomyCheckin
+        from wbspy.upstream import UpstreamError
+        doc = self._doc("account.xfinfr.com", "l1")
+        with patch("wbspy.benefits.requests.post",
+                   return_value=self._resp({"code": "100002", "desc": "会话过期"})):
+            with self.assertRaises(UpstreamError) as ctx:
+                LoomyCheckin(doc).run()
+            self.assertEqual(ctx.exception.status, 401)
+
+    def test_loomy_headers_dual_token_traceparent(self):
+        from wbspy.benefits import LoomyCheckin
+        doc = self._doc("account.xfinfr.com", "l1")
+        with patch("wbspy.benefits.requests.post",
+                   return_value=self._resp({"code": "000000", "data": {"alreadyProcessed": True}})) as mp:
+            LoomyCheckin(doc).run()
+        headers = mp.call_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], "Bearer tok")
+        self.assertEqual(headers["token"], "tok")          # 双头：网关任一即可
+        self.assertTrue(headers["traceparent"].startswith("00-"))
+        self.assertIn("loomy-version", headers)
+
+    # -- ZCode ---------------------------------------------------------------
+
+    def _zdoc(self):
+        return self._doc("zcode.z.ai", "z1",
+                         {"zcode": {"device_mid": "dev-9", "app_version": "3.16.2"}})
+
+    def test_zcode_no_activity_skips(self):
+        from wbspy.benefits import ZCodeCheckin
+        with patch("wbspy.benefits.requests.get",
+                   return_value=self._resp({"code": 0, "data": {"plans": []}})):
+            out = ZCodeCheckin(self._zdoc()).run()
+        self.assertIn("skip", out)
+
+    def test_zcode_claim_success_with_events(self):
+        from wbspy.benefits import ZCodeCheckin
+        doc = self._zdoc()
+        plan = {"plan_id": "p-1", "name": "Weekend Build", "priority": 110}
+        with patch("wbspy.benefits.requests.get",
+                   return_value=self._resp({"code": 0, "data": {"plans": [plan]}})), \
+             patch("wbspy.benefits.requests.post", side_effect=[
+                 self._resp({"code": 0}),                      # app_launch
+                 self._resp({"code": 0}),                      # app_daily_active
+                 self._resp({"code": 0, "data": {"ends_at": 1790000000000}}),  # claim
+             ]) as mp:
+            out = ZCodeCheckin(doc, log=lambda *_: None).run()
+        self.assertIn("领取成功", out["checkin"])
+        self.assertIn("Weekend Build", out["checkin"])
+        urls = [c.kwargs["url"] for c in mp.call_args_list
+                if "url" in c.kwargs] or [c.args[0] for c in mp.call_args_list]
+        self.assertTrue(any("billing/claim" in u for u in urls))
+        self.assertTrue(any("event/report" in u for u in urls))
+
+    def test_zcode_already_claimed_is_quiet(self):
+        from wbspy.benefits import ZCodeCheckin
+        plan = {"plan_id": "p-1", "priority": 1}
+        logs = []
+        with patch("wbspy.benefits.requests.get",
+                   return_value=self._resp({"code": 0, "data": {"plans": [plan]}})), \
+             patch("wbspy.benefits.requests.post", side_effect=[
+                 self._resp({"code": 0}), self._resp({"code": 0}),
+                 self._resp({"code": 1003, "msg": "already"})]):
+            out = ZCodeCheckin(self._zdoc(), log=lambda m: logs.append(m)).run()
+        self.assertIn("已领取", out["checkin"])
+        self.assertTrue(all("未完成" not in m for m in logs))   # 幂等不当失败报
+
+    def test_zcode_captcha_failure_logged_not_silent(self):
+        from wbspy.benefits import ZCodeCheckin
+        plan = {"plan_id": "p-2", "priority": 1}
+        logs = []
+        with patch("wbspy.benefits.requests.get",
+                   return_value=self._resp({"code": 0, "data": {"plans": [plan]}})), \
+             patch("wbspy.benefits.requests.post", side_effect=[
+                 self._resp({"code": 0}), self._resp({"code": 0}),
+                 self._resp({"code": 3007, "msg": "captcha"})]):
+            out = ZCodeCheckin(self._zdoc(), log=lambda m: logs.append(m)).run()
+        self.assertIn("领取未完成", out["checkin"])
+        self.assertTrue(any("验证码" in m for m in logs))       # 失败必须打日志
+
+    def test_zcode_events_failure_does_not_block_claim(self):
+        from wbspy.benefits import ZCodeCheckin
+        plan = {"plan_id": "p-3", "priority": 1}
+        with patch("wbspy.benefits.requests.get",
+                   return_value=self._resp({"code": 0, "data": {"plans": [plan]}})), \
+             patch("wbspy.benefits.requests.post", side_effect=[
+                 MagicMock(ok=False, status_code=500),          # 事件失败
+                 MagicMock(ok=False, status_code=500),
+                 self._resp({"code": 0, "data": {}})]):         # claim 照发
+            out = ZCodeCheckin(self._zdoc(), log=lambda *_: None).run()
+        self.assertIn("领取成功", out["checkin"])
 
 
 class TestGatewayModels(unittest.TestCase):

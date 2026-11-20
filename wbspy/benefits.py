@@ -311,11 +311,162 @@ class CodeartsCheckin:
         return checkin_by_browser(self.log)
 
 
+# -- Loomy（讯飞星火）----------------------------------------------------------
+
+_LOOMY_BASE = "https://loomyad.xunfei.cn/api/v1"
+_LOOMY_VERSION = "0.9.39"          # 官方客户端版本号，网关只做存在性校验
+
+
+class LoomyCheckin:
+    """Loomy 每日签到：POST /points/first-login（幂等，重复调用返回已处理）。
+
+    协议参照 loomy2api（2026-11）：token + Authorization 双头（网关任一即可，
+    客户端双发）；traceparent 缺失上游会挂起超时；loomy-version 只查存在性。
+    业务码 000000 成功；100002/020002 会话失效——无续期接口，需重新扫码。
+    """
+
+    def __init__(self, doc, log=print):
+        self.doc = doc
+        self.log = log
+
+    def _headers(self) -> dict:
+        session = self.doc.token
+        return {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {session}",
+            "token": session,
+            "traceparent": f"00-{uuid.uuid4().hex}-{uuid.uuid4().hex[:16]}-01",
+            "loomy-version": _LOOMY_VERSION,
+        }
+
+    def run(self) -> dict:
+        resp = requests.post(f"{_LOOMY_BASE}/points/first-login",
+                             json={}, headers=self._headers(), timeout=TIMEOUT)
+        payload = _json_or(resp)
+        code = str(payload.get("code") or "")
+        if code in ("100002", "020002"):
+            raise UpstreamError(401, "upstream_auth_expired",
+                                f"会话已失效（业务码 {code}），请重新扫码登录。")
+        if code != "000000":
+            raise UpstreamError(502, "upstream_error",
+                                f"签到被拒：code={code} {payload.get('desc') or ''}".strip())
+        data = payload.get("data") or {}
+        if data.get("alreadyProcessed"):
+            return {"checkin": "今日已领（幂等跳过）"}
+        daily = data.get("dailyBalance")
+        text = f"签到成功，余额 {data.get('currentBalance')}"
+        if daily not in (None, ""):
+            text += f"（今日赠送 {daily}）"
+        return {"checkin": text}
+
+
+# -- ZCode（智谱）--------------------------------------------------------------
+
+_ZCODE_ORIGIN = "https://zcode.z.ai"
+_ZCODE_PREVIEW = "/api/v1/zcode-plan/billing/preview"
+_ZCODE_EVENT = "/api/v1/event/report"
+_ZCODE_CLAIM = "/api/v1/zcode-plan/billing/claim"
+
+_ZCODE_CODE_TEXT = {
+    1003: "本期已领取过",
+    1005: "今日领取次数已用完",
+    3007: "需要阿里云验证码参数（无感验证参数一次性、几分钟时效，纯接口取不到）",
+}
+
+
+class ZCodeCheckin:
+    """ZCode 限时活动套餐领取：preview 查活动 → 补报活跃事件 → claim。
+
+    协议参照 L0NE-6/ZCode-Daily（2026-11）：platform 必须传 windows（win32
+    返 3001）；claim 前补报 app_launch / app_daily_active 提升资格（失败只记
+    日志不阻塞）；1003 = 本期已领（幂等）；3007 = 缺验证码参数——如实报日志，
+    不静默也不假装成功。
+    """
+
+    def __init__(self, doc, log=print):
+        self.doc = doc
+        self.log = log
+        zc = doc.raw.get("zcode") or {}
+        self.device_mid = str(zc.get("device_mid") or "")
+        self.app_version = str(zc.get("app_version") or "3.16.2")
+
+    def _headers(self) -> dict:
+        h = {"Authorization": f"Bearer {self.doc.token}",
+             "X-ZCode-App-Version": self.app_version,
+             "X-Platform": "windows"}
+        if self.device_mid:
+            h["X-Device-Mid"] = self.device_mid
+        return h
+
+    def _report_events(self) -> None:
+        """补报 app_launch / app_daily_active（运营系统据此发领取资格）。"""
+        import platform as _plat
+        base = {
+            "client_timezone": "Asia/Shanghai",
+            "client_language": "zh-CN",
+            "event_region": "app",
+            "event_type": "view",
+            "event_text": "",
+            "event_extra_detail": {},
+            "user_id": self.doc.uid,
+            "screen_resolution": "2560x1440",
+            "app_version": self.app_version,
+            "device_os_category": _plat.system().lower() or "linux",
+            "device_os_version": _plat.release(),
+        }
+        if self.device_mid:
+            base["device_mid"] = self.device_mid
+        fails = []
+        for name in ("app_launch", "app_daily_active"):
+            body = dict(base, event_id=str(uuid.uuid4()), element_name=name)
+            try:
+                r = requests.post(_ZCODE_ORIGIN + _ZCODE_EVENT, json=body,
+                                  headers=self._headers(), timeout=TIMEOUT)
+                if r.status_code != 200 or r.json().get("code") != 0:
+                    fails.append(name)
+            except Exception:
+                fails.append(name)
+        if fails:
+            self.log(f"    zcode: 活跃事件补报失败（不阻塞领取）：{'、'.join(fails)}")
+
+    def run(self) -> dict:
+        r = requests.get(f"{_ZCODE_ORIGIN}{_ZCODE_PREVIEW}",
+                         params={"app_version": self.app_version, "platform": "windows"},
+                         headers=self._headers(), timeout=TIMEOUT)
+        payload = _json_or(r)
+        plans = [p for p in (payload.get("data") or {}).get("plans") or []
+                 if isinstance(p, dict) and (p.get("plan_id") or p.get("planId"))]
+        if not plans:
+            return {"skip": "今日无可领活动"}
+        self._report_events()
+        best = max(plans, key=lambda p: p.get("priority") or 0)
+        plan_id = str(best.get("plan_id") or best.get("planId"))
+        cr = requests.post(_ZCODE_ORIGIN + _ZCODE_CLAIM, json={"plan_id": plan_id},
+                           headers=self._headers(), timeout=TIMEOUT)
+        cpayload = _json_or(cr)
+        code = cpayload.get("code")
+        if code == 0:
+            data = cpayload.get("data") or {}
+            name = best.get("name") or plan_id
+            ends = data.get("ends_at") or data.get("endsAt")
+            when = ""
+            if isinstance(ends, (int, float)) and ends > 0:
+                when = "，有效期至 " + time.strftime(
+                    "%m-%d %H:%M", time.localtime(ends / 1000 if ends > 10**11 else ends))
+            return {"checkin": f"领取成功：{name}{when}"}
+        if code == 1003:
+            return {"checkin": "本期已领取过"}
+        text = _ZCODE_CODE_TEXT.get(code) or f"code={code} {cpayload.get('msg') or ''}".strip()
+        self.log(f"    zcode: 活动领取未完成（{plan_id}）：{text}")
+        return {"checkin": f"发现活动但领取未完成：{text}"}
+
+
 # -- 分派 ----------------------------------------------------------------------
 
 _OTHER = {"trae": TraeCheckin, "qoder": QoderCheckin, "qodercn": QoderCheckin,
           "minimax": MiniMaxCheckin, "lobsterai": LobsterCheckin,
-          "codearts": CodeartsCheckin}
+          "codearts": CodeartsCheckin, "loomy": LoomyCheckin, "zcode": ZCodeCheckin}
 
 
 def checkin_other(doc, log=print) -> dict:
