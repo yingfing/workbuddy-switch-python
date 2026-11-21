@@ -105,6 +105,63 @@ def port_bind_error(port: int) -> str | None:
         return f"端口 {port} 已被其他程序占用"
 
 
+# -- 概览页健康横幅 ------------------------------------------------------------
+
+def _round_health(per_account: dict) -> tuple[int, int]:
+    """最近一轮签到的 (成功账号数, 总数)。
+
+    账号级失败 = summary 任意项以「失败：」开头（automation._retry 的约定）。
+    """
+    n = 0
+    ok_n = 0
+    for rec in (per_account or {}).values():
+        s = rec.get("summary") if isinstance(rec, dict) else None
+        if not isinstance(s, dict):
+            continue
+        n += 1
+        vals = [v for v in s.values() if isinstance(v, str)]
+        if vals and not any(v.startswith("失败：") for v in vals):
+            ok_n += 1
+    return ok_n, n
+
+
+def health_state(total: int, api_ready: int, checkin: dict, mobile: dict,
+                 week_requests: int, week_errors: int,
+                 auto_enabled: bool) -> dict:
+    """概览页顶部「对号/叉号」横幅的状态判定（纯函数，便于测试）。
+
+    error = 硬故障：全部账号 token 失效 / 自动化开启但本轮签到全挂 /
+            手机网关报错。
+    warn  = 有小问题但不影响运行：部分账号失效 / 部分签到失败 /
+            近 7 日请求错误率高（≥5 次且 >20%）。
+    ok    = 一切完美。
+    """
+    issues: list[tuple[str, str]] = []
+    if total > 0 and api_ready == 0:
+        issues.append(("error", f"全部 {total} 个账号 token 已失效，需要重新登录"))
+    elif total > 0 and api_ready < total:
+        issues.append(("warn",
+                       f"{total - api_ready} 个账号 token 已失效（{api_ready}/{total} 可用）"))
+    if auto_enabled:
+        ok_n, n = _round_health(checkin.get("per_account") or {})
+        if n:
+            if ok_n == 0:
+                issues.append(("error", f"最近一轮签到 0/{n} 成功"))
+            elif ok_n < n:
+                issues.append(("warn", f"最近一轮签到 {ok_n}/{n} 成功，{n - ok_n} 个失败"))
+    if mobile.get("enabled"):
+        err = (mobile.get("last_error") or "").strip()
+        if err:
+            issues.append(("error", f"手机网关异常：{err}"))
+    if week_requests >= 5 and week_errors / week_requests > 0.2:
+        issues.append(("warn",
+                       f"近 7 日网关请求错误率 {week_errors}/{week_requests}"))
+    if not issues:
+        return {"level": "ok", "issues": []}
+    level = "error" if any(lv == "error" for lv, _ in issues) else "warn"
+    return {"level": level, "issues": [{"level": lv, "text": t} for lv, t in issues]}
+
+
 def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None) -> FastAPI:
     app = create_app(pool, api_key=api_key)     # 网关路由（/v1/*、/healthz）
     app.state.web_port = port                   # 当前监听端口（重启 argv 重建用）
@@ -289,6 +346,11 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         today_req = next((s["requests"] for s in series if s["date"] == today), 0)
         gw_state = app.state.mobile_gateway.status()
         alive = len(pool.healthy("*")) if hasattr(pool, "healthy") else None
+        mobile_enabled = bool((load_config().get("mobile") or {}).get("enabled"))
+        auto_enabled = bool((load_config().get("automation") or {}).get("enabled"))
+        last_round = _last_checkin_round()
+        mobile_state = {"enabled": mobile_enabled,
+                        "last_error": gw_state.get("last_error") or ""}
         return _ok({
             "version": __version__,
             "accounts": {"total": len(rows), "api_ready": api_ready,
@@ -299,11 +361,18 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
                       "week_requests": sum(s["requests"] for s in series),
                       "week_tokens": sum(s["tokens"] for s in series),
                       "week_errors": sum(s["errors"] for s in series)},
-            "checkin": _last_checkin_round(),
+            "checkin": last_round,
             "pool": {"alive": alive, "total": len(rows)},
-            "mobile": {"enabled": bool((load_config().get("mobile") or {}).get("enabled")),
-                       "connected": bool(gw_state.get("running")) and bool(gw_state.get("connected"))},
-            "auto_enabled": bool((load_config().get("automation") or {}).get("enabled")),
+            "mobile": {"enabled": mobile_enabled,
+                       "connected": bool(gw_state.get("running")) and bool(gw_state.get("connected")),
+                       "last_error": mobile_state["last_error"]},
+            "auto_enabled": auto_enabled,
+            "health": health_state(
+                total=len(rows), api_ready=api_ready, checkin=last_round,
+                mobile=mobile_state,
+                week_requests=sum(s["requests"] for s in series),
+                week_errors=sum(s["errors"] for s in series),
+                auto_enabled=auto_enabled),
         })
 
     @app.get("/api/accounts")

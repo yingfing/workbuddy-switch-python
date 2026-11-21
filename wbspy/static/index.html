@@ -219,6 +219,21 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
 @keyframes toastIn{from{opacity:0;transform:translateX(28px)}to{opacity:1;transform:none}}
 
 /* -- 概览仪表盘（1Panel 风格：统计卡行 + 图表行 + 签到状态表）-- */
+.healthBanner{display:flex;align-items:center;gap:16px;border-radius:var(--r);
+  padding:16px 22px;margin-bottom:14px;border:1px solid;transition:.2s;user-select:none}
+.healthBanner.ok{background:linear-gradient(90deg,rgba(34,197,94,.12),rgba(34,197,94,.02) 75%);
+  border-color:rgba(34,197,94,.4);color:#22c55e}
+.healthBanner.warn{background:linear-gradient(90deg,rgba(234,179,8,.12),rgba(234,179,8,.02) 75%);
+  border-color:rgba(234,179,8,.4);color:#eab308}
+.healthBanner.error{background:linear-gradient(90deg,rgba(239,68,68,.14),rgba(239,68,68,.02) 75%);
+  border-color:rgba(239,68,68,.45);color:#ef4444}
+.healthBanner .hIcon{width:46px;height:46px;flex:none}
+.healthBanner .hTitle{font-size:17px;font-weight:600;color:var(--text)}
+.healthBanner.error .hTitle{color:#ef4444}
+.healthBanner.ok .hTitle{color:#22c55e}
+.healthBanner.warn .hTitle{color:#eab308}
+.healthBanner .hSub{color:var(--dim);font-size:12px;margin-top:3px;line-height:1.55}
+.healthBanner .hMeta{margin-left:auto;color:var(--dim);font-size:11px;white-space:nowrap}
 .dashCards{display:grid;grid-template-columns:repeat(auto-fit,minmax(176px,1fr));
   gap:12px;margin-bottom:14px}
 .dashCard{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
@@ -273,6 +288,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
 
   <!-- 概览（1Panel 风格用量面板） -->
   <section id="tab-dash">
+    <div id="healthBanner" class="healthBanner ok" hidden></div>
     <div class="dashCards" id="dashCards"></div>
     <div class="dashCharts">
       <div class="card" style="margin-bottom:0">
@@ -768,11 +784,35 @@ function _last7Days() {
 function loadDashboard() {
   api('/api/dashboard').then(r => {
     const d = r.data || {};
+    renderHealth(d);
     renderDashCards(d);
     renderDashUsage(d.usage || {});
     renderDashDonut((d.accounts || {}).by_channel || {});
     renderDashCheckin(d.checkin || {});
   }).catch(() => {});
+}
+const _HEALTH_ICONS = {
+  ok: '<svg class="hIcon" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20.5" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M14.5 24.5l6.5 7 12.5-14.5" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  warn: '<svg class="hIcon" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20.5" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M24 13.5v13.5" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="24" cy="33.5" r="2.6" fill="currentColor"/></svg>',
+  error: '<svg class="hIcon" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20.5" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M16 16l16 16M32 16l-16 16" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></svg>'
+};
+function renderHealth(d) {
+  const h = (d && d.health) || {level: 'ok', issues: []};
+  const el = $('#healthBanner');
+  const level = h.level || 'ok';
+  const issues = h.issues || [];
+  el.className = 'healthBanner ' + level;
+  const title = level === 'ok' ? '一切完美，正在正常运行'
+              : level === 'error' ? '有问题，需要处理' : '有小问题，不影响运行';
+  const acc = (d.accounts || {});
+  const sub = level === 'ok'
+    ? `全部检查项通过 · ${acc.total || 0} 个账号（${acc.api_ready || 0} 个可用）· 手机网关${(d.mobile||{}).connected ? '在线' : '未开启/待连'}`
+    : issues.map(i => `· ${i.text}`).join('<br>');
+  const meta = `自动巡检 · ${new Date().toTimeString().slice(0,5)}`;
+  el.innerHTML = _HEALTH_ICONS[level] +
+    `<div><div class="hTitle">${title}</div><div class="hSub">${sub}</div></div>` +
+    `<div class="hMeta">${meta}</div>`;
+  el.hidden = false;
 }
 function renderDashCards(d) {
   const acc = d.accounts || {}, usage = d.usage || {}, ch = d.checkin || {};

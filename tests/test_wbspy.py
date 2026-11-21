@@ -4674,3 +4674,103 @@ class TestDoubaoCheckin(unittest.TestCase):
             with self.assertRaises(RuntimeError) as cm:
                 flow.poll(t)
             self.assertIn("会话 Cookie", str(cm.exception))
+
+
+class TestHealthBanner(unittest.TestCase):
+    """概览页顶部「对号/叉号」健康横幅的状态判定。"""
+
+    def _ck(self, n_fail=0, n_ok=1):
+        per = {}
+        for i in range(n_ok):
+            per[f"uid-ok{i}"] = {"label": f"ok{i}", "summary": {
+                "signin": "签到成功，连登 3 天", "streak": "兑换 2 档"}}
+        for i in range(n_fail):
+            per[f"uid-bad{i}"] = {"label": f"bad{i}", "summary": {
+                "signin": "失败：token 已过期", "streak": "失败：token 已过期"}}
+        return {"at": 1700000000000, "per_account": per}
+
+    def test_ok_when_no_issues(self):
+        """健康账号 + 签到成功 + 手机未开 → 大对号。"""
+        from wbspy.webui import health_state
+        h = health_state(total=3, api_ready=3, checkin=self._ck(),
+                         mobile={"enabled": False}, week_requests=10,
+                         week_errors=0, auto_enabled=True)
+        self.assertEqual(h["level"], "ok")
+        self.assertEqual(h["issues"], [])
+
+    def test_error_when_all_tokens_dead(self):
+        """全部账号 token 失效 → 红叉。"""
+        from wbspy.webui import health_state
+        h = health_state(total=2, api_ready=0, checkin={},
+                         mobile={"enabled": False}, week_requests=0,
+                         week_errors=0, auto_enabled=False)
+        self.assertEqual(h["level"], "error")
+        self.assertIn("全部 2 个账号", h["issues"][0]["text"])
+
+    def test_error_when_all_checkin_failed(self):
+        """自动化开启 + 本轮签到全部失败 → 红叉。"""
+        from wbspy.webui import health_state
+        h = health_state(total=3, api_ready=3, checkin=self._ck(n_fail=2, n_ok=0),
+                         mobile={"enabled": False}, week_requests=0,
+                         week_errors=0, auto_enabled=True)
+        self.assertEqual(h["level"], "error")
+        self.assertIn("0/2 成功", h["issues"][-1]["text"])
+
+    def test_error_when_mobile_gateway_broken(self):
+        """手机连接开启且网关报错 → 红叉；没报错则不算。"""
+        from wbspy.webui import health_state
+        h = health_state(total=1, api_ready=1, checkin={},
+                         mobile={"enabled": True, "last_error": "连接被重置"},
+                         week_requests=0, week_errors=0, auto_enabled=False)
+        self.assertEqual(h["level"], "error")
+        self.assertIn("手机网关异常", h["issues"][0]["text"])
+        # 手机开着但 App 没连（无错误）是常态，不算故障
+        h2 = health_state(total=1, api_ready=1, checkin={},
+                          mobile={"enabled": True, "last_error": ""},
+                          week_requests=0, week_errors=0, auto_enabled=False)
+        self.assertEqual(h2["level"], "ok")
+
+    def test_warn_when_partial_failures(self):
+        """部分签到失败 / 部分 token 失效 → 黄牌，不红叉。"""
+        from wbspy.webui import health_state
+        h = health_state(total=3, api_ready=3, checkin=self._ck(n_fail=1, n_ok=2),
+                         mobile={"enabled": False}, week_requests=0,
+                         week_errors=0, auto_enabled=True)
+        self.assertEqual(h["level"], "warn")
+        self.assertIn("2/3 成功", h["issues"][0]["text"])
+        h2 = health_state(total=4, api_ready=3, checkin={},
+                          mobile={"enabled": False}, week_requests=0,
+                          week_errors=0, auto_enabled=False)
+        self.assertEqual(h2["level"], "warn")
+        self.assertIn("1 个账号 token 已失效", h2["issues"][0]["text"])
+
+    def test_warn_on_high_error_rate(self):
+        """近 7 日请求错误率 >20%（≥5 次）→ 黄牌。"""
+        from wbspy.webui import health_state
+        h = health_state(total=1, api_ready=1, checkin={},
+                         mobile={"enabled": False}, week_requests=10,
+                         week_errors=3, auto_enabled=False)
+        self.assertEqual(h["level"], "warn")
+        self.assertIn("错误率 3/10", h["issues"][0]["text"])
+        # 少量请求不触发噪音
+        h2 = health_state(total=1, api_ready=1, checkin={},
+                          mobile={"enabled": False}, week_requests=2,
+                          week_errors=1, auto_enabled=False)
+        self.assertEqual(h2["level"], "ok")
+
+    def test_error_wins_over_warn(self):
+        """同时有 error 和 warn → 整体红叉，问题全列出。"""
+        from wbspy.webui import health_state
+        h = health_state(total=4, api_ready=2, checkin=self._ck(n_fail=1, n_ok=2),
+                         mobile={"enabled": True, "last_error": "wss 断开"},
+                         week_requests=10, week_errors=3, auto_enabled=True)
+        self.assertEqual(h["level"], "error")
+        self.assertEqual(len(h["issues"]), 4)   # token 失效 + 签到失败 + 手机 + 错误率
+
+    def test_empty_pool_is_ok(self):
+        """零账号（全新部署）不是故障 → 大对号。"""
+        from wbspy.webui import health_state
+        h = health_state(total=0, api_ready=0, checkin={},
+                         mobile={"enabled": False}, week_requests=0,
+                         week_errors=0, auto_enabled=False)
+        self.assertEqual(h["level"], "ok")
