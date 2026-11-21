@@ -840,11 +840,12 @@ class TestWelfareTags(unittest.TestCase):
                               f"{cid} 声明了 checkin 却没标 daily")
 
     def test_managed_matches_capabilities(self):
-        """已托管=渠道声明 checkin 能力；四渠道 + buddy 应为已托管。"""
+        """已托管=渠道声明 checkin 能力；四渠道 + buddy + doubao 应为已托管。"""
         from wbspy.channels import CHANNELS
         managed = {cid for cid, ch in CHANNELS.items() if "checkin" in ch.capabilities}
         self.assertEqual(managed, {"buddy", "trae", "qoder", "qodercn", "minimax",
-                                   "lobsterai", "codearts", "loomy", "zcode"})
+                                   "lobsterai", "codearts", "loomy", "zcode",
+                                   "doubao"})
 
     def test_api_channels_exposes_welfare(self):
         from fastapi.testclient import TestClient
@@ -4469,3 +4470,207 @@ class TestEdgeSync(unittest.TestCase):
                 off = c.post("/api/mobile/connection", json={"enabled": False})
                 self.assertFalse(off.json()["data"]["enabled"])
                 self.assertFalse(off.json()["data"]["running"])
+
+
+class TestDoubaoCheckin(unittest.TestCase):
+    """豆包（豆包工作）扫码登录 + 每日签到协议。"""
+
+    def _doc(self, token="sessionid=abc123; sid_tt=tt456; ttwid=xyz"):
+        from wbspy.document import Document
+        return Document(raw={"account": {"uid": "doubao-1"}}, uid="doubao-1",
+                        token=token)
+
+    @staticmethod
+    def _resp(payload, status=200):
+        m = Mock()
+        m.status_code = status
+        m.json.return_value = payload
+        return m
+
+    # -- 渠道注册与域名识别 ----------------------------------------------------
+
+    def test_channel_registered(self):
+        from wbspy.channels import get_channel
+        ch = get_channel("doubao")
+        self.assertEqual(ch.login_kind, "doubao-qr")
+        self.assertTrue(ch.credits_claim)
+        self.assertIn("checkin", ch.capabilities)
+
+    def test_domain_needle(self):
+        from wbspy.document import parse_auth
+        doc = parse_auth({"account": {"uid": "u1", "nickname": "豆包账号"},
+                          "auth": {"accessToken": "sessionid=1",
+                                   "domain": "www.doubao.com"}})
+        self.assertEqual(doc.channel_id, "doubao")
+
+    # -- 签到协议 ---------------------------------------------------------------
+
+    def test_detail_request_shape(self):
+        """detail：尾斜杠 + POST + 桌面端全套 query + Cookie 鉴权 + UA。"""
+        from unittest.mock import patch
+        from wbspy.benefits import DoubaoCheckin, _DOUBAO_QUERY
+        with patch("wbspy.benefits.requests.post",
+                   return_value=self._resp({"code": 0, "data": {"tasks": []}})) as p:
+            out = DoubaoCheckin(self._doc()).run()
+        url = p.call_args_list[0].args[0]      # 第一个请求是 detail（随后是 checkin）
+        self.assertIn("https://www.doubao.com/alice/ug/campaign/v3/detail/", url)
+        for key in ("aid=582478", "web_platform=desktop", "pc_version=",
+                    "version_code=20800", "client_platform=pc_client"):
+            self.assertIn(key, url)
+        headers = p.call_args_list[0].kwargs["headers"]
+        self.assertIn("sessionid=abc123", headers["Cookie"])
+        self.assertIn("SamanthaDoubao/", headers["User-Agent"])
+        self.assertEqual(p.call_args_list[0].kwargs["json"],
+                         {"campaign_group_code": "pc_incentive_task_mvp_v3"})
+        self.assertIn("checkin", out)
+
+    def test_already_checked_in_skips_claim(self):
+        """detail 显示 checked_in_today=true → 不打领取接口。"""
+        from unittest.mock import patch
+        from wbspy.benefits import DoubaoCheckin
+        panel = {"code": 0, "data": {"tasks": [{
+            "task_kind": "daily_signin",
+            "daily_checkin": {"checked_in_today": True, "continuous_days": 3,
+                              "reward": {"reward_amount": 200}}}]}
+        }
+        with patch("wbspy.benefits.requests.post",
+                   return_value=self._resp(panel)) as p:
+            out = DoubaoCheckin(self._doc()).run()
+        self.assertIn("今日已签", out["checkin"])
+        self.assertIn("连签 3 天", out["checkin"])
+        paths = [c.args[0] for c in p.call_args_list]
+        self.assertTrue(all("/detail/" in u or "/quota/summary/" in u for u in paths),
+                        f"已签状态下不应打领取接口：{paths}")
+        self.assertFalse(any("landing/checkin" in u for u in paths))
+
+    def test_claim_success_and_idempotent(self):
+        """未签 → checkin 领取；幂等命中（idempotent:true）归「已签」。"""
+        from unittest.mock import patch
+        from wbspy.benefits import DoubaoCheckin
+        empty = self._resp({"code": 0, "data": {"tasks": []}})
+        ok = self._resp({"code": 0, "data": {"checked_in": True,
+                                             "checkin_date": "2026-11-21",
+                                             "continuous_days": 2,
+                                             "reward_amount": 200,
+                                             "reward_type": "quota_grant",
+                                             "idempotent": False}})
+        with patch("wbspy.benefits.requests.post", side_effect=[empty, ok]) as p:
+            out = DoubaoCheckin(self._doc()).run()
+        self.assertIn("签到成功", out["checkin"])
+        self.assertIn("+200", out["checkin"])
+        self.assertIn("连签 2 天", out["checkin"])
+        paths = [c.args[0] for c in p.call_args_list]
+        self.assertIn("/alice/ug/campaign/landing/checkin", paths[1])
+        self.assertEqual(p.call_args_list[1].kwargs["json"],
+                         {"scene": "pc_incentive_task_mvp_v3"})
+        idem = self._resp({"code": 0, "data": {"idempotent": True,
+                                               "reward_amount": 0}})
+        with patch("wbspy.benefits.requests.post", side_effect=[empty, idem]):
+            out = DoubaoCheckin(self._doc()).run()
+        self.assertIn("今日已签", out["checkin"])
+
+    def test_error_codes_mapped(self):
+        """710012001 会话失效→401；710010702 无活动→如实文案。"""
+        from wbspy.benefits import DoubaoCheckin
+        from wbspy.upstream import UpstreamError
+        with patch("wbspy.benefits.requests.post",
+                        return_value=self._resp({"code": 710012001})):
+            with self.assertRaises(UpstreamError) as cm:
+                DoubaoCheckin(self._doc()).run()
+            self.assertEqual(cm.exception.status, 401)
+            self.assertEqual(cm.exception.code, "upstream_auth_expired")
+        with patch("wbspy.benefits.requests.post",
+                        return_value=self._resp({"code": 710010702})):
+            with self.assertRaises(UpstreamError) as cm:
+                DoubaoCheckin(self._doc()).run()
+            self.assertIn("无可参与的签到活动", str(cm.exception))
+
+    def test_quota_amount_thousands_separator(self):
+        """额度 summary：total_amount 带千分位 → 余额计算正确并拼进文案。"""
+        from unittest.mock import patch
+        from wbspy.benefits import DoubaoCheckin
+        empty = self._resp({"code": 0, "data": {"tasks": []}})
+        claim = self._resp({"code": 0, "data": {"checked_in": True,
+                                                "reward_amount": 200}})
+        quota = self._resp({"code": 0, "data": {"standard": {"window_limits": [
+            {"total_amount": "1,000", "used_amount": "200"}]}}})
+        with patch("wbspy.benefits.requests.post", side_effect=[empty, claim, quota]):
+            out = DoubaoCheckin(self._doc()).run()
+        self.assertIn("余额 800/1000", out["checkin"])
+
+    # -- 扫码登录 ----------------------------------------------------------------
+
+    def test_qr_start_renders_ticket(self):
+        """get_qrcode：data.qrcode(base64 png) → ticket 出码。"""
+        from unittest.mock import patch
+        from wbspy.login_flows import doubao as flow
+        from wbspy.channels import get_channel
+        from wbspy.login_flows.core import Ticket
+        png = "data:image/png;base64,iVBORw0KGgo="
+        r = Mock()
+        r.status_code = 200
+        r.ok = True
+        r.json.return_value = {"message": "ok", "data": {
+            "error_code": 0, "token": "tok123", "qrcode": png}}
+        t = Ticket(id="t", channel_id="doubao", method="qr")
+        with patch.object(flow.requests, "get", return_value=r) as p:
+            flow.start(get_channel("doubao"), t)
+        self.assertEqual(t.kind, "qr")
+        self.assertIn("<img", t.qr_svg)
+        self.assertIn("data:image/png;base64", t.qr_svg)
+        url = p.call_args.args[0]
+        self.assertIn("passport/web/get_qrcode/", url)
+        self.assertIn("aid=582478", url)
+        self.assertNotIn("real_aid", url)        # 带 real_aid 会被判「非法应用」
+
+    def test_qr_poll_confirmed_collects_cookie(self):
+        """check_qrconnect：confirmed → Set-Cookie → Document 入库。"""
+        from unittest.mock import patch
+        from wbspy.login_flows import doubao as flow
+        from wbspy.login_flows.core import Ticket
+        r = Mock()
+        r.status_code = 200
+        r.ok = True
+        r.json.return_value = {"data": {"status": "confirmed",
+                                        "redirect_url": "https://www.doubao.com/"}}
+        c1, c2 = Mock(), Mock()
+        c1.name, c1.value = "sessionid", "s1"   # Mock(name=) 是内部命名，必须显式赋值
+        c2.name, c2.value = "sid_tt", "s2"
+        r.cookies = [c1, c2]
+        t = Ticket(id="t", channel_id="doubao", method="qr", state="tok123")
+        with patch.object(flow.requests, "get", return_value=r) as p:
+            doc = flow.poll(t)
+        self.assertIsNotNone(doc)
+        self.assertIn("sessionid=s1", doc.token)
+        self.assertIn("sid_tt=s2", doc.token)
+        self.assertEqual(doc.channel_id, "doubao")
+        self.assertTrue(doc.uid.startswith("doubao-"))
+        self.assertIn("token=tok123", p.call_args.args[0])
+
+    def test_qr_poll_states(self):
+        """waiting 继续等；expired 报错；确认但无 sessionid 如实报错。"""
+        from unittest.mock import patch
+        from wbspy.login_flows import doubao as flow
+        from wbspy.login_flows.core import Ticket
+
+        def resp(payload, cookies=None):
+            r = Mock()
+            r.status_code = 200
+            r.ok = True
+            r.json.return_value = payload
+            r.cookies = cookies or []
+            return r
+
+        t = Ticket(id="t", channel_id="doubao", method="qr", state="tok")
+        with patch.object(flow.requests, "get",
+                          return_value=resp({"data": {"status": "new"}})):
+            self.assertIsNone(flow.poll(t))
+        with patch.object(flow.requests, "get",
+                          return_value=resp({"data": {"status": "expired"}})):
+            with self.assertRaises(RuntimeError):
+                flow.poll(t)
+        with patch.object(flow.requests, "get",
+                          return_value=resp({"data": {"status": "confirmed"}})):
+            with self.assertRaises(RuntimeError) as cm:
+                flow.poll(t)
+            self.assertIn("会话 Cookie", str(cm.exception))

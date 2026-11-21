@@ -2,6 +2,16 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.42] — 2026-11-21
+
+### 新增
+- **豆包工作（豆包电脑版）渠道接入：扫码登录 + 每日签到托管**。渠道墙新增「豆包工作」（字节跳动，welfare=daily）：每日签到领 200 额度、周一翻倍、30 天累计 8800（≈一个月标准会员），新用户另享 30 天体验套餐（生视频/Pro 模型除外）。三条线一次打通：
+  - **扫码登录（login_flows/doubao.py）**：passport 协议级出码——`GET accounts.doubao.com/passport/web/get_qrcode/`（aid=582478 豆包工作 PC 客户端 aid，**绝不能带 real_aid**，会判「非法应用」；jssdk 参数照官方客户端），data.qrcode 即 base64 PNG 直出；轮询 `check_qrconnect`，状态机 new/scanning/confirmed/expired，confirmed 从 Set-Cookie 收完整会话（sessionid 校验，偶发确认无会话时如实报错重试）。手机豆包 App 扫一扫即可。
+  - **每日签到（benefits.DoubaoCheckin）**：`POST /alice/ug/campaign/v3/detail/`（尾斜杠必带）查 daily_signin 任务 → `landing/checkin` 领取（body 只带 scene=pc_incentive_task_mvp_v3）。鉴权纯 doubao.com 会话 Cookie、无 a_bogus/msToken 签名风控；桌面端全套 query（aid=582478/web_platform=desktop/pc_version=2.36.14/version_code=20800…）+ `SamanthaDoubao/` UA（缺了回 code=1 invalid param）。服务端幂等（idempotent=true 归已签）；710012001 会话失效→提示重扫，710010702 无活动→如实透出（飞书企业号不参与）；签到文案顺带拼剩余额度（quota/summary，total_amount 千分位清洗）。
+  - **渠道识别**：document.py 域名表加 doubao.com→doubao；capabilities 声明 checkin。
+  - 协议三源互证：CreditDaddy#32（CDP 抓包实测）+ doubao2api（Go 实现，aid 常量表/UA/参数默认值）+ 官方客户端 2.36.14 安装包解包（aid 分段逻辑 `isInSamanthaDoubaoWorkClientPhysically() ? 582478 : 482431`、i18n 签到文案、UA 正则）。
+  - 测试 269 项全绿（TestDoubaoCheckin 10 项：渠道注册/域名识别/detail 请求形状/已签跳过/幂等命中/错误码映射/千分位额度/出码票据/确认收 Cookie/状态机）；出码接口已真实冒烟通过。
+
 ## [0.2.32] — 2026-11-15
 
 ### 新增

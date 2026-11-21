@@ -462,11 +462,148 @@ class ZCodeCheckin:
         return {"checkin": f"发现活动但领取未完成：{text}"}
 
 
+# -- 豆包（豆包工作 / 豆包电脑版）----------------------------------------------
+
+_DOUBAO_BASE = "https://www.doubao.com"
+_DOUBAO_SCENE = "pc_incentive_task_mvp_v3"     # 客户端「免费用豆包」签到活动组
+_DOUBAO_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 "
+              "SamanthaDoubao/2.36.14")
+# 桌面端公共 query（参照官方客户端 2.36.14 + doubao2api 实测；缺了回 code=1 invalid param）
+_DOUBAO_QUERY = {
+    "aid": "582478", "real_aid": "582478", "channel": "win",
+    "client_platform": "pc_client", "device_platform": "web",
+    "doubao_device_platform": "desktop", "doubao_pc_version": "2.36.14",
+    "pc_version": "2.36.14", "pkg_type": "release_version", "language": "zh",
+    "region": "CN", "sys_region": "CN", "runtime": "web",
+    "runtime_version": "3.37.4", "samantha_web": "1",
+    "use-olympus-account": "1", "version_code": "20800",
+    "web_platform": "desktop", "chromium_version": "147.0.7727.149",
+}
+
+
+class DoubaoCheckin:
+    """豆包每日签到领额度：detail 查状态 → landing/checkin 领取。
+
+    协议参照 CreditDaddy#32 / doubao2api / 快灵实操记录（2026-10~11 实测互证）：
+    - 鉴权纯 doubao.com 会话 Cookie，无 a_bogus / msToken 签名，device_id 空可过；
+    - detail 路径尾斜杠不能丢、必须 POST（GET 或缺斜杠 404）；
+    - 服务端幂等（idempotent:true = 当天已签，奖励不重复发放）；
+    - 710010702 = 账号未命中活动（活动下线/飞书企业号被排除）；
+    - 710012001 = 会话失效，需重新扫码。
+    额度每 200/天、周一翻倍，累计 500/2000/5000 里程碑再加码，30 天共 8800。
+    """
+
+    def __init__(self, doc, log=print):
+        self.doc = doc
+
+    def _url(self, path: str) -> str:
+        query = "&".join(f"{k}={v}" for k, v in _DOUBAO_QUERY.items())
+        return f"{_DOUBAO_BASE}{path}?{query}"
+
+    def _headers(self) -> dict:
+        return {"Accept": "application/json", "Content-Type": "application/json",
+                "Referer": "https://www.doubao.com/",
+                "User-Agent": _DOUBAO_UA, "Cookie": self.doc.token}
+
+    def _post(self, path: str, body: dict) -> dict:
+        resp = requests.post(self._url(path), json=body, headers=self._headers(),
+                             timeout=TIMEOUT)
+        return _json_or(resp)
+
+    @staticmethod
+    def _unwrap(doc: dict) -> dict:
+        """code:0 正常回包；已知业务码转人类可读错误，未知码如实透出。"""
+        code = doc.get("code")
+        if code in (0, "0", None):
+            return doc.get("data") if isinstance(doc.get("data"), dict) else {}
+        msg = str(doc.get("message") or doc.get("msg") or "")[:150]
+        if code in (710012001, "710012001") or "登录" in msg or "会话" in msg:
+            raise UpstreamError(401, "upstream_auth_expired",
+                                f"豆包会话已失效（{code}），请重新扫码登录。")
+        if code in (710010702, "710010702"):
+            raise UpstreamError(502, "no_campaign", "当前无可参与的签到活动（活动可能已下线，或飞书企业号不参与）。")
+        raise UpstreamError(502, "service_rejected",
+                            f"豆包拒绝（code={code}）{msg}".strip())
+
+    def _daily_task(self) -> dict:
+        """detail 任务面板里的 daily_signin 任务结构（无则返回空 dict）。"""
+        data = self._unwrap(self._post("/alice/ug/campaign/v3/detail/",
+                                       {"campaign_group_code": _DOUBAO_SCENE}))
+        tasks = [t for t in (data.get("tasks") or []) if isinstance(t, dict)]
+        return next((t for t in tasks if t.get("task_kind") == "daily_signin"), {})
+
+    @staticmethod
+    def _fmt_amount(value) -> str:
+        """额度字段可能带千分位（"1,000"）——剔除逗号再格式化。"""
+        text = str(value or "").replace(",", "").strip()
+        return text if text.isdigit() else ""
+
+    def _quota_text(self) -> str:
+        """剩余额度一句话（失败不阻塞签到，只静默跳过）。
+
+        响应形状 data.*.window_limits[].{total_amount, used_amount}（多套餐），
+        total_amount 是带千分位的字符串（如 "1,000"）。
+        """
+        try:
+            data = self._unwrap(self._post(
+                "/alice/commerce/sale/subscription/quota/summary/", {}))
+            found: list[dict] = []
+
+            def _walk(node) -> None:
+                if isinstance(node, dict):
+                    if node.get("total_amount") is not None:
+                        found.append(node)
+                    for v in node.values():
+                        _walk(v)
+                elif isinstance(node, list):
+                    for v in node:
+                        _walk(v)
+
+            _walk(data)
+            for w in found:
+                total = self._fmt_amount(w.get("total_amount"))
+                used = self._fmt_amount(w.get("used_amount"))
+                if total.isdigit():
+                    left = max(0, int(total) - int(used or 0))
+                    return f"，余额 {left}/{total}"
+        except Exception:
+            pass
+        return ""
+
+    def run(self) -> dict:
+        task = self._daily_task()
+        check = task.get("daily_checkin") if isinstance(task, dict) else None
+        if task and isinstance(check, dict) and check.get("checked_in_today"):
+            days = check.get("continuous_days")
+            reward = (check.get("reward") or {}).get("reward_amount")
+            return {"checkin": "今日已签"
+                    + (f"（连签 {days} 天）" if days else "")
+                    + self._quota_text()}
+        if task and not check:
+            return {"skip": "活动面板里没有签到任务（可能已下线）"}
+
+        claim = self._unwrap(self._post("/alice/ug/campaign/landing/checkin",
+                                        {"scene": _DOUBAO_SCENE}))
+        reward, days = claim.get("reward_amount"), claim.get("continuous_days")
+        if claim.get("idempotent"):
+            return {"checkin": "今日已签（幂等命中）" + self._quota_text()}
+        if claim.get("checked_in"):
+            text = "签到成功"
+            if reward:
+                text += f" +{self._fmt_amount(reward) or reward} 额度"
+            if days:
+                text += f"（连签 {days} 天）"
+            return {"checkin": text + self._quota_text()}
+        return {"checkin": "领取未确认，下轮复查"}
+
+
 # -- 分派 ----------------------------------------------------------------------
 
 _OTHER = {"trae": TraeCheckin, "qoder": QoderCheckin, "qodercn": QoderCheckin,
           "minimax": MiniMaxCheckin, "lobsterai": LobsterCheckin,
-          "codearts": CodeartsCheckin, "loomy": LoomyCheckin, "zcode": ZCodeCheckin}
+          "codearts": CodeartsCheckin, "loomy": LoomyCheckin, "zcode": ZCodeCheckin,
+          "doubao": DoubaoCheckin}
 
 
 def checkin_other(doc, log=print) -> dict:

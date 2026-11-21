@@ -19,6 +19,7 @@ from ..login import LOGIN_TIMEOUT_SEC, local_login
 from ..store import save_account
 from . import cline, codearts, gemini, loomy, minimax, qoder, raccoon
 from . import trae, workbuddy, lobsterai, zcode
+from . import doubao
 from .core import Ticket, doc_public
 
 # (method, channel.login_kind) → flow 模块
@@ -35,6 +36,7 @@ _FLOWS: dict[tuple[str, str], object] = {
     ("browser", "trae-callback"): trae,
     ("browser", "lobsterai-callback"): lobsterai,
     ("qr", "zcode-oauth"): zcode,
+    ("qr", "doubao-qr"): doubao,
 }
 
 

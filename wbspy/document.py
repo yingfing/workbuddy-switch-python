@@ -47,6 +47,7 @@ _CHANNEL_DOMAIN_NEEDLES: tuple[tuple[str, Any], ...] = (
     ("cline", "cline"),
     ("huaweicloud", "codearts"),
     ("minimax", "minimax"),
+    ("doubao.com", "doubao"),                    # 豆包工作 / 豆包电脑版（签到凭据）
     ("xfinfr", "loomy"),
     ("googleapis", "gemini"),
     ("raccoon", "raccoon"),
