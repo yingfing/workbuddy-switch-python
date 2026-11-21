@@ -145,35 +145,53 @@ class CentrifugeWs:
 
     # -- 帧收发 ---------------------------------------------------------------
 
+    @staticmethod
+    def _parse_lines(text: str) -> list[dict]:
+        """一帧可能含多行 JSON（Centrifuge 以 \n 分隔多消息）→ 逐行解析。"""
+        out = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+        return out
+
     def _request(self, method: str, params: dict | None = None,
                  timeout: float = 10.0) -> dict:
-        """发请求帧 → 等同名响应；途中收到的 push 缓存、服务端 ping 自动回。"""
+        """发请求帧 → 等同名响应；途中收到的 push 缓存、服务端 ping 自动回。
+
+        Centrifuge 客户端命令帧形状：{"id": N, "<method>": <params>}
+        （方法名是键，不是 {"method":..,"params":..}——与服务端回复帧同构，
+        这也是 3501 bad request 的根源）。
+        """
         self._id += 1
         mid = self._id
-        self._ws.send_text(json.dumps({"id": mid, "method": method,
-                                       "params": params or {}}))
+        self._ws.send_text(json.dumps({**({"id": mid}), method: params or {}}))
         deadline = time.time() + timeout
         while True:
-            obj = json.loads(self._ws.recv_message(deadline))
-            if obj.get("id") == mid:
-                err = obj.get("error")
-                if err:
+            for obj in self._parse_lines(self._ws.recv_message(deadline)):
+                if obj.get("id") == mid:
+                    err = obj.get("error")
+                    if err:
+                        raise MobileGatewayError(
+                            f"{method} 被拒绝：code={err.get('code')} {err.get('message', '')[:160]}")
+                    return obj
+                if "disconnect" in obj:
+                    d = obj["disconnect"]
                     raise MobileGatewayError(
-                        f"{method} 被拒绝：code={err.get('code')} {err.get('message', '')[:160]}")
-                return obj
-            if "disconnect" in obj:
-                d = obj["disconnect"]
-                raise MobileGatewayError(
-                    f"服务端断开：code={d.get('code')} reason={d.get('reason')}")
-            if "push" in obj:
-                self._pushes.append(obj["push"])
-            elif "ping" in obj and "id" not in obj:
-                self.ping()
+                        f"服务端断开：code={d.get('code')} reason={d.get('reason')}")
+                if "push" in obj:
+                    self._pushes.append(obj["push"])
+                elif "id" not in obj:
+                    self.pong()                   # 服务端心跳帧（空 {}）→ 回空 pong
 
     def connect(self, token: str, name: str = "js", version: str = "") -> dict:
         """第 3 步 a：连接鉴权。返回服务端 connect 信息（含 ping 间隔）。"""
-        obj = self._request("connect", {"token": token, "name": name,
-                                        "version": version})
+        params = {"token": token}
+        if name:
+            params["name"] = name
+        if version:
+            params["version"] = version
+        obj = self._request("connect", params)
         info = obj.get("connect") or {}
         if info.get("expires") and not info.get("refresh_required"):
             pass                                  # expires 由调用方凭续期兜底
@@ -189,9 +207,12 @@ class CentrifugeWs:
         obj = self._request("publish", {"channel": channel, "data": data})
         return obj.get("publish") or {}
 
-    def ping(self) -> None:
-        self._id += 1
-        self._ws.send_text(json.dumps({"id": self._id, "method": "ping"}))
+    def pong(self) -> None:
+        """回应服务端心跳：空命令帧 {}（对齐 js-centrifuge 的 _sendPong）。
+
+        注意不能回 {"id":N,"ping":{}}——服务端会视作非法指令直接断连。
+        """
+        self._ws.send_text("{}")
 
     # -- 消息泵 ---------------------------------------------------------------
 
@@ -204,17 +225,17 @@ class CentrifugeWs:
             return {"push": self._pushes.pop(0)}
         deadline = time.time() + timeout
         while True:
-            obj = json.loads(self._ws.recv_message(deadline))
-            if "push" in obj:
-                return {"push": obj["push"]}
-            if "disconnect" in obj:
-                d = obj["disconnect"]
-                raise MobileGatewayError(
-                    f"服务端断开：code={d.get('code')} reason={d.get('reason')}")
-            if "ping" in obj and "id" not in obj:
-                self.ping()
-                continue
-            # 带 id 但没有 method 对应请求在等（异常时序）→ 忽略，继续读
+            for obj in self._parse_lines(self._ws.recv_message(deadline)):
+                if "push" in obj:
+                    return {"push": obj["push"]}
+                if "disconnect" in obj:
+                    d = obj["disconnect"]
+                    raise MobileGatewayError(
+                        f"服务端断开：code={d.get('code')} reason={d.get('reason')}")
+                if "id" not in obj:
+                    self.pong()                   # 服务端心跳帧（空 {}）→ 回空 pong
+                    continue
+                # 带 id 但没有对应请求在等（异常时序）→ 忽略，继续读
             if time.time() > deadline:
                 return None
 

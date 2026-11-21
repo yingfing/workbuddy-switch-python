@@ -4331,14 +4331,14 @@ class TestEdgeSync(unittest.TestCase):
         ws.subscribe("user:u-123:devices", token="sub-t")
         ws.publish("user:u-123:devices", {"type": "device.online"})
         frames = ws._ws.sent
-        self.assertEqual(frames[0]["method"], "connect")
-        self.assertEqual(frames[0]["params"]["token"], "ct-token")
-        self.assertEqual(frames[0]["params"]["name"], "js")
-        self.assertEqual(frames[1]["method"], "subscribe")
-        self.assertEqual(frames[1]["params"]["channel"], "user:u-123:devices")
-        self.assertEqual(frames[1]["params"]["token"], "sub-t")
-        self.assertEqual(frames[2]["method"], "publish")
-        self.assertEqual(frames[2]["params"]["data"]["type"], "device.online")
+        self.assertEqual(frames[0]["id"], 1)
+        self.assertEqual(frames[0]["connect"],
+                         {"token": "ct-token", "name": "js"})   # 方法名是键，无 method/params
+        self.assertEqual(frames[1]["id"], 2)
+        self.assertEqual(frames[1]["subscribe"]["channel"], "user:u-123:devices")
+        self.assertEqual(frames[1]["subscribe"]["token"], "sub-t")
+        self.assertEqual(frames[2]["id"], 3)
+        self.assertEqual(frames[2]["publish"]["data"]["type"], "device.online")
 
     def test_centrifuge_server_error_surfaces(self):
         """服务端拒帧（error 字段）→ 抛 MobileGatewayError 带码。"""
@@ -4360,7 +4360,7 @@ class TestEdgeSync(unittest.TestCase):
         ws.connect("ct")
         msg = ws.next_message(timeout=0.1)
         self.assertEqual(msg["push"]["pub"]["data"]["type"], "wb:models:list")
-        pings = [f for f in ws._ws.sent if f.get("method") == "ping"]
+        pings = [f for f in ws._ws.sent if f == {}]              # 空 pong 帧 {}
         self.assertTrue(pings, "收到服务端 ping 应回客户端 ping")
 
     def test_centrifuge_disconnect_raises(self):

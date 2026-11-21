@@ -64,7 +64,10 @@ class MiniWs:
 
     def _read(self, n: int) -> bytes:
         while len(self.buf) < n:
-            chunk = self.sock.recv(65536)
+            try:
+                chunk = self.sock.recv(65536)
+            except (socket.timeout, TimeoutError):
+                raise WsTimeout("读超时")          # 半帧保留在 buf，下次续读
             if not chunk:
                 raise WsError("连接中断")
             self.buf += chunk

@@ -36,6 +36,7 @@ def _qoder_id(domain: str) -> str:
 # domain 子串 → 渠道注册表 id（顺序敏感：具体域名先于宽泛子串）
 _CHANNEL_DOMAIN_NEEDLES: tuple[tuple[str, Any], ...] = (
     ("codebuddy.cn", "buddy"),
+    ("workbuddy.cn", "buddy"),                   # 国内版新产品域（5.6+ 客户端）
     ("workbuddy.ai", "workbuddy"),
     ("trae", "trae"),
     ("qoder", _qoder_id),
