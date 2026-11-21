@@ -217,6 +217,30 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
 .toast.bad{border-color:var(--bad)}
 .toast.out{opacity:0;transform:translateY(-8px)}
 @keyframes toastIn{from{opacity:0;transform:translateX(28px)}to{opacity:1;transform:none}}
+
+/* -- 概览仪表盘（1Panel 风格：统计卡行 + 图表行 + 签到状态表）-- */
+.dashCards{display:grid;grid-template-columns:repeat(auto-fit,minmax(176px,1fr));
+  gap:12px;margin-bottom:14px}
+.dashCard{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:14px 16px;transition:.15s;cursor:pointer}
+.dashCard:hover{background:var(--hover)}
+.dashCard .lbl{color:var(--dim);font-size:12px;display:flex;align-items:center;gap:6px}
+.dashCard .num{font-size:26px;font-weight:600;line-height:1.35;margin-top:2px;
+  font-variant-numeric:tabular-nums}
+.dashCard .num .unit{font-size:12px;font-weight:400;color:var(--dim);margin-left:3px}
+.dashCard .sub{color:var(--dim);font-size:11px;margin-top:2px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.dashCharts{display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-bottom:16px;
+  align-items:stretch}
+@media (max-width:880px){.dashCharts{grid-template-columns:1fr}}
+#dashUsageChart svg,#dashDonut svg{display:block;max-width:100%}
+.dashLegend{display:flex;flex-direction:column;gap:6px;margin-top:10px;font-size:12px}
+.dashLegend .li{display:flex;align-items:center;gap:8px;color:var(--dim)}
+.dashLegend .sw{width:10px;height:10px;border-radius:3px;flex:none}
+.dashLegend b{color:var(--text);font-weight:600;margin-left:auto;
+  font-variant-numeric:tabular-nums}
+.donutWrap{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.donutWrap svg{flex:none}
 </style>
 </head>
 <body>
@@ -238,7 +262,8 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
   </div>
 
   <nav id="tabs">
-    <button data-tab="login" class="on">登录</button>
+    <button data-tab="dash" class="on">概览</button>
+    <button data-tab="login">登录</button>
     <button data-tab="accounts">账号池</button>
     <button data-tab="free">我的模型</button>
     <button data-tab="auto">积分自动化</button>
@@ -246,8 +271,30 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
     <button data-tab="gateway">网关</button>
   </nav>
 
+  <!-- 概览（1Panel 风格用量面板） -->
+  <section id="tab-dash">
+    <div class="dashCards" id="dashCards"></div>
+    <div class="dashCharts">
+      <div class="card" style="margin-bottom:0">
+        <h2>7 日用量 <span class="tag">网关 /v1 请求与 token（按天）</span></h2>
+        <div id="dashUsageChart"></div>
+      </div>
+      <div class="card" style="margin-bottom:0">
+        <h2>渠道分布 <span class="tag">账号池构成</span></h2>
+        <div id="dashDonut"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>最近签到 <span class="tag" id="dashCheckinTag"></span></h2>
+      <table id="dashCheckinTable"><thead><tr>
+        <th>账号</th><th>结果</th>
+      </tr></thead><tbody></tbody></table>
+      <div class="empty" id="dashCheckinEmpty" hidden>还没有自动化签到记录 —— 去「积分自动化」页跑一轮</div>
+    </div>
+  </section>
+
   <!-- 登录 -->
-  <section id="tab-login">
+  <section id="tab-login" hidden>
     <div class="card">
       <h2>登录渠道 <span class="tag">扫码 → 网页 → 本机，自动回退</span></h2>
       <div class="grid" id="channels"></div>
@@ -696,14 +743,144 @@ pollMobile();
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#tabs button').forEach(x => x.classList.remove('on'));
   b.classList.add('on');
-  ['login','accounts','free','auto','switch','gateway'].forEach(t =>
+  ['dash','login','accounts','free','auto','switch','gateway'].forEach(t =>
     $('#tab-' + t).hidden = t !== b.dataset.tab);
+  if (b.dataset.tab === 'dash') loadDashboard();
   if (b.dataset.tab === 'accounts') loadAccounts();
   if (b.dataset.tab === 'auto') { pollAuto(); pollMobile(); }
   if (b.dataset.tab === 'switch') loadSnapshots();
   if (b.dataset.tab === 'gateway') { loadGateway(); loadForensics(); }
   if (b.dataset.tab === 'free') loadFree();
 });
+
+// -- 概览仪表盘（1Panel 风格：统计卡 + 7 日用量 + 渠道分布 + 最近签到）--
+const _DASH_COLORS = ['#4cc2ff','#8b7aff','#6ccb5f','#ffd426','#ff99a4','#00d4b8','#ff8f5f','#c7bcff'];
+const _dashFmt = n => (n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e4 ? (n/1e3).toFixed(1)+'k'
+                       : n >= 1000 ? (n/1000).toFixed(1)+'k' : String(n));
+function _last7Days() {
+  const out = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000);
+    out.push(d.toISOString().slice(0, 10));
+  }
+  return out;
+}
+function loadDashboard() {
+  api('/api/dashboard').then(r => {
+    const d = r.data || {};
+    renderDashCards(d);
+    renderDashUsage(d.usage || {});
+    renderDashDonut((d.accounts || {}).by_channel || {});
+    renderDashCheckin(d.checkin || {});
+  }).catch(() => {});
+}
+function renderDashCards(d) {
+  const acc = d.accounts || {}, usage = d.usage || {}, ch = d.checkin || {};
+  const mobile = d.mobile || {};
+  const per = ch.per_account || {};
+  const nAcc = Object.keys(per).length;
+  const okN = Object.values(per).filter(x => {
+    const s = x && x.summary || {}; const txt = JSON.stringify(s);
+    return txt.includes('签到成功') || txt.includes('已签') || txt.includes('今日已领');
+  }).length;
+  const round = ch.at ? new Date(ch.at) : null;
+  const when = round ? `最近 ${String(round.getHours()).padStart(2,'0')}:${String(round.getMinutes()).padStart(2,'0')}` : '还没跑过';
+  const cards = [
+    {lbl:'账号池', num:String(acc.total ?? 0), sub:`${acc.api_ready ?? 0} 个可用 · ${(Object.keys(acc.by_channel||{})).length} 个渠道`, tab:'accounts'},
+    {lbl:'最近签到', num:nAcc ? `${okN}<span class="unit">/${nAcc}</span>` : '—', sub:when + (d.auto_enabled ? ' · 自动化运行中' : ' · 自动化未开启'), tab:'auto'},
+    {lbl:'积分余额', num:acc.credits_sum != null ? _dashFmt(acc.credits_sum) : '—', sub:`${acc.credits_known ?? 0} 个账号有缓存余额`, tab:'accounts'},
+    {lbl:'今日请求', num:_dashFmt(usage.today_requests ?? 0), sub:`7 日 ${_dashFmt(usage.week_requests||0)} 次 · ${usage.week_errors||0} 错误`, tab:'gateway'},
+    {lbl:'手机连接', num:mobile.connected ? '在线' : (mobile.enabled ? '待连' : '关闭'), sub:mobile.enabled ? '手机 App「连接电脑端」可直连' : '设置里开启后手机可连', tab:'login'},
+  ];
+  $('#dashCards').innerHTML = cards.map((c,i) => `
+    <div class="dashCard" onclick="gotoTab('${c.tab}')">
+      <div class="lbl">${c.lbl}</div>
+      <div class="num">${c.num}</div>
+      <div class="sub">${c.sub}</div>
+    </div>`).join('');
+}
+function renderDashUsage(usage) {
+  const box = $('#dashUsageChart');
+  const days = _last7Days();
+  const map = {}; (usage.series || []).forEach(s => map[s.date] = s);
+  const data = days.map(dt => map[dt] || {date: dt, requests: 0, tokens: 0, errors: 0});
+  const W = 480, H = 200, PL = 40, PR = 12, PT = 14, PB = 26;
+  const iw = W - PL - PR, ih = H - PT - PB;
+  const max = Math.max(1, ...data.map(s => s.requests));
+  const x = i => PL + (data.length === 1 ? iw/2 : iw * i / (data.length - 1));
+  const y = v => PT + ih - (ih * v / max);
+  const pts = data.map((s,i) => `${x(i)},${y(s.requests)}`).join(' ');
+  const area = `M${PL},${PT+ih} L${pts.split(' ').join(' L')} L${PL+iw},${PT+ih} Z`;
+  const grid = [0,.5,1].map(f => {
+    const yy = PT + ih * f, v = Math.round(max * (1-f));
+    return `<line x1="${PL}" y1="${yy}" x2="${PL+iw}" y2="${yy}" stroke="var(--line-soft)"/>
+            <text x="${PL-6}" y="${yy+4}" text-anchor="end" font-size="10" fill="var(--dim)">${_dashFmt(v)}</text>`;
+  }).join('');
+  const bars = data.map((s,i) => {
+    const tip = `${s.date.slice(5)} · ${s.requests} 次 / ${_dashFmt(s.tokens)} tok` + (s.errors ? ` / ${s.errors} 错` : '');
+    return `<circle cx="${x(i)}" cy="${y(s.requests)}" r="7" fill="transparent" style="cursor:pointer"><title>${tip}</title></circle>
+            <circle cx="${x(i)}" cy="${y(s.requests)}" r="3" fill="var(--accent)"><title>${tip}</title></circle>`;
+  }).join('');
+  const labels = data.map((s,i) =>
+    `<text x="${x(i)}" y="${H-8}" text-anchor="middle" font-size="10" fill="var(--dim)">${s.date.slice(5)}</text>`).join('');
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">
+    <defs><linearGradient id="dgA" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--accent)" stop-opacity=".28"/>
+      <stop offset="1" stop-color="var(--accent)" stop-opacity=".02"/></linearGradient></defs>
+    ${grid}
+    <path d="${area}" fill="url(#dgA)"/>
+    <polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>
+    ${bars}${labels}
+  </svg>
+  <div class="pill" style="margin-top:6px">7 日合计 ${usage.week_requests||0} 次请求 · ${_dashFmt(usage.week_tokens||0)} tokens · ${usage.week_errors||0} 错误</div>`;
+}
+function renderDashDonut(byChannel) {
+  const box = $('#dashDonut');
+  const entries = Object.entries(byChannel).sort((a,b) => b[1]-a[1]);
+  if (!entries.length) {
+    box.innerHTML = '<div class="empty">账号池为空 —— 去「登录」页添加账号</div>';
+    return;
+  }
+  const total = entries.reduce((s,[,v]) => s+v, 0);
+  const R = 46, C = 2*Math.PI*R;
+  let acc = 0;
+  const segs = entries.map(([name,v],i) => {
+    const frac = v/total, dash = frac*C, off = C*acc; acc += frac;
+    return `<circle r="${R}" cx="70" cy="70" fill="none" stroke="${_DASH_COLORS[i%_DASH_COLORS.length]}"
+      stroke-width="16" stroke-dasharray="${dash} ${C-dash}" stroke-dashoffset="${-off}"
+      transform="rotate(-90 70 70)" style="cursor:pointer"><title>${name}：${v}</title></circle>`;
+  }).join('');
+  const legend = `<div class="dashLegend">` + entries.map(([name,v],i) =>
+    `<div class="li"><span class="sw" style="background:${_DASH_COLORS[i%_DASH_COLORS.length]}"></span>
+     ${name}<b>${v}</b></div>`).join('') + '</div>';
+  box.innerHTML = `<div class="donutWrap">
+    <svg width="140" height="140" viewBox="0 0 140 140">${segs}
+      <text x="70" y="66" text-anchor="middle" font-size="24" font-weight="600" fill="var(--text)">${total}</text>
+      <text x="70" y="86" text-anchor="middle" font-size="10" fill="var(--dim)">账号</text></svg>
+    ${legend}</div>`;
+}
+function renderDashCheckin(ch) {
+  const per = ch.per_account || {};
+  const tb = $('#dashCheckinTable tbody');
+  const rows = Object.entries(per);
+  $('#dashCheckinTag').textContent = ch.at
+    ? `最近一轮 ${new Date(ch.at).toLocaleString('zh-CN',{hour12:false})}` : '';
+  $('#dashCheckinEmpty').hidden = rows.length > 0;
+  tb.innerHTML = rows.map(([uid, x]) => {
+    const s = (x && x.summary) || {};
+    const txt = s.checkin || s.skip || s.credits ||
+                Object.values(s)[0] || '—';
+    const bad = /失败|失效|无可/.test(txt);
+    const skip = /^(渠道|当前无可|今日无可)/.test(s.skip || '');
+    const color = bad ? 'var(--bad-fg)' : skip ? 'var(--dim)' : 'var(--ok-fg)';
+    return `<tr><td>${(x && x.label) || uid}</td>
+      <td style="color:${color}">${txt}</td></tr>`;
+  }).join('');
+}
+setInterval(() => {
+  if (!$('#tab-dash').hidden && !document.hidden) loadDashboard();
+}, 30000);
+loadDashboard();
 
 // -- 渠道列表 --
 async function loadChannels() {

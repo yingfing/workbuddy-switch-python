@@ -39,6 +39,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .automation import run_all, poll_worker
+from ._version import __version__
 from .channels import CHANNELS, WELFARE, get_channel, methods_of, welfare_group
 from .document import parse_auth
 from .edge_sync import MobileGateway
@@ -207,8 +208,8 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
 
     # -- 账号 ---------------------------------------------------------------
 
-    @app.get("/api/accounts")
-    def api_accounts():
+    def _account_rows() -> list[dict]:
+        """账号列表行（api_accounts 与 dashboard 共用）。"""
         rows = []
         credit_cache = pool._credits_cache()
         for d in load_accounts():
@@ -238,7 +239,76 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
                 accs.sort(key=lambda a: lst.index(a["uid"])
                           if a["uid"] in lst else len(lst))
             out.extend(accs)
-        return _ok(out)
+        return out
+
+    def _last_checkin_round() -> dict:
+        """最近一轮自动化签到结果（dashboard 概览用；无历史返回空）。"""
+        from .automation import HISTORY_PATH
+        try:
+            import json as _json
+            if HISTORY_PATH.exists():
+                raw = _json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+                if raw and isinstance(raw, list):
+                    entry = raw[0]
+                    per = {r.get("uid"): {"label": r.get("label"),
+                                          "summary": r.get("summary")}
+                           for r in entry.get("results", []) if isinstance(r, dict)}
+                    return {"at": entry.get("at"), "per_account": per}
+        except Exception:
+            pass
+        return {}
+
+    @app.get("/api/dashboard")
+    def api_dashboard():
+        """概览页聚合端点：一次拉全仪表盘数据（统计卡 + 图表 + 签到状态）。
+
+        全部读缓存/落盘数据，零上游请求——面板首屏不做任何网络等待。
+        """
+        from .usage import LEDGER
+        from .store import load_config
+        rows = _account_rows()
+        by_channel: dict[str, int] = {}
+        credits_sum = 0.0
+        credits_known = 0
+        api_ready = 0
+        for r in rows:
+            by_channel[r["channel"]] = by_channel.get(r["channel"], 0) + 1
+            if r["credits"] is not None:
+                credits_sum += r["credits"]
+                credits_known += 1
+            if r["api_ready"]:
+                api_ready += 1
+        # 7 天用量序列（按天：请求/错误/token）
+        usage = LEDGER.summary(7)
+        series = [{"date": k,
+                   "requests": v.get("requests", 0),
+                   "errors": v.get("errors", 0),
+                   "tokens": v.get("prompt_tokens", 0) + v.get("completion_tokens", 0)}
+                  for k, v in sorted(usage.items())]
+        today = time.strftime("%Y-%m-%d")
+        today_req = next((s["requests"] for s in series if s["date"] == today), 0)
+        gw_state = app.state.mobile_gateway.status()
+        alive = len(pool.healthy("*")) if hasattr(pool, "healthy") else None
+        return _ok({
+            "version": __version__,
+            "accounts": {"total": len(rows), "api_ready": api_ready,
+                         "by_channel": by_channel,
+                         "credits_sum": credits_sum if credits_known else None,
+                         "credits_known": credits_known},
+            "usage": {"series": series, "today_requests": today_req,
+                      "week_requests": sum(s["requests"] for s in series),
+                      "week_tokens": sum(s["tokens"] for s in series),
+                      "week_errors": sum(s["errors"] for s in series)},
+            "checkin": _last_checkin_round(),
+            "pool": {"alive": alive, "total": len(rows)},
+            "mobile": {"enabled": bool((load_config().get("mobile") or {}).get("enabled")),
+                       "connected": bool(gw_state.get("running")) and bool(gw_state.get("connected"))},
+            "auto_enabled": bool((load_config().get("automation") or {}).get("enabled")),
+        })
+
+    @app.get("/api/accounts")
+    def api_accounts():
+        return _ok(_account_rows())
 
     @app.post("/api/accounts/order")
     async def accounts_order(request: Request):
