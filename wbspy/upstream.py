@@ -528,6 +528,35 @@ def classify_business_error(status: int, body: str, retry_header: str = "",
 # ---------------------------------------------------------------------------
 
 
+def _refresh_expiry(inner: dict) -> int | None:
+    """续期响应 → 到期时间毫秒（对齐 _token_expiry 的字段语义）。
+
+    原实现只认驼峰 ``expiresIn``：上游换 snake_case（``expires_in``）或
+    过期字段改名时返回 None → 池 worker 判不出临期 → **每 5 分钟盲目续
+    一次**（打上游 + 日志刷屏）。此处字段链宽容解析；脏值安全返回 None。
+    """
+    for k in ("expiresAt", "expireTime", "accessTokenExpiresAt"):
+        raw = inner.get(k)
+        if raw is None:
+            continue
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if v <= 0:
+            continue
+        return int(v * 1000) if v < 1e11 else int(v)      # 秒则换毫秒
+    raw_in = inner.get("expiresIn") or inner.get("expires_in")
+    if raw_in is not None:
+        try:
+            v = float(re.sub(r"[^0-9.]", "", str(raw_in)))   # "900s" 之类剥后缀
+        except (TypeError, ValueError):
+            return None
+        if v > 0:
+            return int(time.time() * 1000 + v * 1000)        # expiresIn 语义为秒
+    return None
+
+
 class WorkBuddyClient:
     """单个凭据文档对应的上游客户端。"""
 
@@ -747,9 +776,7 @@ class WorkBuddyClient:
             **inner,
             "accessToken": token,
             "refreshToken": inner.get("refreshToken") or inner.get("refresh_token") or refresh,
-            "expiresAt": inner.get("expiresAt") or (
-                int(time.time() * 1000 + float(inner["expiresIn"]) * 1000)
-                if inner.get("expiresIn") else None),
+            "expiresAt": _refresh_expiry(inner),
         }
 
     # -- 签到 -----------------------------------------------------------------

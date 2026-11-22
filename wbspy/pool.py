@@ -106,6 +106,7 @@ class AccountPool:
         self._cursor = 0
         self._lock = threading.Lock()
         self._revive_at: dict[tuple[str, str], float] = {}   # 救命续期节流（60s/账号）
+        self._last_refresh: dict[tuple[str, str], float] = {}  # 最近一次续期成功时刻
 
     def _do_refresh(self, doc: Document) -> Document:
         """用 refresh_token 换新凭据：请求上游 → 更新文档 → 落盘 → 换入池。
@@ -115,6 +116,7 @@ class AccountPool:
         """
         from .store import save_account
         auth = self.clients[_key(doc)].refresh()
+        self._last_refresh[_key(doc)] = time.time()   # 续期节流的记录点
         root = doc.raw
         root["auth"] = {**root.get("auth", {}), **auth}
         fresh = Document(
@@ -636,11 +638,20 @@ class AccountPool:
                     exp = doc.token_expires_at
                     if exp is not None and not isinstance(exp, (int, float)):
                         continue             # 脏数据（如上游给了字符串到期时间）不代续期
-                    if exp and exp > (time.time() + 600) * 1000:
+                    if exp is None and time.time() - self._last_refresh.get(k, 0) < 900:
+                        continue             # 到期时间未知：15 分钟内刚续过就不重复打上游
+                    # 临期阈值 8 分钟（对齐 15 分钟 TTL 的边界）：上游若发 15 分钟
+                    # 短命 token，600s 阈值会在「5 分钟轮询后恰好剩 10 分钟」时
+                    # 每轮必续；480s 留出余量 → 10 分钟续一次，减半打上游频率
+                    if exp and exp > (time.time() + 480) * 1000:
                         continue                       # 还没临期
                     try:
                         self._do_refresh(doc)          # 共享续期（救命续期同款）
-                        self._emit(f"「{doc.label()}」token 已自动续期")
+                        self._last_refresh[k] = time.time()
+                        left = ""                      # 带上剩余时长：短命 token 一眼可见
+                        if exp:
+                            left = f"（原有效期剩 {max(0, int((exp / 1000 - time.time()) / 60))} 分钟）"
+                        self._emit(f"「{doc.label()}」token 已自动续期{left}")
                     except Exception as exc:
                         self._emit(f"「{doc.label()}」token 自动续期失败：{exc}（下轮重试，多次失败请重新登录）")
                 stop.wait(interval_sec)               # 可中断的 sleep

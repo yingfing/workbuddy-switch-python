@@ -2,6 +2,18 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.61] — 2026-11-22
+
+### 修复
+- **国际版「频繁续期」三连修**（实测：国际版账号 token 续期日志每几分钟刷一条，超乎常理）：
+  1. **TTL 边界效应**：后台续期 worker 临期阈值原为「剩余 <10 分钟」；上游若发 **15 分钟短命 token**（国际版疑似如此），每轮轮询（5 分钟）后恰好剩 10 分钟，`>` 比较不成立 → **每 5 分钟必续一次**。阈值放宽到 8 分钟留出余量 → 10 分钟续一次，打上游频率减半；国内长 TTL token 行为不变。
+  2. **到期解析宽容化**：续期响应只认驼峰 `expiresIn`，上游换 snake_case（`expires_in`）或过期字段改名时 `expiresAt` 解析成 None → worker 判不出临期，同样每轮盲目续。新增 `_refresh_expiry`：`expiresAt` / `expireTime` / `accessTokenExpiresAt`（秒毫秒双单位）→ `expiresIn` / `expires_in`（含 `"900s"` 字符串剥后缀）逐级兜底，脏值安全返回 None；到期时间未知时同一账号 15 分钟内不重复续期。
+  3. **续期日志带剩余时长**：`「xx」token 已自动续期（原有效期剩 N 分钟）`——短命 token 一眼可见，下次再排查不用猜。
+
+### 增强
+- **`wbspy update --apply` 一条命令把更新做完**：检查到新版（或 main 有未发版提交）后询问确认 → **git pull 优先**（60s 超时即弃）→ **git 不通自动改走优选 IP 下载源码包替换**（`.git` 保留；下载前校验包内版本与发布版本一致，不一致拒绝落盘）→ 更新完自动尝试 `sudo systemctl restart wbspy-web`（需密码时提示手动命令）。`--yes` 跳过确认。
+- **优选 IP 记录复用**：探测成功的 GitHub 通道记入 `~/.wbspy/github_best.json`，下次检查与下载优先复用。只供工具自用，不写系统 hosts、不需要管理员权限。
+
 ## [0.2.60] — 2026-11-22
 
 ### 增强

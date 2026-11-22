@@ -5791,3 +5791,79 @@ class TestUpdateApply(unittest.TestCase):
         os.chdir(repo)
         self.addCleanup(os.chdir, old)
         self.assertEqual(U._detect_repo(), repo)
+
+
+class TestRefreshThrottle(unittest.TestCase):
+    """续期节流与可观测性（国际版「频繁续期」排查，v0.2.61）。
+
+    15 分钟短命 token 在旧 600s 阈值下每轮轮询必续（边界效应）；上游
+    换 snake_case 字段时到期解析成 None 同样每轮必续。修法：阈值 480s
+    留边界余量、None 到期时间 15 分钟节流、续期日志带剩余时长。"""
+
+    def _doc(self, expires=None):
+        from wbspy.document import parse_auth
+        doc = parse_auth({"account": {"uid": "th1", "nickname": "国际号"},
+                          "auth": {"accessToken": "t", "refreshToken": "r",
+                                   "domain": "www.codebuddy.cn"}})
+        doc.token_expires_at = expires
+        return doc
+
+    def test_worker_skips_recent_refresh_when_expiry_unknown(self):
+        """到期时间解析成 None：15 分钟内刚续过 → 本轮跳过不打上游。"""
+        import time as _time
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool
+        doc = self._doc(expires=None)
+        pool = AccountPool([doc])
+        events: list[str] = []
+        pool.event_log = events.append
+        client = MagicMock()
+        client.refresh.return_value = {"accessToken": "nt", "expiresIn": 900}
+        k = next(iter(pool.documents))
+        with patch.object(pool, "clients", {k: client}):
+            pool._last_refresh[k] = _time.time()      # 刚续过（节流窗口内）
+            pool.start_auto_refresh(interval_sec=3600)
+            try:
+                _time.sleep(0.1)                      # worker 首轮立即跑
+            finally:
+                pool.stop_auto_refresh()
+        client.refresh.assert_not_called()
+        self.assertFalse(any("已自动续期" in e for e in events))
+
+    def test_worker_refresh_logs_remaining(self):
+        """续期日志带剩余时长：短命 token 一眼可见。"""
+        import time as _time
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool
+        doc = self._doc(expires=(_time.time() + 300) * 1000)   # 剩 5 分钟 < 8 分钟阈值
+        pool = AccountPool([doc])
+        events: list[str] = []
+        pool.event_log = events.append
+        client = MagicMock()
+        client.refresh.return_value = {"accessToken": "nt", "expiresIn": 900}
+        with patch.object(pool, "clients", {next(iter(pool.documents)): client}):
+            pool.start_auto_refresh(interval_sec=3600)
+            try:
+                for _ in range(50):
+                    if any("已自动续期" in e for e in events):
+                        break
+                    _time.sleep(0.02)
+            finally:
+                pool.stop_auto_refresh()
+        self.assertTrue(any("已自动续期" in e and "剩" in e for e in events), events)
+
+    def test_refresh_expiry_parses_snake_case_and_suffix(self):
+        """到期解析宽容化：snake_case / 字符串后缀 / 秒毫秒双单位。"""
+        import time as _time
+        from wbspy.upstream import _refresh_expiry
+        now_ms = _time.time() * 1000
+        self.assertEqual(_refresh_expiry({"expiresAt": 1.7e9}), int(1.7e9 * 1000))
+        self.assertEqual(_refresh_expiry({"expireTime": int(2e11)}), int(2e11))
+        v = _refresh_expiry({"expires_in": 900})              # snake_case 兜底
+        self.assertGreaterEqual(v, now_ms + 800 * 1000)
+        self.assertLess(v, now_ms + 1000 * 1000)
+        v2 = _refresh_expiry({"expiresIn": "900s"})           # 字符串剥后缀
+        self.assertGreaterEqual(v2, now_ms + 800 * 1000)
+        self.assertIsNone(_refresh_expiry({}))
+        self.assertIsNone(_refresh_expiry({"expiresIn": "abc"}))
+        self.assertIsNone(_refresh_expiry({"expiresIn": 0}))
