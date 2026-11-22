@@ -5128,3 +5128,61 @@ class TestStoreAtomic(unittest.TestCase):
         bad = self.store.ACCOUNTS_DIR / "badfile.json"
         bad.write_text("{\"saved_at\": 1, \"docu", encoding="utf-8")
         self.assertIn(d.uid, [x.uid for x in self.store.load_accounts()])
+
+
+class TestDiagnose(unittest.TestCase):
+    """诊断 tab：/api/diagnose 一键排查报告（脱敏 + 关键章节齐全）。"""
+
+    def _app(self):
+        import tempfile
+        from fastapi.testclient import TestClient
+        from wbspy.webui import create_web_app
+        from wbspy.pool import AccountPool
+        from wbspy.document import Document as _Doc
+        from wbspy import store
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        ctx = (patch.object(store, "CONFIG_PATH", Path(self._tmp.name) / "config.json"),
+               patch("wbspy.webui.load_config", store.load_config),
+               patch("wbspy.webui.save_config", store.save_config),
+               patch("wbspy.webui.load_accounts", return_value=[]))
+        for p in ctx:
+            p.start()
+            self.addCleanup(p.stop)
+        doc = _Doc(raw={"account": {"uid": "u-diag-1234567890abcd"},
+                            "auth": {"accessToken": "SUPER-SECRET-TOKEN",
+                                     "domain": "workbuddy.cn"}},
+                       uid="u-diag-1234567890abcd", token="SUPER-SECRET-TOKEN",
+                       domain="workbuddy.cn")
+        pool = AccountPool([doc])
+        app = create_web_app(pool, api_key="")
+        return TestClient(app), pool, app
+
+    def test_diagnose_report_sections(self):
+        """报告含健康/账号池/用量/配置/日志章节与脱敏凭据。"""
+        c, pool, app = self._app()
+        app.state.gw_log("13:28:52  对话：deepseek-v4.1-flash 触发限流")
+        r = c.get("/api/diagnose")
+        self.assertEqual(r.status_code, 200)
+        d = r.json()["data"]
+        rep = d["report"]
+        for seg in ("【wbspy 诊断报告】", "健康判定", "账号池", "近 7 日",
+                    "配置摘要", "最近运行日志", "13:28:52"):
+            self.assertIn(seg, rep)
+        # 脱敏：token 原文绝不出现；label 只露 uid 前 12 位
+        self.assertNotIn("SUPER-SECRET-TOKEN", rep)
+        self.assertIn("u-diag-12345", rep)
+        self.assertIn("health", d)          # 结构化数据也带回
+
+    def test_diagnose_cool_and_dead_lines(self):
+        """死亡标记与模型冷却进报告。"""
+        from wbspy.upstream import UpstreamError
+        from wbspy.pool import _key as _key_of
+        import time as _time
+        c, pool, app = self._app()
+        doc = next(iter(pool.documents.values()))
+        pool.dead_until[_key_of(doc)] = _time.time() + 120
+        pool.cooldowns.set(_key_of(doc), "deepseek-v4.1-flash", 60)
+        rep = c.get("/api/diagnose").json()["data"]["report"]
+        self.assertIn("死亡标记", rep)
+        self.assertIn("冷却: deepseek-v4.1-flash", rep)

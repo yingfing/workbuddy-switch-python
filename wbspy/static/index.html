@@ -297,6 +297,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
     <button data-tab="auto">积分自动化</button>
     <button data-tab="switch">桌面切换</button>
     <button data-tab="gateway">网关</button>
+    <button data-tab="diag">诊断</button>
   </nav>
 
   <!-- 概览（1Panel 风格用量面板） -->
@@ -598,6 +599,20 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       <div class="empty" id="usageEmpty" hidden>暂无用量数据</div>
     </div>
   </section>
+
+  <!-- 诊断（一键排查现场 + 报告复制给 AI） -->
+  <section id="tab-diag" hidden>
+    <div class="card">
+      <h2>一键排查 <span class="qmark" data-tip="聚合健康判定、账号池状态（含冷却）、最近 10 分钟错误分布、近 7 日用量、配置摘要与最近 30 行运行日志，生成一份脱敏纯文本报告——token 与 API Key 不出现原文。复制后直接发给 AI 即可远程排障。" tabindex="0">?</span></h2>
+      <p class="pill" style="margin-bottom:8px">服务不对劲（突然被封控、请求报错、横幅变红）时点这里：自动收集现场 → 生成诊断报告 → 一键复制发给 AI。</p>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn" id="diagBtn" onclick="runDiag()">开始排查</button>
+        <button class="btn ghost" id="diagCopyBtn" onclick="copyDiag()" hidden>一键复制报告</button>
+        <span class="pill" id="diagState"></span>
+      </div>
+      <pre id="diagOut" style="white-space:pre-wrap;font-size:12px;line-height:1.55;background:var(--panel-2);padding:12px;border-radius:8px;max-height:55vh;overflow:auto" hidden></pre>
+    </div>
+  </section>
 </div>
 
 <!-- 登录弹窗 -->
@@ -807,6 +822,43 @@ function gotoTab(t) {
   const btn = document.querySelector(`#tabs button[data-tab="${t}"]`);
   if (btn) btn.click();
 }
+
+// -- 诊断：一键排查现场 + 报告复制（发给 AI 排障）--
+async function runDiag() {
+  const btn = $('#diagBtn'), out = $('#diagOut');
+  btn.disabled = true; btn.textContent = '收集中…';
+  try {
+    const d = await api('/api/diagnose');
+    out.textContent = d.report || '';
+    out.hidden = !d.report;
+    $('#diagCopyBtn').hidden = !d.report;
+    $('#diagState').textContent = d.report ? ('报告已生成 · ' + (d.generated_at || '')) : '';
+  } catch (e) {
+    toast('排查失败：' + (e.message || e), false);
+  }
+  btn.disabled = false; btn.textContent = '重新排查';
+}
+async function copyDiag() {
+  const text = ($('#diagOut').textContent || '').trim();
+  if (!text) { toast('还没有诊断报告', false); return; }
+  let done = false;   // http:// 局域网是非安全上下文，clipboard API 多半不可用 → 降级
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text); done = true;
+    }
+  } catch {}
+  if (!done) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    try { done = document.execCommand('copy'); } catch {}
+    ta.remove();
+  }
+  toast(done ? '诊断报告已复制，直接粘贴发给 AI 即可'
+             : '复制失败，请长按报告手动全选复制', done);
+}
 setInterval(loadHealth, 10000);
 loadHealth();
 setInterval(pollMobile, 10000);              // 手机连接状态轻量刷新
@@ -816,11 +868,12 @@ pollMobile();
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#tabs button').forEach(x => x.classList.remove('on'));
   b.classList.add('on');
-  ['dash','login','accounts','free','auto','switch','gateway'].forEach(t =>
+  ['dash','login','accounts','free','auto','switch','gateway','diag'].forEach(t =>
     $('#tab-' + t).hidden = t !== b.dataset.tab);
   if (b.dataset.tab === 'dash') loadDashboard();
   if (b.dataset.tab === 'accounts') loadAccounts();
   if (b.dataset.tab === 'auto') { pollAuto(); pollMobile(); }
+  if (b.dataset.tab === 'diag') runDiag();     // 进页自动排查（结果缓存不重复打日志）
   if (b.dataset.tab === 'switch') loadSnapshots();
   if (b.dataset.tab === 'gateway') { loadGateway(); loadForensics(); }
   if (b.dataset.tab === 'free') loadFree();

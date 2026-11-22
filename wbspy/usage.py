@@ -83,23 +83,28 @@ class UsageLedger:
                                                      {"requests": 0, "tokens": 0})
                 slot["requests"] += 1
                 slot["tokens"] += prompt_tokens + completion_tokens
-            self._recent.append((time.time(), 1 if error else 0))
+            self._recent.append((time.time(), 1 if error else 0, error or ""))
             self._save()
 
     def recent_stats(self, window_s: int = RECENT_WINDOW_S) -> dict:
         """最近 window_s 秒内的网关请求/错误（内存滑动窗口，重启清零）。
 
         用于概览页「最近几分钟可用率」：瞬时封控（上游 403）、服务中断
-        这类「7 日均值看不见」的硬故障在此现形。打点在 record() 内，
-        网关成功/失败路径都进（失败路径 v0.2.53 起补记）。
+        这类「7 日均值看不见」的硬故障在此现形。errors_by_code 给诊断页
+        错误分布（哪种错误码各几次）。
         """
         with self._lock:
             cutoff = time.time() - window_s
             while self._recent and self._recent[0][0] < cutoff:
                 self._recent.popleft()
+            by_code: dict[str, int] = {}
+            for _, is_err, code in self._recent:
+                if is_err:
+                    by_code[code or "unknown"] = by_code.get(code or "unknown", 0) + 1
             total = len(self._recent)
-            errors = sum(e for _, e in self._recent)
-        return {"requests": total, "errors": errors, "window_s": window_s}
+            errors = sum(e for _, e, _c in self._recent)
+        return {"requests": total, "errors": errors,
+                "errors_by_code": by_code, "window_s": window_s}
 
     # -- 读取 / 导出 ------------------------------------------------------------
 

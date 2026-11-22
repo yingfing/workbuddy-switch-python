@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from pathlib import Path
@@ -609,6 +610,100 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
     def api_logs():
         """全局运行日志（悬浮面板用）：最近日志行 + 累计行数（未读徽标依据）。"""
         return _ok({"log": app.state.auto_log[-200:], "total": app.state.auto_total})
+
+    @app.get("/api/diagnose")
+    def api_diagnose():
+        """一键排查：把账号池/健康判定/错误分布/配置摘要/最近日志聚合成
+        一份脱敏纯文本报告（token/API key 不出现原文，uid 只露前 12 位），
+        诊断页一键复制后可直接发给 AI 排障。"""
+        now = time.time()
+        cfg = load_config()
+        gw_cfg = cfg.get("gateway") or {}
+        st = pool.status()                          # label/region/channel/dead/cooldowns
+        n_ready = sum(1 for s in st if s.get("api_ready"))
+        recent = LEDGER.recent_stats()
+        week = LEDGER.summary(7)
+        week_req = sum(v.get("requests", 0) for v in week.values())
+        week_err = sum(v.get("errors", 0) for v in week.values())
+        today = time.strftime("%Y-%m-%d")
+        today_req = (week.get(today) or {}).get("requests", 0)
+        mobile_st = app.state.mobile_gateway.status()
+        auto_enabled = bool((cfg.get("automation") or {}).get("enabled"))
+        mobile_enabled = bool((cfg.get("mobile") or {}).get("enabled"))
+        checkin = _last_checkin_round()
+        rows = _account_rows()
+        health = health_state(
+            total=len(rows), api_ready=n_ready, checkin=checkin,
+            mobile={"enabled": mobile_enabled,
+                    "last_error": mobile_st.get("last_error") or ""},
+            week_requests=week_req, week_errors=week_err,
+            auto_enabled=auto_enabled,
+            recent_requests=recent["requests"], recent_errors=recent["errors"],
+            recent_window_s=recent["window_s"])
+
+        L: list[str] = []
+        L.append(f"【wbspy 诊断报告】")
+        L.append(f"生成 {time.strftime('%Y-%m-%d %H:%M:%S')} · 版本 {__version__} · "
+                 f"平台 {sys.platform}")
+        L.append("")
+        L.append("── 健康判定 ──")
+        L.append(f"整体: {health['level'].upper()}")
+        for it in health["issues"]:
+            L.append(f"  • {it['text']}")
+        if not health["issues"]:
+            L.append("  • 一切完美，正在正常运行")
+        L.append("")
+        L.append("── 最近 10 分钟请求 ──")
+        if recent["requests"]:
+            rate = recent["errors"] / recent["requests"] * 100
+            L.append(f"共 {recent['requests']} 次 · 错 {recent['errors']} 次"
+                     f"（错误率 {rate:.0f}%）")
+            for code, n in sorted(recent.get("errors_by_code", {}).items(),
+                                  key=lambda kv: -kv[1]):
+                L.append(f"  · {code} ×{n}")
+        else:
+            L.append("窗口内暂无请求")
+        L.append("")
+        L.append(f"── 账号池（{len(st)} 个账号，{n_ready} 个可用）──")
+        for i, s in enumerate(st, 1):
+            exp = s.get("token_expires_at")
+            exp_txt = time.strftime("%m-%d %H:%M", time.localtime(exp / 1000)) \
+                if isinstance(exp, (int, float)) else "未知"
+            flags = []
+            if not s.get("api_ready"):
+                flags.append("token 已失效")
+            if s.get("dead"):
+                flags.append("死亡标记（等待续期复活）")
+            L.append(f"{i}. 「{s.get('label')}」渠道 {s.get('channel')} · "
+                     f"token 至 {exp_txt}"
+                     + ("" if not flags else " · " + " · ".join(flags)))
+            for c in s.get("cooldowns") or []:
+                until = time.strftime("%H:%M:%S", time.localtime(c["cooldown_until"]))
+                wait = max(0, int(c["cooldown_until"] - now))
+                L.append(f"   冷却: {c['model']} → 还有 {wait}s（至 {until}）")
+        L.append("")
+        L.append("── 近 7 日 ──")
+        pct = week_err / week_req * 100 if week_req else 0
+        L.append(f"请求 {week_req} · 错误 {week_err}（{pct:.1f}%）· 今日 {today_req}")
+        L.append("")
+        L.append("── 配置摘要 ──")
+        key_state = "已设置" if (gw_cfg.get("api_key") or
+                                 (cfg.get("security") or {}).get("api_key")) else "默认未设置"
+        L.append(f"取号策略 {gw_cfg.get('distribution') or 'round-robin'} · "
+                 f"记忆注入 {'开' if gw_cfg.get('memory_inject', True) else '关'} · "
+                 f"视觉透传 {'开' if gw_cfg.get('vision', True) else '关'} · "
+                 f"网关 API Key {key_state}")
+        L.append(f"自动化 {'开' if auto_enabled else '关'} · "
+                 f"手机桥接 {'开' if mobile_enabled else '关'}"
+                 + (f"（{'已连接' if mobile_st.get('connected') else '未连接'}）"
+                    if mobile_enabled else "")
+                 + f" · 网关端口 {getattr(app.state, 'web_port', '?')}")
+        L.append("")
+        L.append(f"── 最近运行日志（{min(30, len(app.state.auto_log))} 行）──")
+        L.extend(app.state.auto_log[-30:])
+        report = "\n".join(L)
+        return _ok({"report": report, "health": health, "recent": recent,
+                    "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")})
 
     # -- 11128 抓现行（被拒请求体留存） -----------------------------------------
 
