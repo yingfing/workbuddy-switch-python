@@ -5662,3 +5662,132 @@ class TestCatalogInvalidate(unittest.TestCase):
             c = TestClient(app)
             c.delete("/api/accounts/u-x")
             self.assertEqual(app.state.model_cached_at, 0.0)
+
+
+class TestUpdateApply(unittest.TestCase):
+    """wbspy update --apply：检查 → 询问 → git pull 优先 → 优选 IP 下载兜底。
+
+    此前 update 只提示链接不动手，OneCloud 上每次更新都要手动 git pull
+    还常被网络抖动卡住；--apply 把活干完（IP 缓存只供工具自用，不碰 hosts）。"""
+
+    def _repo(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name)
+        (repo / ".git").mkdir()
+        (repo / "wbspy").mkdir()
+        (repo / "wbspy" / "_version.py").write_text('__version__ = "0.2.59"',
+                                                    encoding="utf-8")
+        return repo
+
+    def _ctx(self, check_result, git_ok=True):
+        from unittest.mock import patch
+        import wbspy.update as U
+        ctx = [
+            patch.object(U, "check_update", return_value=check_result),
+            patch.object(U, "_try_restart", return_value=True),
+            patch.object(U, "_save_best_ip"),
+        ]
+        if git_ok:
+            ctx.append(patch.object(U, "_git_pull", return_value=(True, "a1b2c3d")))
+        for p in ctx:
+            p.start()
+            self.addCleanup(p.stop)
+        return U
+
+    def test_apply_git_pull_success(self):
+        repo = self._repo()
+        U = self._ctx({"ok": True, "current": "0.2.59", "latest": "0.2.60",
+                       "update_available": True, "notes": "修复", "url": "",
+                       "ghost": False, "main_sync": "unknown",
+                       "local_commit": None, "main_commit": None})
+        rc = U.apply_update(assume_yes=True, repo=repo)
+        self.assertEqual(rc, 0)
+
+    def test_apply_decline_touches_nothing(self):
+        from unittest.mock import patch
+        import wbspy.update as U
+        repo = self._repo()
+        self._ctx({"ok": True, "current": "0.2.59", "latest": "0.2.60",
+                   "update_available": True, "notes": "", "url": "",
+                   "ghost": False, "main_sync": "unknown",
+                   "local_commit": None, "main_commit": None})
+        with patch("builtins.input", return_value="n"):
+            rc = U.apply_update(repo=repo)
+        self.assertEqual(rc, 0)
+        self.assertEqual((repo / "wbspy" / "_version.py").read_text(),
+                         '__version__ = "0.2.59"')   # 未被改动
+
+    def test_apply_fallback_download(self):
+        """git pull 失败 → 走下载兜底：源码包解包覆盖（.git 保留）。"""
+        import tarfile as _tf
+        from unittest.mock import patch
+        import wbspy.update as U
+        repo = self._repo()
+        self._ctx({"ok": True, "current": "0.2.59", "latest": "0.2.60",
+                   "update_available": True, "notes": "", "url": "",
+                   "ghost": False, "main_sync": "unknown",
+                   "local_commit": None, "main_commit": None}, git_ok=False)
+        captured = {}
+
+        def fake_download(ref, dest):
+            captured["ref"] = ref
+            top = dest.parent / "src"
+            sub = top / "wbspy-switch-python-0.2.60"
+            (sub / "wbspy").mkdir(parents=True)
+            (sub / "wbspy" / "_version.py").write_text(
+                '__version__ = "0.2.60"', encoding="utf-8")
+            (sub / "README.md").write_text("hi", encoding="utf-8")
+            with _tf.open(dest, "w:gz") as tf:
+                tf.add(top / sub.name, arcname=sub.name)
+            return "DoH 223.5.5.5 1.2.3.4"
+
+        with patch.object(U, "_download_tarball", side_effect=fake_download):
+            rc = U.apply_update(assume_yes=True, repo=repo)
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["ref"], "refs/tags/v0.2.60")
+        self.assertEqual((repo / "wbspy" / "_version.py").read_text(),
+                         '__version__ = "0.2.60"')   # 已替换
+        self.assertTrue((repo / ".git").is_dir())    # .git 保留
+        self.assertTrue((repo / "README.md").is_file())
+
+    def test_apply_tarball_version_mismatch(self):
+        """下载包版本与发布版本不一致 → 拒绝替换（防串包）。"""
+        import tempfile
+        import tarfile as _tf
+        import wbspy.update as U
+        repo = self._repo()
+        with tempfile.TemporaryDirectory() as tmp:
+            top = Path(tmp) / "src"
+            sub = top / "wbspy-switch-python-0.2.60"
+            (sub / "wbspy").mkdir(parents=True)
+            (sub / "wbspy" / "_version.py").write_text(
+                '__version__ = "0.2.99"', encoding="utf-8")
+            tar_path = Path(tmp) / "s.tar.gz"
+            with _tf.open(tar_path, "w:gz") as tf:
+                tf.add(top / sub.name, arcname=sub.name)
+            with self.assertRaises(RuntimeError) as cm:
+                U._apply_tarball(tar_path, "0.2.60", repo)
+            self.assertIn("不一致", str(cm.exception))
+        self.assertEqual((repo / "wbspy" / "_version.py").read_text(),
+                         '__version__ = "0.2.59"')   # 原文件未动
+
+    def test_best_ip_cache_roundtrip_and_priority(self):
+        """优选 IP 缓存读写，且排在候选首位（用户选「只记录供工具自用」）。"""
+        import wbspy.update as U
+        U._save_best_ip("9.9.9.9", U.GITHUB_API_HOST)
+        self.addCleanup(U.BEST_IP_FILE.unlink, missing_ok=True)
+        best = U._load_best_ip()
+        self.assertEqual(best["ip"], "9.9.9.9")
+        cands = U._candidate_ips()                 # DoH 在测试里可能探不到，无妨
+        self.assertEqual(cands[0], ("9.9.9.9", "上次优选"))
+
+    def test_detect_repo_prefers_cwd_project(self):
+        import os
+        import wbspy.update as U
+        repo = self._repo()
+        old = os.getcwd()
+        os.chdir(repo)
+        self.addCleanup(os.chdir, old)
+        self.assertEqual(U._detect_repo(), repo)

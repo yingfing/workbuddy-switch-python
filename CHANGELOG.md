@@ -2,6 +2,15 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.60] — 2026-11-22
+
+### 增强
+- **`wbspy update --apply` 一条命令把更新做完**（此前只提示链接不动手，OneCloud 更新全靠手动 git pull 还常被网络抖动卡住）。检查到新版本（或 main 有未发版提交）后询问确认 → **git pull 优先**（60s 超时即弃，绝不吊死）→ **git 不通自动改走优选 IP 下载源码包替换**（`.git` 保留，git 历史不丢；下载前校验包内版本与发布版本一致，不一致拒绝落盘）→ 更新完自动尝试 `sudo systemctl restart wbspy-web`（需密码时提示手动命令）。`--yes` 跳过确认无人值守。
+- **优选 IP 记录复用**：探测成功的 GitHub 通道（IP + 子域）记入 `~/.wbspy/github_best.json`，下次检查与下载优先复用，省掉直连超时 + DoH 的等待。只供本工具自用，不写系统 hosts、不需要管理员权限。
+
+### 说明
+- 双击场景由现成的跨平台二进制承担（`wbspy.exe` / AppImage 本身即「双击可运行的二进制」，`update --apply` 已内置其中），不再单造 Go 工具——优选 IP、DoH、版本对比逻辑全部复用本文件。
+
 ## [0.2.59] — 2026-11-22
 
 ### 修复

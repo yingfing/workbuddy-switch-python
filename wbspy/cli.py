@@ -321,7 +321,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--region", choices=["cn", "global"], default="cn")
     p.set_defaults(fn=_cmd_switch)
 
-    p = sub.add_parser("update", help="检查新版本（只提示链接，不自动升级）")
+    p = sub.add_parser("update", help="检查新版本（--apply 可执行更新）")
+    p.add_argument("--apply", action="store_true",
+                   help="检查到新版后询问是否更新：git pull 优先，"
+                        "git 不通走优选 IP 下载源码包替换，更新后尝试重启服务")
+    p.add_argument("--yes", action="store_true",
+                   help="配合 --apply：跳过确认直接更新（无人值守）")
     p.set_defaults(fn=_cmd_update)
 
     p = sub.add_parser("config", help="查看/修改配置：list | get/set/unset <点分键> [值]")
@@ -414,7 +419,10 @@ def _cmd_config(args) -> int:
     return 0
 
 
-def _cmd_update(_args) -> int:
+def _cmd_update(args) -> int:
+    if getattr(args, "apply", False):
+        from .update import apply_update
+        return apply_update(assume_yes=bool(getattr(args, "yes", False)))
     from .update import check_update
     print("正在检查新版本……")
     r = check_update()

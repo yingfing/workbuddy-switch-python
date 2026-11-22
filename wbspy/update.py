@@ -30,8 +30,15 @@
 
 from __future__ import annotations
 
+import io
+import json as _json
 import re
+import shutil
+import subprocess
+import sys
+import tarfile
 import time
+import tempfile
 from pathlib import Path
 
 import requests
@@ -53,6 +60,33 @@ DOH_SERVERS = [("223.5.5.5", "dns.alidns.com"), ("8.8.8.8", "dns.google")]
 
 STAGGER_SEC = 1.5          # 每个 IP 之间错开，避免连发
 TIMEOUT = 6.0
+DOWNLOAD_TIMEOUT = 120.0   # 源码包下载（体积大，放宽）
+
+# 上次探测成功的优选 IP 缓存（只供本工具自用，不改系统 hosts）：
+# 下次检查先试它，省掉直连超时 + DoH 的等待。探测到更优通道即更新。
+BEST_IP_FILE = Path.home() / ".wbspy" / "github_best.json"
+
+
+def _load_best_ip() -> dict:
+    """读上次优选记录（ip/host/at）；损坏即视为无缓存。"""
+    try:
+        d = _json.loads(BEST_IP_FILE.read_text(encoding="utf-8"))
+        if isinstance(d.get("ip"), str) and d["ip"]:
+            return d
+    except Exception:                              # noqa: BLE001
+        pass
+    return {}
+
+
+def _save_best_ip(ip: str, host: str) -> None:
+    """记录本次探测成功的通道（写盘失败不影响主流程）。"""
+    try:
+        BEST_IP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        BEST_IP_FILE.write_text(_json.dumps(
+            {"ip": ip, "host": host, "at": time.strftime("%Y-%m-%d %H:%M:%S")}),
+            encoding="utf-8")
+    except Exception:                              # noqa: BLE001
+        pass
 
 
 def _vtuple(version: str) -> tuple[int, ...]:
@@ -101,8 +135,9 @@ def _doh_resolve(server_ip: str, server_host: str, name: str,
         return []
 
 
-def _candidate_ips(path_probe: str = "") -> list[tuple[str, str]]:
-    """按优先级产出 (ip, 说明) 候选，DoH 优先、内置表兜底。"""
+def _candidate_ips(path_probe: str = "", host: str = GITHUB_API_HOST
+                   ) -> list[tuple[str, str]]:
+    """按优先级产出 (ip, 说明) 候选：缓存 IP → DoH → 内置表兜底。"""
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
 
@@ -112,8 +147,11 @@ def _candidate_ips(path_probe: str = "") -> list[tuple[str, str]]:
                 seen.add(ip)
                 out.append((ip, label))
 
+    best = _load_best_ip()
+    if best.get("ip"):
+        add([best["ip"]], "上次优选")
     for server_ip, server_host in DOH_SERVERS:
-        ips = _doh_resolve(server_ip, server_host, GITHUB_API_HOST)
+        ips = _doh_resolve(server_ip, server_host, host)
         if ips:
             add(ips, f"DoH {server_host}")
             break                                      # 一个 DoH 成功即够
@@ -157,6 +195,7 @@ class _Channel:
             try:
                 data = self._via(ip, path, label)
                 self._mode, self._ip = "ip", ip
+                _save_best_ip(ip, GITHUB_API_HOST)   # 记下可用通道，下次免探测
                 return data
             except _HttpFail as exc:
                 self._errs.append(str(exc))
@@ -271,3 +310,161 @@ def check_update(timeout: float = TIMEOUT) -> dict:
     except Exception:                              # noqa: BLE001
         pass
     return out
+
+
+# -- 实际执行更新（--apply）----------------------------------------------------
+# 设计原则：git pull 快速尝试（超时即弃，绝不吊死）；git 不通就复用本文件
+# 的优选 IP 通道直接下载源码包替换——「git 优先，下载兜底」两条腿走路。
+
+GIT_PULL_TIMEOUT = 60.0
+
+
+def _detect_repo() -> Path:
+    """定位项目目录：当前工作目录像 git 安装的项目就用它，否则用包目录。
+
+    「像项目目录」= 有 .git 和 wbspy/_version.py——双击场景防误更新别处。"""
+    cwd = Path.cwd()
+    if (cwd / ".git").exists() and (cwd / "wbspy" / "_version.py").is_file():
+        return cwd
+    return Path(__file__).resolve().parents[1]
+
+
+def _git_pull(repo: Path) -> tuple[bool, str]:
+    """git pull --ff-only，超时即弃。返回（成功, 摘要）。"""
+    try:
+        r = subprocess.run(
+            ["git", "pull", "--ff-only"], cwd=repo, text=True,
+            timeout=GIT_PULL_TIMEOUT, capture_output=True,
+            env={"GIT_TERMINAL_PROMPT": "0", "PATH": "/usr/bin:/bin:/usr/local/bin",
+                 "HOME": str(Path.home())})
+    except FileNotFoundError:
+        return False, "系统没有 git 命令"
+    except subprocess.TimeoutExpired:
+        return False, f"git pull 超过 {GIT_PULL_TIMEOUT:.0f}s（网络抖动），放弃改走下载"
+    if r.returncode == 0:
+        out = (r.stdout or "").strip().splitlines()
+        return True, out[-1] if out else "已更新"
+    err = (r.stderr or r.stdout or "").strip().splitlines()
+    return False, (err[-1] if err else f"git 退出码 {r.returncode}")
+
+
+def _download_tarball(ref: str, dest: Path) -> str:
+    """经优选 IP 下载源码包（codeload.github.com）到 dest。返回通道说明。"""
+    host = "codeload.github.com"
+    path = f"/{REPO}/tar.gz/{ref}"
+    errs: list[str] = []
+    candidates: list[tuple[str, str]] = []
+    best = _load_best_ip()
+    if best.get("ip"):
+        candidates.append((best["ip"], "上次优选"))   # GitHub 各子域通常共享 IP 段
+    candidates += _candidate_ips(host=host)
+    for ip, label in candidates:
+        time.sleep(STAGGER_SEC)
+        try:
+            resp = _pool_request(ip, host, path, DOWNLOAD_TIMEOUT)
+        except Exception as exc:                     # noqa: BLE001
+            errs.append(f"{label}/{ip}({exc.__class__.__name__})")
+            continue
+        if resp.status == 200:
+            dest.write_bytes(resp.data)
+            _save_best_ip(ip, host)
+            return f"{label} {ip}"
+        errs.append(f"{label}/{ip}(HTTP {resp.status})")
+    raise RuntimeError("；".join(errs) or "无可用下载通道")
+
+
+def _apply_tarball(tar_path: Path, tag: str, repo: Path) -> None:
+    """解开源码包并覆盖项目目录（保留 .git；校验版本一致才落盘）。"""
+    expect = str(tag).lstrip("v")
+    with tempfile.TemporaryDirectory() as tmp:
+        with tarfile.open(tar_path, "r:gz") as tf:
+            tf.extractall(tmp)                        # noqa: S202 源为官方 codeload
+        root = next(Path(tmp).iterdir())              # archive 顶层目录 wbspy-main/
+        ver_file = root / "wbspy" / "_version.py"
+        got = ""
+        if ver_file.is_file():
+            m = re.search(r'__version__ *= *"([^"]+)"', ver_file.read_text("utf-8"))
+            got = m.group(1) if m else ""
+        if got != expect:
+            raise RuntimeError(f"下载包版本 {got or '?'} 与发布版本 {expect} 不一致，放弃替换")
+        shutil.copytree(root, repo, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns(".git"))
+
+
+def _try_restart() -> bool:
+    """尝试重启 wbspy-web 服务（仅 Linux 源码部署场景）。"""
+    if sys.platform != "linux":
+        print("  桌面版请手动重启 wbspy 程序生效。")
+        return False
+    print("  正在尝试重启 wbspy-web 服务……")
+    try:
+        r = subprocess.run(["sudo", "-n", "systemctl", "restart", "wbspy-web"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            print("  ✓ 服务已重启，稍后刷新网页即可。")
+            return True
+    except Exception:                              # noqa: BLE001
+        pass
+    print("  ⚠ 自动重启未成功（sudo 需要密码？），请手动执行："
+          "cd /opt/wbspy && sudo systemctl restart wbspy-web")
+    return False
+
+
+def apply_update(assume_yes: bool = False, repo: Path | None = None) -> int:
+    """检查更新 → 询问 → git pull（优先）→ 优选 IP 下载替换（兜底）→ 重启。
+
+    返回退出码：0 已最新/已更新，1 检查失败或用户放弃，2 更新执行失败。"""
+    print("正在检查新版本……")
+    r = check_update()
+    if not r["ok"]:
+        print(f"✗ {r['error']}")
+        return 1
+    need = r["update_available"] or r.get("main_sync") == "ahead"
+    if not need:
+        print(f"✓ 已是最新版本（v{r['current']}）")
+        return 0
+    if r["update_available"]:
+        print(f"有新版本：v{r['current']} → v{r['latest']}")
+        ref = f"refs/tags/v{r['latest']}"
+        target = r["latest"]
+    else:
+        print(f"⇣ main 分支已有未发版提交："
+              f"{r.get('local_commit') or '?'} → {r.get('main_commit') or '?'}")
+        ref = "refs/heads/main"
+        target = r.get("main_commit") or "main"
+    if r.get("notes") and r["update_available"]:
+        print("\n更新说明（节选）：")
+        for line in r["notes"].splitlines()[:6]:
+            print(f"  {line}")
+    if not assume_yes:
+        try:
+            ans = input("现在更新吗？[y/N] ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            print("已放弃。之后可手动更新：git pull（或重跑 wbspy update --apply）")
+            return 0
+    repo = repo or _detect_repo()
+    print(f"项目目录：{repo}")
+    # 第一条腿：git pull
+    ok, msg = _git_pull(repo)
+    if ok:
+        print(f"✓ git pull 完成：{msg}")
+        _try_restart()
+        return 0
+    print(f"⇣ git pull 未成：{msg}")
+    # 第二条腿：优选 IP 下载源码包替换（.git 保留，git 历史不丢）
+    print("改走优选 IP 直接下载源码包……")
+    with tempfile.TemporaryDirectory() as tmp:
+        tar_path = Path(tmp) / "src.tar.gz"
+        try:
+            chan = _download_tarball(ref, tar_path)
+            print(f"  ✓ 下载完成（通道：{chan}）")
+            _apply_tarball(tar_path, target, repo)
+        except RuntimeError as exc:
+            print(f"✗ 下载兜底也失败：{exc}")
+            print(f"  可手动打开发布页：{RELEASE_PAGE}")
+            return 2
+    print(f"✓ 已更新到 {target}（.git 保留，后续仍可用 git pull）")
+    _try_restart()
+    return 0
