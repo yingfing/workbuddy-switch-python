@@ -2,6 +2,12 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.63] — 2026-11-22
+
+### 修复
+- **余额查询按渠道分派客户端**（实测反馈：账号页 ZCode 账号红字「账号服务地区或域名无法识别，已停止发送凭据」）：`/api/credits` 此前硬编码 `WorkBuddyClient`，ZCode 的 `zcode.z.ai` 域名不在 `api_origin` 白名单里被安全兜底拒发凭据——而 ZCode 明明声明了 credits 能力、也明明有自己的余额接口（`billing/balance`）。现在改走 pool 的渠道分派（`pool.client`）：ZCode → `ZCodeClient.credits()`（token 桶形状对齐），WorkBuddy 系行为不变；api_origin 的安全网原样保留（专门加了测试钉死）。
+- **「未声明余额查询能力」不再红字报警**：Qoder 等渠道没有余额接口是设计如此（信息），不是故障。后端从 `error` 字段改为 `notice`，前端渲染灰色中性提示，红色只留给真正的失败。
+
 ## [0.2.62] — 2026-11-22
 
 ### 修复

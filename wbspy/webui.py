@@ -958,20 +958,27 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
 
     @app.get("/api/credits")
     def api_credits():
-        """逐账号查询 WorkBuddy 余额（只读，不消耗积分；单账号失败不拦整体）。"""
+        """逐账号查询 WorkBuddy 余额（只读，不消耗积分；单账号失败不拦整体）。
+
+        客户端按渠道分派（pool.client）：ZCode 的余额走 ZCodeClient 专用
+        接口（billing/balance），此前硬编码 WorkBuddyClient 导致 ZCode 的
+        chatglm.cn 域名不在 api_origin 白名单里，被安全兜底拒发凭据——
+        界面红字「服务地区或域名无法识别」。未声明 credits 能力的渠道
+        返回 notice（中性提示）而非 error（红字），不是故障不该报警。"""
         from .store import load_accounts
-        from .upstream import WorkBuddyClient
+        from .pool import _client_for, _key
         out = []
         for d in load_accounts():
             row = {"uid": d.uid, "label": d.label(), "channel": d.channel_name,
                    "region": d.region, "api_ready": d.api_ready}
             if "credits" not in d.capabilities:
-                row.update(error="该渠道未声明余额查询能力")
+                row.update(notice="该渠道未声明余额查询能力")
             elif not d.token:
                 row.update(error="加密凭据，请重新网页授权后查询")
             else:
                 try:
-                    credits = WorkBuddyClient(d).credits()
+                    cli = pool.clients.get(_key(d)) or _client_for(d)
+                    credits = cli.credits()
                     row.update(credits=credits)
                     # 落盘缓存 → priority 策略的积分降级、账号列表阈值标红都用它
                     pool.remember_credits(d.uid, credits.get("total"))

@@ -5890,3 +5890,66 @@ class TestRefreshThrottle(unittest.TestCase):
         self.assertIsNone(_refresh_expiry({}))
         self.assertIsNone(_refresh_expiry({"expiresIn": "abc"}))
         self.assertIsNone(_refresh_expiry({"expiresIn": 0}))
+
+
+class TestCreditsDispatch(unittest.TestCase):
+    """余额查询按渠道分派客户端（v0.2.63）。
+
+    此前 /api/credits 硬编码 WorkBuddyClient：ZCode 的 zcode.z.ai 域名不在
+    api_origin 白名单 → 安全兜底拒发凭据，界面红字「服务地区或域名无法识别，
+    已停止发送凭据」；Qoder 等未声明 credits 能力的渠道红字「未声明余额查询
+    能力」——那是信息不是故障。修复：走 pool 的渠道分派（ZCode → ZCodeClient
+    专用余额接口 billing/balance），未声明能力改为中性 notice（前端灰字）。"""
+
+    def _docs(self):
+        from wbspy.document import parse_auth
+        return [
+            parse_auth({"account": {"uid": "b1", "nickname": "B"},
+                        "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}}),
+            parse_auth({"account": {"uid": "zc1", "nickname": "Z"},
+                        "auth": {"accessToken": "jwt", "domain": "zcode.z.ai"}}),
+            parse_auth({"account": {"uid": "qd1", "nickname": "Q"},
+                        "auth": {"accessToken": "t", "domain": "qoder.com"}}),
+        ]
+
+    def test_dispatch_notice_and_error_shapes(self):
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        from fastapi.testclient import TestClient
+        docs = self._docs()
+        pool = AccountPool(docs)
+        for k, d in pool.documents.items():
+            if d.uid == "b1":
+                b = MagicMock()
+                b.credits.return_value = {"total": 55, "packages": []}
+                pool.clients[k] = b
+            elif d.uid == "zc1":
+                z = MagicMock()
+                z.credits.return_value = {"total": 1234, "unit": "tokens"}
+                pool.clients[k] = z
+        c = TestClient(create_web_app(pool, api_key=""))
+        with patch("wbspy.store.load_accounts", return_value=docs), \
+             patch("wbspy.store.load_config", return_value={"gateway": {}}), \
+             patch("wbspy.store.save_config"):
+            r = c.get("/api/credits")
+        self.assertEqual(r.status_code, 200)
+        rows = {x["uid"]: x for x in r.json()["data"]}
+        self.assertEqual(rows["b1"]["credits"]["total"], 55)      # buddy → WorkBuddy 桩
+        self.assertEqual(rows["zc1"]["credits"]["total"], 1234)   # zcode → 渠道分派桩
+        self.assertIn("notice", rows["qd1"])                      # qoder → 中性提示
+        self.assertNotIn("error", rows["qd1"])
+        self.assertEqual(rows["qd1"]["notice"], "该渠道未声明余额查询能力")
+
+    def test_zcode_doc_never_hits_workbuddy_client(self):
+        """渠道未分派时的旧路径会怎样：WorkBuddyClient 对 zcode 域名必抛
+        域名识别错误——本测试钉死 api_origin 的安全兜底仍然生效（改分派
+        不能顺手拆掉安全网）。"""
+        from wbspy.document import parse_auth
+        doc = parse_auth({"account": {"uid": "zc2", "nickname": "Z2"},
+                          "auth": {"accessToken": "jwt", "domain": "zcode.z.ai"}})
+        self.assertEqual(doc.channel_id, "zcode")
+        self.assertIn("credits", doc.capabilities)
+        from wbspy.upstream import WorkBuddyClient
+        with self.assertRaises(ValueError):
+            WorkBuddyClient(doc).credits()

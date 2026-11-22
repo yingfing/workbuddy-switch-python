@@ -1292,6 +1292,7 @@ async function loadCredits(btn) {
     for (const row of (r.data || [])) {
       const cell = document.getElementById('quota-' + row.uid.replace(/[^a-zA-Z0-9-]/g, ''));
       if (!cell) continue;
+      if (row.notice) { cell.innerHTML = `<span style="color:var(--dim)">${row.notice}</span>`; continue; }
       if (row.error) { cell.innerHTML = `<span style="color:var(--bad)">${row.error}</span>`; continue; }
       const c = row.credits || {};
       const exp = c.nearest_expiry
