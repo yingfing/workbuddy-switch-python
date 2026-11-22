@@ -263,9 +263,11 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
   cursor:help;flex:none;user-select:none;margin-left:4px;transition:.15s;line-height:1;
   vertical-align:middle}
 .qmark:hover,.qmark.on{border-color:var(--accent);color:var(--accent);transform:scale(1.12)}
-#qtip{position:fixed;max-width:360px;background:var(--panel-2);border:1px solid var(--line);
+#qtip{position:fixed;max-width:360px;background:#323232;border:1px solid var(--line);
   border-radius:8px;padding:10px 13px;font-size:12px;line-height:1.65;color:var(--text);
   box-shadow:0 8px 28px rgba(0,0,0,.4);z-index:9999;pointer-events:none}
+:root[data-theme="light"] #qtip{background:#ffffff;border-color:rgba(0,0,0,.14);
+  box-shadow:0 8px 28px rgba(0,0,0,.18)}
 #qtip code{font-size:11px}
 </style>
 </head>
