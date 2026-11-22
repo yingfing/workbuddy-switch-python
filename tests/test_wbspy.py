@@ -6041,3 +6041,60 @@ class TestUpdateMainAhead(unittest.TestCase):
         self.assertIn(["git", "checkout"], cmds)
         self.assertIn(["git", "clean"], cmds)
         self.assertEqual([c[1] for c in calls if c[1] == "pull"].count("pull"), 2)
+
+
+class TestDownloadProbe(unittest.TestCase):
+    """下载兜底「并发测延时 → 按最快排序下载」（v0.2.66，用户实测反馈：
+    优选阶段要能看到「正在获取可用 IP」「正在测试延时」，且不能盲目按
+    固定顺序试——先测延时，快者优先）。"""
+
+    def test_probe_delay_none_on_error(self):
+        from unittest.mock import patch
+        import wbspy.update as U
+        with patch.object(U, "_pool_request", side_effect=OSError("boom")):
+            self.assertIsNone(U._probe_delay("1.2.3.4", "codeload.github.com"))
+
+    def test_download_orders_by_delay(self):
+        """延时低的先下载；低延时 IP 失败自动换下一个；探测不可达的垫底。"""
+        from unittest.mock import MagicMock, patch
+        import wbspy.update as U
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "t.tar.gz"
+            calls = []
+
+            def fake_pool_request(ip, host, path, timeout):
+                calls.append((ip, path))
+                r = MagicMock()
+                if ip == "1.1.1.1":            # 延时最低但下载 500
+                    r.status = 500
+                else:                          # 其余下载 200
+                    r.status = 200
+                    r.data = b"x" * 2048
+                return r
+
+            with patch.object(U, "_candidate_ips", return_value=[
+                    ("1.1.1.1", "快"), ("2.2.2.2", "慢"), ("3.3.3.3", "死")]), \
+                 patch.object(U, "_probe_delay",
+                              side_effect=lambda ip, host:
+                              {"1.1.1.1": 10.0, "2.2.2.2": 50.0,
+                               "3.3.3.3": None}[ip]), \
+                 patch.object(U, "_pool_request", side_effect=fake_pool_request), \
+                 patch.object(U, "_save_best_ip"):
+                chan = U._download_tarball("refs/tags/v0.2.66", dest)
+            self.assertIn("2.2.2.2", chan)                     # 从快的成功
+            self.assertTrue(dest.is_file())
+            downloads = [ip for ip, p in calls if p != "/"]    # 下载请求序列
+            self.assertEqual(downloads, ["1.1.1.1", "2.2.2.2"])  # 低延时先试
+
+    def test_download_all_unreachable_raises(self):
+        """全部探测不可达 → 明确报错而非挂死。"""
+        from unittest.mock import patch
+        import wbspy.update as U
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(U, "_candidate_ips",
+                              return_value=[("9.9.9.9", "死")]), \
+                 patch.object(U, "_probe_delay", return_value=None), \
+                 self.assertRaises(RuntimeError) as cm:
+                U._download_tarball("refs/tags/v0.2.66", Path(tmp) / "t.tar.gz")
+            self.assertIn("不可达", str(cm.exception))

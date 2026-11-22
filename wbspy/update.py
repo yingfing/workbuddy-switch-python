@@ -40,6 +40,7 @@ import sys
 import tarfile
 import time
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -114,6 +115,19 @@ def _pool_request(ip: str, host: str, path: str, timeout: float):
                         preload_content=True)
 
 
+def _probe_delay(ip: str, host: str) -> float | None:
+    """探测候选 IP：发一次轻量 HTTPS 请求测往返延时（毫秒）。
+
+    含 TCP + TLS 握手，与真实下载的建连成本一致；失败（超时/被重置）
+    返回 None——探测失败的基本也下载不了，排到候选队尾垫底。"""
+    t0 = time.monotonic()
+    try:
+        _pool_request(ip, host, "/", 4.0)
+        return (time.monotonic() - t0) * 1000
+    except Exception:                              # noqa: BLE001
+        return None
+
+
 def _ca_certs() -> str:
     try:
         import certifi
@@ -136,9 +150,12 @@ def _doh_resolve(server_ip: str, server_host: str, name: str,
         return []
 
 
-def _candidate_ips(path_probe: str = "", host: str = GITHUB_API_HOST
-                   ) -> list[tuple[str, str]]:
-    """按优先级产出 (ip, 说明) 候选：缓存 IP → DoH → 内置表兜底。"""
+def _candidate_ips(path_probe: str = "", host: str = GITHUB_API_HOST,
+                   verbose: bool = False) -> list[tuple[str, str]]:
+    """按优先级产出 (ip, 说明) 候选：缓存 IP → DoH → 内置表兜底。
+
+    verbose=True 时逐步打印获取过程（下载兜底场景：多等一秒也要让人
+    知道在干嘛）。"""
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
 
@@ -151,12 +168,22 @@ def _candidate_ips(path_probe: str = "", host: str = GITHUB_API_HOST
     best = _load_best_ip()
     if best.get("ip"):
         add([best["ip"]], "上次优选")
+        if verbose:
+            print(f"  · 上次优选缓存：{best['ip']}（优先参测）", flush=True)
     for server_ip, server_host in DOH_SERVERS:
+        if verbose:
+            print(f"  · 正在通过 DoH {server_host}（{server_ip}）解析 {host} ……", flush=True)
         ips = _doh_resolve(server_ip, server_host, host)
         if ips:
             add(ips, f"DoH {server_host}")
+            if verbose:
+                print(f"    ✓ 解析到 {len(ips)} 个 IP：{', '.join(ips[:4])}", flush=True)
             break                                      # 一个 DoH 成功即够
+        if verbose:
+            print("    ✗ 解析失败，换下一个 DoH 服务", flush=True)
     add(list(FALLBACK_IPS), "内置优选")
+    if verbose:
+        print(f"  · 内置优选表补充 {len(FALLBACK_IPS)} 个兜底 IP", flush=True)
     return out
 
 
@@ -377,32 +404,57 @@ def _git_pull(repo: Path, _retried: bool = False) -> tuple[bool, str]:
 def _download_tarball(ref: str, dest: Path) -> str:
     """经优选 IP 下载源码包（codeload.github.com）到 dest。返回通道说明。
 
-    逐通道打印尝试进度——下载兜底往往要试好几个 IP，静默会让用户以为卡死。"""
+    流程全程可见：获取可用 IP（DoH 逐步打印）→ 并发测延时（每个 IP 的
+    毫秒数逐行打印）→ 按延时从低到高依次下载（探测失败的垫底再试）。
+    之前的静默等待让用户以为卡死——每一步都要让人看见。"""
     host = "codeload.github.com"
     path = f"/{REPO}/tar.gz/{ref}"
+    print("  正在获取可用 IP……", flush=True)
+    candidates = _candidate_ips(host=host, verbose=True)
+    if not candidates:
+        raise RuntimeError("DoH 与内置表均未产出候选 IP，无可用下载通道")
+    print(f"  共 {len(candidates)} 个候选，正在并发测试延时……", flush=True)
+    delays: dict[str, float | None] = {}
+    with ThreadPoolExecutor(max_workers=min(6, max(1, len(candidates)))) as ex:
+        futs = {ex.submit(_probe_delay, ip, host): (ip, label)
+                for ip, label in candidates}
+        for fut in as_completed(futs):
+            ip, label = futs[fut]
+            d = fut.result()
+            delays[ip] = d
+            print(f"    · {label} {ip}: "
+                  + ("✗ 不可达" if d is None else f"{d:.0f} ms"), flush=True)
+    alive = sorted((c for c in candidates if delays.get(c[0]) is not None),
+                   key=lambda c: delays[c[0]])
+    dead = [c for c in candidates if delays.get(c[0]) is None]
+    if not alive:
+        raise RuntimeError("；".join(f"{ip} 不可达" for ip, _ in dead)
+                           or "无可用下载通道")
+    print("  按延时排序下载（低的先试）："
+          + " → ".join(ip for ip, _ in alive[:4])
+          + (" …" if len(alive) > 4 else ""), flush=True)
     errs: list[str] = []
-    candidates: list[tuple[str, str]] = []
-    best = _load_best_ip()
-    if best.get("ip"):
-        candidates.append((best["ip"], "上次优选"))   # GitHub 各子域通常共享 IP 段
-    candidates += _candidate_ips(host=host)
-    print(f"  共 {len(candidates)} 条候选通道，逐条尝试：")
-    for i, (ip, label) in enumerate(candidates, 1):
-        time.sleep(STAGGER_SEC)
-        print(f"  · 通道 {i}/{len(candidates)}：{label} {ip} …", flush=True)
+    queue = alive + dead                          # 探测不可达的垫底兜底
+    for i, (ip, label) in enumerate(queue, 1):
+        print(f"  · 下载中（{i}/{len(queue)}）{label} {ip} …", flush=True)
         try:
             resp = _pool_request(ip, host, path, DOWNLOAD_TIMEOUT)
-        except Exception as exc:                     # noqa: BLE001
+        except Exception as exc:                   # noqa: BLE001
             errs.append(f"{label}/{ip}({exc.__class__.__name__})")
-            print(f"    ✗ {exc.__class__.__name__}")
+            print(f"    ✗ {exc.__class__.__name__}", flush=True)
+            time.sleep(STAGGER_SEC)
             continue
         if resp.status == 200:
             dest.write_bytes(resp.data)
             _save_best_ip(ip, host)
-            print(f"    ✓ 下载完成（{len(resp.data) / 1024:.0f} KB）")
+            d = delays.get(ip)
+            print(f"    ✓ 下载完成（{len(resp.data) / 1024:.0f} KB"
+                  + (f"，该 IP 延时 {d:.0f} ms" if d is not None else "") + "）",
+                  flush=True)
             return f"{label} {ip}"
         errs.append(f"{label}/{ip}(HTTP {resp.status})")
-        print(f"    ✗ HTTP {resp.status}")
+        print(f"    ✗ HTTP {resp.status}", flush=True)
+        time.sleep(STAGGER_SEC)
     raise RuntimeError("；".join(errs) or "无可用下载通道")
 
 
@@ -482,7 +534,7 @@ def apply_update(assume_yes: bool = False, repo: Path | None = None) -> int:
     """检查更新 → 询问 → git pull（优先）→ 优选 IP 下载替换（兜底）→ 重启。
 
     返回退出码：0 已最新/已更新，1 检查失败或用户放弃，2 更新执行失败。"""
-    print("正在检查新版本……")
+    print("正在检查新版本（探测 GitHub 可用通道，网络差时最长约半分钟）……", flush=True)
     r = check_update()
     if not r["ok"]:
         print(f"✗ {r['error']}")
