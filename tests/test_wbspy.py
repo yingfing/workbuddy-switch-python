@@ -5953,3 +5953,91 @@ class TestCreditsDispatch(unittest.TestCase):
         from wbspy.upstream import WorkBuddyClient
         with self.assertRaises(ValueError):
             WorkBuddyClient(doc).credits()
+
+
+class TestUpdateMainAhead(unittest.TestCase):
+    """实测 v0.2.63 抓出的三个更新工具 bug（v0.2.65）。
+
+    ① main 未发版场景下载兜底必死：target 是 commit 号，拿它对包内版本号
+       永远不一致 → 宽松校验（合法版本号即可）；② 下载替换绕过 git →
+       工作区变脏，下次 pull 被 Aborting 挡死 → 替换后尽力 fetch+reset
+       对齐、pull 挡路时自动清理重试。"""
+
+    def _tarball(self, version: str):
+        import tarfile
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, tmp, ignore_errors=True)
+        sub = Path(tmp) / "wbspy-switch-python-main"
+        (sub / "wbspy").mkdir(parents=True)
+        (sub / "wbspy" / "_version.py").write_text(
+            f'__version__ = "{version}"', encoding="utf-8")
+        (sub / "README.md").write_text("hi", encoding="utf-8")
+        tar_path = Path(tmp) / "s.tar.gz"
+        with tarfile.open(tar_path, "w:gz") as tf:
+            tf.add(sub, arcname=sub.name)
+        return tar_path
+
+    def _repo(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name)
+        (repo / ".git").mkdir()
+        (repo / "wbspy").mkdir()
+        (repo / "wbspy" / "_version.py").write_text('__version__ = "0.2.63"',
+                                                    encoding="utf-8")
+        return repo
+
+    def test_main_sha_target_replaces_with_valid_version(self):
+        """main 未发版场景（strict=False）：target=commit 号也能正常替换。"""
+        import wbspy.update as U
+        repo = self._repo()
+        U._apply_tarball(self._tarball("0.2.64"), "52f1e5d", repo,
+                         strict=False, ref=None)     # ref=None 跳过 git 对齐
+        self.assertEqual((repo / "wbspy" / "_version.py").read_text(),
+                         '__version__ = "0.2.64"')
+        self.assertTrue((repo / "README.md").is_file())
+
+    def test_main_sha_target_still_rejects_garbage_version(self):
+        """宽松校验不等于不校验：包内版本无法识别仍拒绝。"""
+        import wbspy.update as U
+        with self.assertRaises(RuntimeError) as cm:
+            U._apply_tarball(self._tarball("not-a-version"), "52f1e5d",
+                             self._repo(), strict=False, ref=None)
+        self.assertIn("无法识别", str(cm.exception))
+
+    def test_tag_strict_still_enforced(self):
+        """发版 tag 场景版本不一致仍拒绝（防串包不放松）。"""
+        import wbspy.update as U
+        with self.assertRaises(RuntimeError) as cm:
+            U._apply_tarball(self._tarball("0.2.63"), "v0.2.64",
+                             self._repo(), strict=True, ref=None)
+        self.assertIn("不一致", str(cm.exception))
+
+    def test_git_pull_dirty_tree_auto_cleanup_retry(self):
+        """pull 被「overwritten/Aborting」挡住 → 自动 checkout+clean 后重试一次。"""
+        from unittest.mock import patch
+        from subprocess import CompletedProcess
+        import wbspy.update as U
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            if cmd[0] == "git" and cmd[1] == "pull":
+                if len([c for c in calls if c[1] == "pull"]) == 1:
+                    return CompletedProcess(cmd, 1,
+                                            stdout="error: Your local changes ...",
+                                            stderr="error: ... would be overwritten "
+                                                   "by merge\nAborting")
+                return CompletedProcess(cmd, 0, stdout="Fast-forward\nabc123", stderr="")
+            return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch.object(U.subprocess, "run", side_effect=fake_run):
+            ok, msg = U._git_pull(Path("/tmp/anywhere"))
+        self.assertTrue(ok)
+        self.assertEqual(msg, "abc123")
+        cmds = [c[:2] for c in calls]
+        self.assertIn(["git", "checkout"], cmds)
+        self.assertIn(["git", "clean"], cmds)
+        self.assertEqual([c[1] for c in calls if c[1] == "pull"].count("pull"), 2)

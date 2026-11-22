@@ -344,8 +344,11 @@ def _resolve_repo(explicit: Path | None = None) -> tuple[Path | None, str]:
     return cand, ""
 
 
-def _git_pull(repo: Path) -> tuple[bool, str]:
-    """git pull --ff-only，超时即弃。返回（成功, 摘要）。"""
+def _git_pull(repo: Path, _retried: bool = False) -> tuple[bool, str]:
+    """git pull --ff-only，超时即弃。返回（成功, 摘要）。
+
+    本地工作区改动挡路（多为上次「下载兜底替换」绕过 git 产生的残留）时，
+    自动丢弃工作区改动并重试一次——更新场景这些改动不可能是用户成果。"""
     try:
         r = subprocess.run(
             ["git", "pull", "--ff-only"], cwd=repo, text=True,
@@ -359,8 +362,16 @@ def _git_pull(repo: Path) -> tuple[bool, str]:
     if r.returncode == 0:
         out = (r.stdout or "").strip().splitlines()
         return True, out[-1] if out else "已更新"
-    err = (r.stderr or r.stdout or "").strip().splitlines()
-    return False, (err[-1] if err else f"git 退出码 {r.returncode}")
+    err = (r.stderr or r.stdout or "").strip()
+    if not _retried and ("overwritten" in err or "Aborting" in err):
+        print("  · 本地工作区改动挡路（多为上次下载替换残留）→ 自动丢弃并重试", flush=True)
+        subprocess.run(["git", "checkout", "--", "."], cwd=repo,
+                       capture_output=True, timeout=30)
+        subprocess.run(["git", "clean", "-fdq"], cwd=repo,
+                       capture_output=True, timeout=30)
+        return _git_pull(repo, _retried=True)
+    lines = err.strip().splitlines()
+    return False, (lines[-1] if lines else f"git 退出码 {r.returncode}")
 
 
 def _download_tarball(ref: str, dest: Path) -> str:
@@ -395,8 +406,15 @@ def _download_tarball(ref: str, dest: Path) -> str:
     raise RuntimeError("；".join(errs) or "无可用下载通道")
 
 
-def _apply_tarball(tar_path: Path, tag: str, repo: Path) -> None:
-    """解开源码包并覆盖项目目录（保留 .git；校验版本一致才落盘）。"""
+def _apply_tarball(tar_path: Path, tag: str, repo: Path,
+                   strict: bool = True, ref: str | None = None) -> None:
+    """解开源码包并覆盖项目目录（保留 .git；校验版本一致才落盘）。
+
+    strict=True（发版 tag 场景）：包内版本必须与 tag 一致，防串包；
+    strict=False（main 未发版提交场景）：target 是 commit 号，拿它对
+    版本号必失败——只要求包内版本是可识别的合法版本即可。替换成功后
+    尽力 fetch + reset 对齐 git 历史（替换绕过了 git，不对齐的话下次
+    pull 会被工作区改动 Aborting 挡死——实测踩过的坑）。"""
     expect = str(tag).lstrip("v")
     print(f"  · 解包并校验包内版本（期望 {expect}）……", flush=True)
     with tempfile.TemporaryDirectory() as tmp:
@@ -409,11 +427,36 @@ def _apply_tarball(tar_path: Path, tag: str, repo: Path) -> None:
             m = re.search(r'__version__ *= *"([^"]+)"', ver_file.read_text("utf-8"))
             got = m.group(1) if m else ""
         if got != expect:
-            raise RuntimeError(f"下载包版本 {got or '?'} 与发布版本 {expect} 不一致，放弃替换")
+            if strict:
+                raise RuntimeError(f"下载包版本 {got or '?'} 与发布版本 {expect} 不一致，放弃替换")
+            if not re.fullmatch(r"\d+\.\d+\.\d+(?:[.-][\w.]+)?", got or ""):
+                raise RuntimeError(f"下载包版本 {got or '?'} 无法识别，放弃替换")
         print("  · 校验通过，替换项目文件（保留 .git）……", flush=True)
         shutil.copytree(root, repo, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns(".git"))
         print("  ✓ 文件替换完成")
+    _align_git(repo, ref)
+
+
+def _align_git(repo: Path, ref: str | None) -> None:
+    """下载替换绕过了 git：尽力 fetch + reset 把 HEAD 对齐到刚替换的内容，
+    让 git 状态自洽（失败不影响本次使用，下次 pull 挡路会自动清理重试）。"""
+    if not ref or not (repo / ".git").exists():
+        return
+    print("  · 对齐 git 历史到新版本……", flush=True)
+    try:
+        f = subprocess.run(["git", "fetch", "origin", ref], cwd=repo,
+                           capture_output=True, text=True, timeout=90,
+                           env={"GIT_TERMINAL_PROMPT": "0",
+                                "PATH": "/usr/bin:/bin:/usr/local/bin"})
+        if f.returncode == 0:
+            subprocess.run(["git", "reset", "--hard", "-q", "FETCH_HEAD"],
+                           cwd=repo, capture_output=True, timeout=30)
+            print("    ✓ git HEAD 已对齐，之后 git pull 恢复正常")
+            return
+    except Exception:                              # noqa: BLE001
+        pass
+    print("    ⚠ fetch 未成（不影响本次使用）；下次 git pull 挡路会自动清理重试")
 
 
 def _try_restart() -> bool:
@@ -491,7 +534,9 @@ def apply_update(assume_yes: bool = False, repo: Path | None = None) -> int:
         try:
             chan = _download_tarball(ref, tar_path)
             print(f"  ✓ 下载完成（通道：{chan}）")
-            _apply_tarball(tar_path, target, repo)
+            # 发版 tag 严格校验版本；main 未发版场景 target 是 commit 号，宽松校验
+            _apply_tarball(tar_path, target, repo,
+                           strict=bool(r["update_available"]), ref=ref)
         except RuntimeError as exc:
             print(f"✗ 下载兜底也失败：{exc}")
             print(f"  可手动打开发布页：{RELEASE_PAGE}")
