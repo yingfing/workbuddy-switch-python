@@ -327,6 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "git 不通走优选 IP 下载源码包替换，更新后尝试重启服务")
     p.add_argument("--yes", action="store_true",
                    help="配合 --apply：跳过确认直接更新（无人值守）")
+    p.add_argument("--repo", default=None,
+                   help="项目目录路径（优先于环境变量 WBSPY_HOME）")
     p.set_defaults(fn=_cmd_update)
 
     p = sub.add_parser("config", help="查看/修改配置：list | get/set/unset <点分键> [值]")
@@ -421,8 +423,11 @@ def _cmd_config(args) -> int:
 
 def _cmd_update(args) -> int:
     if getattr(args, "apply", False):
+        from pathlib import Path as _Path
         from .update import apply_update
-        return apply_update(assume_yes=bool(getattr(args, "yes", False)))
+        repo = getattr(args, "repo", None)
+        return apply_update(assume_yes=bool(getattr(args, "yes", False)),
+                            repo=_Path(repo) if repo else None)
     from .update import check_update
     print("正在检查新版本……")
     r = check_update()

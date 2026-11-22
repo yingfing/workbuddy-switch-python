@@ -5783,14 +5783,37 @@ class TestUpdateApply(unittest.TestCase):
         cands = U._candidate_ips()                 # DoH 在测试里可能探不到，无妨
         self.assertEqual(cands[0], ("9.9.9.9", "上次优选"))
 
-    def test_detect_repo_prefers_cwd_project(self):
-        import os
+    def test_resolve_repo_never_guesses(self):
+        """目录只认显式指定：无 WBSPY_HOME/--repo → 给指引拒绝动手；
+        指向非法目录 → 校验拒绝。绝不自动猜测（防覆盖不相干文件）。"""
+        from unittest.mock import patch as _patch
         import wbspy.update as U
         repo = self._repo()
-        old = os.getcwd()
-        os.chdir(repo)
-        self.addCleanup(os.chdir, old)
-        self.assertEqual(U._detect_repo(), repo)
+        # ① 什么都没给：拒绝并指引设置环境变量
+        with _patch.dict("os.environ", {}, clear=False):
+            import os as _os
+            _os.environ.pop(U.ENV_REPO, None)
+            got, msg = U._resolve_repo()
+            self.assertIsNone(got)
+            self.assertIn(U.ENV_REPO, msg)
+            self.assertIn("export", msg)
+        # ② 环境变量指向非法目录：项目特征校验拒绝
+        import tempfile as _tfd
+        with _tfd.TemporaryDirectory() as empty:
+            with _patch.dict("os.environ", {U.ENV_REPO: empty}):
+                got, msg = U._resolve_repo()
+                self.assertIsNone(got)
+                self.assertIn("拒绝更新", msg)
+        # ③ 环境变量指向合法项目：通过
+        with _patch.dict("os.environ", {U.ENV_REPO: str(repo)}):
+            got, msg = U._resolve_repo()
+            self.assertEqual(got, repo.resolve())
+            self.assertEqual(msg, "")
+        # ④ 显式参数优先于环境变量
+        bad = repo.parent
+        with _patch.dict("os.environ", {U.ENV_REPO: str(bad)}):
+            got, msg = U._resolve_repo(repo)
+            self.assertEqual(got, repo.resolve())
 
 
 class TestRefreshThrottle(unittest.TestCase):

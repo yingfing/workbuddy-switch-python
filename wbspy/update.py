@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import io
 import json as _json
+import os
 import re
 import shutil
 import subprocess
@@ -318,15 +319,29 @@ def check_update(timeout: float = TIMEOUT) -> dict:
 
 GIT_PULL_TIMEOUT = 60.0
 
+ENV_REPO = "WBSPY_HOME"    # 安装目录环境变量：更新目标只认它（或 --repo），绝不自动猜
 
-def _detect_repo() -> Path:
-    """定位项目目录：当前工作目录像 git 安装的项目就用它，否则用包目录。
 
-    「像项目目录」= 有 .git 和 wbspy/_version.py——双击场景防误更新别处。"""
-    cwd = Path.cwd()
-    if (cwd / ".git").exists() and (cwd / "wbspy" / "_version.py").is_file():
-        return cwd
-    return Path(__file__).resolve().parents[1]
+def _resolve_repo(explicit: Path | None = None) -> tuple[Path | None, str]:
+    """更新目标目录：只信任显式指定（--repo 参数 / WBSPY_HOME 环境变量）。
+
+    绝不自动猜测目录——猜错并覆盖了不相干的文件（甚至系统目录）就是事故。
+    指定了也必须通过项目特征校验（有 .git 且有 wbspy/_version.py）才动手；
+    未指定时返回 None 与一段设置指引。"""
+    env_val = os.environ.get(ENV_REPO) or ""
+    cand = explicit or (Path(env_val) if env_val.strip() else None)
+    if cand is None:        # Path("") == Path(".")，空串必须拦截成「未指定」，
+        return None, (      # 否则会把当前工作目录当候选（隐式猜测，绝不可）
+            f"未指定项目目录：请先设置环境变量 {ENV_REPO} 指向 wbspy 安装目录，例如\n"
+            f"  echo 'export {ENV_REPO}=/opt/wbspy' >> ~/.bashrc && source ~/.bashrc\n"
+            f"（或运行时用 --repo 参数临时指定）。工具绝不自动猜测目录——"
+            f"猜错并覆盖了别的文件就是事故。")
+    cand = cand.expanduser().resolve()
+    if not ((cand / ".git").exists() and (cand / "wbspy" / "_version.py").is_file()):
+        return None, (
+            f"{ENV_REPO}={cand} 不是 wbspy 项目目录（缺少 .git 或 wbspy/_version.py），"
+            f"拒绝更新——请检查路径是否写错。")
+    return cand, ""
 
 
 def _git_pull(repo: Path) -> tuple[bool, str]:
@@ -423,6 +438,11 @@ def apply_update(assume_yes: bool = False, repo: Path | None = None) -> int:
     if not need:
         print(f"✓ 已是最新版本（v{r['current']}）")
         return 0
+    # 目录先于询问解析：没设 WBSPY_HOME 时别问完一句才发现不能动手
+    repo, err = _resolve_repo(repo)
+    if repo is None:
+        print(f"✗ {err}")
+        return 1
     if r["update_available"]:
         print(f"有新版本：v{r['current']} → v{r['latest']}")
         ref = f"refs/tags/v{r['latest']}"
@@ -444,7 +464,6 @@ def apply_update(assume_yes: bool = False, repo: Path | None = None) -> int:
         if ans not in ("y", "yes"):
             print("已放弃。之后可手动更新：git pull（或重跑 wbspy update --apply）")
             return 0
-    repo = repo or _detect_repo()
     print(f"项目目录：{repo}")
     # 第一条腿：git pull
     ok, msg = _git_pull(repo)
