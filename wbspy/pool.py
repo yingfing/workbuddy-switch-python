@@ -466,6 +466,20 @@ class AccountPool:
             return True
         return exc.code == "upstream_transport_error" or exc.upstream_status >= 500
 
+    def _chat_safe(self, doc: Document, body: dict):
+        """client.chat 包装：任何非 UpstreamError 异常都转成 502 上游异常。
+
+        /v1 请求绝不能因未预期异常（JSON 解码、重定向、编码等传输层意外）
+        变成 500 网关内部错误——转成 UpstreamError 后走统一的记账、换号
+        容错与客户端错误结构。"""
+        try:
+            return self.clients[_key(doc)].chat(body)
+        except UpstreamError:
+            raise
+        except Exception as exc:
+            raise UpstreamError(502, "upstream_transport_error",
+                                f"上游调用异常（{type(exc).__name__}: {exc}）") from exc
+
     def chat_failover(self, payload: dict, session: str | None = None,
                       lane: str = "workbuddy",
                       inject: Callable[[Document, dict], dict] | None = None):
@@ -504,7 +518,7 @@ class AccountPool:
                         try:
                             body = inject(alt, orig_payload) if inject is not None \
                                 else orig_payload
-                            return alt, self.clients[_key(alt)].chat({**body, "model": fb})
+                            return alt, self._chat_safe(alt, {**body, "model": fb})
                         except UpstreamError as exc:
                             last_error = exc
                             self.apply_error(alt, exc, fb)
@@ -533,7 +547,7 @@ class AccountPool:
                     body = inject(doc, orig_payload)
                 else:
                     body = orig_payload
-                return doc, self.clients[_key(doc)].chat(body)
+                return doc, self._chat_safe(doc, body)
             except UpstreamError as exc:
                 last_error = exc
                 self.apply_error(doc, exc, model)

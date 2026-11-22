@@ -5271,3 +5271,174 @@ class TestFallbackGroups(unittest.TestCase):
             "model": "workbuddy:deepseek-v4.1-flash", "stream": False,
             "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(r.status_code, 503)
+
+
+class TestSseModelRewrite(unittest.TestCase):
+    """SSE 流块 model 改写：客户端看到的 model 恒等于请求值（防会话中断）。"""
+
+    def test_model_field_rewritten(self):
+        from wbspy import gateway as gw
+        lines = [
+            b'data: {"model":"deepseek-v4.1-flash-latest","choices":'
+            b'[{"delta":{"content":"say \\"model\\":\\"fake\\""}}]}',
+            b'data: {"model":"deepseek-v4.1-flash-latest",'
+            b'"usage":{"total_tokens":3},"choices":[]}',
+            b'data: [DONE]',
+        ]
+        resp = Mock()
+        resp.iter_lines = Mock(return_value=iter(lines))
+        out = list(gw._sse_stream(resp, "workbuddy:deepseek-v4.1-flash"))
+        self.assertEqual(len(out), 3)
+        self.assertIn(b'"model":"workbuddy:deepseek-v4.1-flash"', out[0])
+        self.assertNotIn(b"latest", out[0])
+        # 字符串值内的转义 \"model\":\"fake\" 不被误改
+        self.assertIn(b'\\"model\\":\\"fake\\"', out[0])
+        self.assertIn(b'"model":"workbuddy:deepseek-v4.1-flash"', out[1])
+        self.assertIn(b'"usage":{"total_tokens":3}', out[1])
+        self.assertEqual(out[2], b"data: [DONE]\n\n")
+
+    def test_non_json_and_comment_passthrough(self):
+        from wbspy import gateway as gw
+        resp = Mock()
+        resp.iter_lines = Mock(return_value=iter([b': keepalive', b'data: not-json']))
+        out = list(gw._sse_stream(resp, "m"))
+        self.assertEqual(out[0], b': keepalive\n\n')
+        self.assertEqual(out[1], b'data: not-json\n\n')
+
+
+class TestFallbackHardening(unittest.TestCase):
+    """容灾链路自身异常绝不 500；降级响应的 model 保持客户端请求值。"""
+
+    def _app(self):
+        import tempfile
+        from fastapi.testclient import TestClient
+        from wbspy.webui import create_web_app
+        from wbspy.pool import AccountPool
+        from wbspy import store
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        ctx = (patch.object(store, "CONFIG_PATH", Path(self._tmp.name) / "config.json"),
+               patch("wbspy.webui.load_config", store.load_config),
+               patch("wbspy.webui.save_config", store.save_config),
+               patch("wbspy.webui.load_accounts", return_value=[]))
+        for p in ctx:
+            p.start()
+            self.addCleanup(p.stop)
+        app = create_web_app(AccountPool([]), api_key="")
+        return TestClient(app), app
+
+    def test_fallback_body_model_is_client_view(self):
+        """降级响应 body.model = 客户端请求的模型（不是实际执行的备胎）。"""
+        c, app = self._app()
+        from wbspy.pool import _key as _pool_key
+        from wbspy.document import Document
+        from wbspy.upstream import UpstreamError
+        d1 = Document(raw={"account": {"uid": "u-fb"}}, uid="u-fb", token="t",
+                      domain="workbuddy.cn")
+        pool = app.state.pool
+        pool.documents = {_pool_key(d1): d1}
+        pool.healthy = Mock(return_value=[d1])
+        pool._lane_of = Mock(return_value="workbuddy")
+        app.state.model_cache = [{"id": "workbuddy:deepseek-v4.1-flash"},
+                                 {"id": "workbuddy:deepseek-v4.1-flash-sg"}]
+        calls = []
+
+        def fake_failover(payload, session=None, lane="workbuddy", inject=None):
+            calls.append(payload["model"])
+            if payload["model"] == "deepseek-v4.1-flash":
+                raise UpstreamError(503, "no_available_accounts", "全灭")
+            return d1, Mock()
+
+        pool.chat_failover = Mock(side_effect=fake_failover)
+        with patch("wbspy.gateway._sse_aggregate",
+                   return_value={"model": "deepseek-v4.1-flash-sg",
+                                 "choices": [{"message": {"content": "ok"}}]}):
+            c.post("/api/settings/gateway", json={
+                "fallback_groups": [{"keyword": "deepseek"}]})
+            r = c.post("/v1/chat/completions", json={
+                "model": "workbuddy:deepseek-v4.1-flash", "stream": False,
+                "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json().get("model"), "workbuddy:deepseek-v4.1-flash")
+        self.assertEqual(r.headers.get("X-Wbspy-Fallback"),
+                         "workbuddy:deepseek-v4.1-flash -> workbuddy:deepseek-v4.1-flash-sg")
+
+    def test_fallback_internal_error_returns_original(self):
+        """容灾内部异常 → 按原 UpstreamError 返回，绝不 500。"""
+        c, app = self._app()
+        from wbspy.upstream import UpstreamError
+        pool = app.state.pool
+        pool.chat_failover = Mock(
+            side_effect=UpstreamError(503, "no_available_accounts", "全灭"))
+        c.post("/api/settings/gateway", json={
+            "fallback_groups": [{"keyword": "deepseek"}]})
+        with patch("wbspy.gateway._fb_groups", side_effect=RuntimeError("boom")):
+            r = c.post("/v1/chat/completions", json={
+                "model": "workbuddy:deepseek-v4.1-flash", "stream": False,
+                "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json()["error"]["code"], "no_available_accounts")
+
+    def test_aggregate_catalog_crash_skips_third_layer(self):
+        """聚合目录抛异常 → 第三层跳过，仍按原错误返回。"""
+        c, app = self._app()
+        from wbspy.upstream import UpstreamError
+        pool = app.state.pool
+        pool.chat_failover = Mock(
+            side_effect=UpstreamError(503, "no_available_accounts", "全灭"))
+        c.post("/api/settings/gateway", json={
+            "fallback_groups": [{"keyword": "deepseek"}]})
+        with patch("wbspy.gateway.aggregate.models", side_effect=RuntimeError("boom")):
+            r = c.post("/v1/chat/completions", json={
+                "model": "workbuddy:deepseek-v4.1-flash", "stream": False,
+                "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 503)
+
+
+class TestChatSafeWrap(unittest.TestCase):
+    """client.chat 未预期异常 → UpstreamError(502)，/v1 不再出现裸 500。"""
+
+    def test_unexpected_exception_becomes_upstream_error(self):
+        from wbspy.pool import AccountPool, _key as _pool_key
+        from wbspy.upstream import UpstreamError
+        from wbspy.document import Document
+        pool = AccountPool([])
+        doc = Document(raw={"account": {"uid": "u-safe"}}, uid="u-safe",
+                       token="tok", domain="workbuddy.cn")
+        fake = Mock()
+        fake.chat = Mock(side_effect=RuntimeError("boom"))
+        pool.clients = {_pool_key(doc): fake}
+        with self.assertRaises(UpstreamError) as cm:
+            pool._chat_safe(doc, {"model": "m"})
+        self.assertEqual(cm.exception.status, 502)
+        self.assertEqual(cm.exception.code, "upstream_transport_error")
+        self.assertIn("boom", cm.exception.message)
+
+
+class TestDoubaoQrLogin(unittest.TestCase):
+    """豆包扫码登录：PNG data URI 只进 <img>，绝不进复制码栏。"""
+
+    def test_start_renders_img_without_code(self):
+        from wbspy.login_flows import core as lf_core
+        from wbspy.login_flows import doubao as db
+        ticket = lf_core.Ticket(id="t1", channel_id="doubao", method="qr")
+        resp = Mock(ok=True)
+        resp.json = Mock(return_value={"data": {"token": "tok-1",
+                                                "qrcode": "data:image/png;base64,AAAA"}})
+        with patch("wbspy.login_flows.doubao.requests.get", return_value=resp):
+            db.start(None, ticket)
+        self.assertEqual(ticket.state, "tok-1")
+        self.assertEqual(ticket.code, "")          # 复制码栏必须为空
+        self.assertIn("<img", ticket.qr_svg)
+        self.assertIn("data:image/png;base64,AAAA", ticket.qr_svg)
+        self.assertNotIn("data:image/png;base64,AAAA", ticket.message)
+
+    def test_start_missing_token_raises(self):
+        from wbspy.login_flows import core as lf_core
+        from wbspy.login_flows import doubao as db
+        ticket = lf_core.Ticket(id="t2", channel_id="doubao", method="qr")
+        resp = Mock(ok=True)
+        resp.json = Mock(return_value={"data": {"qrcode": "data:image/png;base64,A"}})
+        with patch("wbspy.login_flows.doubao.requests.get", return_value=resp):
+            with self.assertRaises(RuntimeError):
+                db.start(None, ticket)

@@ -1058,6 +1058,7 @@ async function loadChannels() {
   const wcolor = {daily:'var(--ok-bg);color:var(--ok-fg)', monthly:'#e8f0fe;color:#1a56db',
                   activity:'#e0f2f1;color:#00695c', oneoff:'#f1f3f5;color:#5b6670',
                   gated:'#fff4e5;color:#b26a00'};
+  (r.data || []).forEach(c => { _chanNames[c.id] = c.name; });
   $('#channels').innerHTML = r.data.map(c => {
     const wf = c.welfare || [];
     const seg = g => wf.filter(w => w.group === g).map(w =>
@@ -1093,7 +1094,10 @@ async function startLogin(channel, method) {
   $('#qr').innerHTML = d.qr_svg || '';
   $('#qr').style.display = d.qr_svg ? '' : 'none';   // 没码就别硬渲染
   const codeBox = $('#mCode');
-  if (d.code) { codeBox.textContent = d.code; codeBox.hidden = false; } else codeBox.hidden = true;
+  const codeTxt = String(d.code || '');
+  if (d.code && !codeTxt.startsWith('data:')) {   // data URI 是图片不是复制码，绝不展示
+    codeBox.textContent = codeTxt; codeBox.hidden = false;
+  } else codeBox.hidden = true;
   const link = $('#mLink');
   if (d.auth_url) { link.href = d.auth_url; link.hidden = false; } else link.hidden = true;
   $('#modal').classList.add('on');
@@ -1151,9 +1155,13 @@ async function checkUpdate(btn) {
     btn.textContent = old; btn.disabled = false;
   }
 }
+let _chanNames = {};                    // /api/channels 动态名优先（后端维护）
 function channelName(id) {
-  const el = [...document.querySelectorAll('.chan b')].find(b => true);
-  return ({buddy:'WorkBuddy 国内版', workbuddy:'WorkBuddy 国际版', raccoon:'Raccoon'})[id] || id;
+  return _chanNames[id] || ({buddy:'WorkBuddy 国内版', workbuddy:'WorkBuddy 国际版',
+    raccoon:'Raccoon', doubao:'豆包工作', cline:'Cline', qoder:'Qoder',
+    qodercn:'Qoder 国内版', zcode:'ZCode', trae:'Trae CN', gemini:'Gemini',
+    lobsterai:'LobsterAI', loomy:'Loomy', minimax:'MiniMax',
+    codearts:'CodeArts'})[id] || id;
 }
 
 // -- 账号 --

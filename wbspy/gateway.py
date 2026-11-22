@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Iterator
 
@@ -123,6 +124,31 @@ def strip_images(payload: dict) -> tuple[dict, int]:
                 parts.append(p)
         out.append({**m, "content": parts} if changed else m)
     return ({**payload, "messages": out}, dropped) if dropped else (payload, 0)
+
+
+_MODEL_FIELD_RE = re.compile(rb'"model"\s*:\s*"(?:[^"\\]|\\.)*"')
+
+
+def _sse_stream(resp, show_model: str) -> Iterator[bytes]:
+    """流式透传，但把每个 SSE 块 JSON 的 model 字段改写为客户端请求的模型名。
+
+    上游会对模型做别名/改名（如 deepseek-v4.1-flash → …-latest 后缀），容灾
+    降级也会换模型——客户端一旦看到响应 model 与自己配置的不一致，就会判定
+    「模型已切换」并中断整个会话（Trae 等客户端实测行为）。因此流块里的
+    model 一律改写为客户端视图；实际执行的模型以 X-Wbspy-Fallback /
+    X-Wbspy-Account 响应头、网关日志与用量账本为准。
+
+    按行对原始字节做正则改写（不做 json 往返，省 CPU 且不动其余字段）；
+    JSON 字符串值内的引号恒为转义形态，正则只会命中真正的 "model": 键。
+    """
+    want = b'"model":"' + show_model.encode("utf-8") + b'"'
+    for raw in resp.iter_lines():
+        if not raw:
+            continue
+        line = raw if isinstance(raw, bytes) else str(raw).encode("utf-8")
+        if line.startswith(b"data:") and b'"model"' in line:
+            line = _MODEL_FIELD_RE.sub(lambda _: want, line, count=1)
+        yield line + b"\n\n"
 
 
 def _sse_aggregate(resp, route_model: str) -> dict:
@@ -632,10 +658,19 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                             "messages": _memory.inject_messages(msgs, entries)}
 
             def _finish_chat(doc, resp, actual_model: str,
-                             extra_hdr: dict | None = None):
-                """成功响应包装（原路径与容灾降级路径共用）。"""
+                             extra_hdr: dict | None = None,
+                             client_model: str | None = None):
+                """成功响应包装（原路径与容灾降级路径共用）。
+
+                client_model：客户端请求的模型名——流块/响应体的 model 字段一律
+                改写成它（防客户端因 model 变化中断会话，见 _sse_stream）；
+                None 时等于 actual_model。账本与日志仍记 actual_model（真实执行的）。
+                """
+                show_model = client_model or actual_model
                 hdr_note = (f"（记忆 {mem_hdr()} 已注入）" if mem_hit else "")
-                _gw_log(f"对话：{actual_model} ← 「{doc.label()}」{hdr_note}")
+                _gw_log(f"对话：{actual_model}"
+                        + (f"（客户端视图 {show_model}）" if show_model != actual_model else "")
+                        + f" ← 「{doc.label()}」{hdr_note}")
 
                 hdrs = {"X-Wbspy-Account": doc.uid[:12],
                         "X-Wbspy-Memory": mem_hdr()}
@@ -644,9 +679,7 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                 if raw.get("stream"):
                     def sse() -> Iterator[bytes]:
                         try:
-                            for chunk in resp.iter_content(chunk_size=None):
-                                if chunk:
-                                    yield chunk
+                            yield from _sse_stream(resp, show_model)
                         finally:
                             resp.close()
                             LEDGER.record(model=actual_model, provider=lane,
@@ -655,6 +688,7 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                     return StreamingResponse(sse(), media_type="text/event-stream",
                                              headers=hdrs)
                 body = _sse_aggregate(resp, actual_model)
+                body["model"] = show_model
                 resp.close()
                 LEDGER.record(model=actual_model, provider=lane, account=doc.uid[:12],
                               prompt_tokens=estimate_tokens(raw.get("messages", [])),
@@ -714,9 +748,16 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                     _gw_log(f"容灾降级：{model} 不可用 → 自动改用 {rid}"
                             f"（容灾组「{grp.get('name') or kw}」）")
                     return _finish_chat(fdoc, fresp, mname,
-                                        {"X-Wbspy-Fallback": f"{model} -> {rid}"})
+                                        {"X-Wbspy-Fallback": f"{model} -> {rid}"},
+                                        client_model=model)
                 # 第三层：聚合渠道兜底（仅已配置 API Key 的厂商）
-                for mrow in aggregate.models():
+                try:
+                    agg_rows = aggregate.models()
+                except Exception as exc:
+                    _gw_log(f"容灾第三层聚合目录读取失败（跳过）："
+                            f"{type(exc).__name__}: {exc}")
+                    agg_rows = []
+                for mrow in agg_rows:
                     rid_a = str(mrow.get("id") or "")
                     if kw not in rid_a.casefold():
                         continue
@@ -739,7 +780,13 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             # 失败请求也要入账：封控/限流/失效不进统计的话，健康横幅
             # 就看不见「最近正在报错」，7 日错误率与实时可用率全失真
             LEDGER.record(model=model, provider=lane, error=exc.code)
-            fb = _try_fallback()
+            try:
+                fb = _try_fallback()
+            except Exception as fb_exc:
+                # 容灾本身绝不能把请求变成 500：任何内部异常都按原错误返回
+                _gw_log(f"容灾降级内部异常（按原错误返回）："
+                        f"{type(fb_exc).__name__}: {fb_exc}")
+                fb = None
             if fb is not None:
                 return fb
             return _error(exc)

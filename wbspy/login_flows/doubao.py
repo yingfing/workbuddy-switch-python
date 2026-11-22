@@ -75,7 +75,7 @@ def start(channel, ticket: Ticket) -> None:
     resp = requests.get(f"{_GET_QRCODE}?{params}", headers=_headers(), timeout=20)
     doc = resp.json() if resp.ok else {}
     data = doc.get("data") or {}
-    token = str(data.get("token") or data.get("qrcode") or "")
+    token = str(data.get("token") or "")
     image = str(data.get("base64_image") or data.get("qrcode") or "")
     if data.get("error_code") not in (0, "0", None) or not token:
         detail = str(data.get("description") or doc.get("message")
@@ -85,11 +85,12 @@ def start(channel, ticket: Ticket) -> None:
     ticket.platform = "doubao-qr"
     ticket.origin = "accounts.doubao.com"
     ticket.state = token
-    ticket.code = image if image.startswith("data:image") else ""
-    if ticket.code:
-        ticket.qr_svg = f'<img src="{ticket.code}" alt="豆包扫码" width="220"/>'
+    if image.startswith("data:image"):
+        # 服务端直接给 PNG data URI → 用 <img> 渲染。绝不塞进 ticket.code：
+        # 那是前端「复制码」栏（点击复制），几万字符的 data URI 会原样展示
+        ticket.qr_svg = f'<img src="{image}" alt="豆包扫码" width="220"/>'
     elif image:
-        ticket.qr_content, ticket.qr_svg = image, ""
+        ticket.qr_content = image            # 非 data URI 时交通用二维码渲染器
     ticket.message = "请用手机「豆包」App 扫一扫并确认登录（豆包工作/豆包电脑版）"
 
 
