@@ -25,6 +25,15 @@ BACKUP_PATH = ROOT / "last-switch-backup.json"
 CONFIG_PATH = ROOT / "config.json"
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """原子落盘：先写同目录 .tmp 再 os.replace——任一时刻磁盘上都是
+    完整文件，写一半崩溃/断电不会留下截断的 JSON。"""
+    import os
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def ensure_dirs() -> None:
     for d in (ROOT, ACCOUNTS_DIR, SNAPSHOTS_DIR):
         d.mkdir(parents=True, exist_ok=True)
@@ -82,7 +91,7 @@ def save_account(doc: Document) -> Path:
     ensure_dirs()
     path = ACCOUNTS_DIR / f"{account_key(doc)}.json"
     payload = {"saved_at": int(time.time() * 1000), "document": doc.raw}
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2))
     try:
         import os
         os.chmod(path, 0o600)
@@ -129,7 +138,7 @@ def remove_account(uid: str, domain: str = "") -> bool:
 def save_snapshot(name: str, raw_json: str) -> Path:
     ensure_dirs()
     path = SNAPSHOTS_DIR / f"{safe_name(name)}.json"
-    path.write_text(raw_json, encoding="utf-8")
+    _atomic_write(path, raw_json)
     return path
 
 
@@ -155,15 +164,29 @@ def load_snapshot(name: str) -> str:
 # -- 配置 ---------------------------------------------------------------------
 
 
+def _config_candidates() -> list[Path]:
+    return [CONFIG_PATH, CONFIG_PATH.with_suffix(".json.bak")]
+
+
 def load_config() -> dict[str, Any]:
-    if CONFIG_PATH.exists():
-        try:
-            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            pass
+    """读配置；主文件损坏（写一半崩溃/磁盘满）自动回退 .bak 备份——
+    绝不静默返回 {} 把网关 key、自动化开关全部归零。"""
+    for path in _config_candidates():
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
     return {}
 
 
 def save_config(config: dict[str, Any]) -> None:
     ensure_dirs()
-    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 写之前把当前可解析的主文件快照为 .bak：新写入若损坏可回退
+    try:
+        if CONFIG_PATH.exists():
+            json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            CONFIG_PATH.replace(CONFIG_PATH.with_suffix(".json.bak"))
+    except (json.JSONDecodeError, OSError):
+        pass
+    _atomic_write(CONFIG_PATH, json.dumps(config, ensure_ascii=False, indent=2))

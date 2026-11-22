@@ -2,6 +2,17 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.52] — 2026-11-22
+
+### 修复
+- **换号容错时记忆注入累积**（整体审查发现，v0.2.47 起存在）：chat_failover 换号循环里 inject 在上一轮已改写的 payload 上继续注入——换 3 个号 messages 头部就堆 3 份记忆 system（全池合并后每份还很大，既浪费 token 又可能让上游困惑）。现在每轮都从原始 payload 注入，换多少号都只有恰一份。
+- **配置/凭据落盘改原子写 + 损坏回退**：save_config/save_account/save_snapshot/usage 原先直接 write_text，写一半崩溃或断电会留下截断 JSON；config.json 损坏时 load_config 静默返回 {}——网关 key、自动化开关、全部设置静默归零。现在统一「.tmp + os.replace」原子写；config 损坏自动回退 .bak 备份；损坏账号文件跳过的既有语义保持不变。
+
+### 审查确认无需修的已知取舍
+- 救命续期与后台续期 worker 对同一账号并发 refresh 的窗口极小（60s 节流缓解）；
+- session_map 无锁依赖 GIL 单操作原子性，竞态后果仅为粘错号；
+- usage.json 原子写后丢统计风险已消除。
+
 ## [0.2.51] — 2026-11-22
 
 ### 修复

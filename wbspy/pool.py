@@ -477,6 +477,8 @@ class AccountPool:
         * 全池冷却 → 等最早的冷却结束再试一次（≤ MAX_COOLING_WAIT 秒）
         """
         model = str(payload.get("model", ""))
+        orig_payload = payload        # 原始请求：每轮 failover 都从原始注入，
+                                      # 防止 inject 的改写（如记忆 system）跨轮累积
         tried: set = set()
         last_error: UpstreamError | None = None
         waited = False
@@ -500,9 +502,9 @@ class AccountPool:
                     alt = self.pick(fb, exclude=tried, session=None, lane=lane)
                     if alt is not None:
                         try:
-                            if inject is not None:
-                                payload = inject(alt, payload)
-                            return alt, self.clients[_key(alt)].chat({**payload, "model": fb})
+                            body = inject(alt, orig_payload) if inject is not None \
+                                else orig_payload
+                            return alt, self.clients[_key(alt)].chat({**body, "model": fb})
                         except UpstreamError as exc:
                             last_error = exc
                             self.apply_error(alt, exc, fb)
@@ -525,10 +527,13 @@ class AccountPool:
                                     "救命续期也未救回）。请到 wbspy 账号页检查账号状态。")
             tried.add(_key(doc))
             try:
-                # 记忆注入（选号后按该账号拉取；换号容错时对新号重新注入）
+                # 记忆注入（选号后按该账号从原始 payload 注入；换号容错时
+                # 对新号重新注入且不带上一轮的注入结果，防 system 消息累积）
                 if inject is not None:
-                    payload = inject(doc, payload)
-                return doc, self.clients[_key(doc)].chat(payload)
+                    body = inject(doc, orig_payload)
+                else:
+                    body = orig_payload
+                return doc, self.clients[_key(doc)].chat(body)
             except UpstreamError as exc:
                 last_error = exc
                 self.apply_error(doc, exc, model)

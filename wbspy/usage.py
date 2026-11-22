@@ -35,10 +35,12 @@ class UsageLedger:
         return {}
 
     def _save(self) -> None:
+        import os
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self._data, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self._data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, self.path)          # 原子替换，防写一半损坏丢统计
         try:
-            import os
             os.chmod(self.path, 0o600)
         except OSError:
             pass

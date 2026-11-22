@@ -4965,7 +4965,6 @@ class TestMemoryInject(unittest.TestCase):
     def test_chat_failover_calls_inject(self):
         """chat_failover：inject 回调在选号后执行（可改 payload）。"""
         from wbspy.pool import AccountPool
-        from wbspy.upstream import UpstreamError
         pool = AccountPool([])
         doc = self._doc()
         fake_client = Mock()
@@ -4989,3 +4988,85 @@ class TestMemoryInject(unittest.TestCase):
         self.assertEqual(seen["uid"], "u-mem")
         sent = fake_client.chat.call_args.args[0]
         self.assertEqual(sent["messages"][0]["content"], "M")
+
+    def test_failover_inject_not_accumulated(self):
+        """换号容错：第二轮 inject 收到原始 payload，不带上一轮注入的 system。"""
+        from wbspy.document import Document
+        from wbspy.pool import AccountPool, _key as _pool_key
+        from wbspy.upstream import UpstreamError
+        pool = AccountPool([])
+        d1 = self._doc()
+        d2 = Document(raw={"account": {"uid": "u-mem2"}}, uid="u-mem2",
+                      token="t2")
+        c1, c2 = Mock(), Mock()
+        c1.chat = Mock(side_effect=UpstreamError(429, "upstream_rate_limit", "限流",
+                                                 upstream_status=429, retry_after=1))
+        c2.chat = Mock(return_value="resp2")
+        pool.clients = {_pool_key(d1): c1, _pool_key(d2): c2}
+        pool.documents = {_pool_key(d1): d1, _pool_key(d2): d2}
+        pool.healthy = Mock(return_value=[d1, d2])
+        pool._lane_of = Mock(return_value="workbuddy")
+        pool.pick = Mock(side_effect=[d1, d2])
+        seen_payloads = []
+
+        def inject(d, payload):
+            seen_payloads.append(list(payload["messages"]))
+            return {**payload, "messages": [{"role": "system", "content": "INJ"},
+                                            *payload["messages"]]}
+
+        pool.chat_failover({"messages": [{"role": "user", "content": "q"}]},
+                           inject=inject)
+        self.assertEqual(len(seen_payloads), 2)
+        self.assertEqual(seen_payloads[0], seen_payloads[1])   # 第二轮无累积
+        self.assertEqual(len(seen_payloads[1]), 1)             # 只有原始一条 user
+        sent = c2.chat.call_args.args[0]
+        self.assertEqual([m["role"] for m in sent["messages"]],
+                         ["system", "user"])                   # 恰一条注入
+
+
+class TestStoreAtomic(unittest.TestCase):
+    """持久化原子写与损坏回退（防写一半崩溃静默清零/丢凭据）。"""
+
+    def setUp(self):
+        import pathlib
+        import tempfile
+        from wbspy import store
+        self.store = store
+        self._tmp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self._tmp.name)
+        self._patches = [
+            patch.object(store, "ROOT", root),
+            patch.object(store, "ACCOUNTS_DIR", root / "accounts"),
+            patch.object(store, "SNAPSHOTS_DIR", root / "snapshots"),
+            patch.object(store, "CONFIG_PATH", root / "config.json"),
+        ]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_config_corrupt_falls_back_to_bak(self):
+        """config.json 损坏 → 自动回退 .bak 备份，绝不静默返回 {}。"""
+        self.store.save_config({"gateway": {"api_key": "K1"}})
+        self.store.save_config({"gateway": {"api_key": "K2"}})   # K1 进 .bak
+        self.store.CONFIG_PATH.write_text("{broken", encoding="utf-8")
+        cfg = self.store.load_config()
+        self.assertEqual(cfg["gateway"]["api_key"], "K1")
+
+    def test_save_leaves_no_tmp_leftover(self):
+        """原子写完成后同目录无 .tmp 残留。"""
+        self.store.save_config({"gateway": {}})
+        self.assertEqual(list(self.store.CONFIG_PATH.parent.glob("*.tmp")), [])
+
+    def test_account_save_atomic_roundtrip(self):
+        """账号凭据原子写 → 读回完整；截断损坏的账号文件被跳过不影响他号。"""
+        from wbspy.document import Document
+        d = Document(raw={"account": {"uid": "u-atomic"},
+                          "auth": {"accessToken": "tok", "domain": "workbuddy.cn"}},
+                     uid="u-atomic", token="tok", domain="workbuddy.cn")
+        self.store.save_account(d)
+        self.assertIn(d.uid, [x.uid for x in self.store.load_accounts()])
+        # 模拟写一半损坏的另一账号文件
+        bad = self.store.ACCOUNTS_DIR / "badfile.json"
+        bad.write_text("{\"saved_at\": 1, \"docu", encoding="utf-8")
+        self.assertIn(d.uid, [x.uid for x in self.store.load_accounts()])
