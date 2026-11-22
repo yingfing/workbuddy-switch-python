@@ -36,6 +36,19 @@ from .upstream import EMBEDDING_MODELS, UpstreamError
 MODEL_TTL_SEC = 300
 
 
+def _fb_groups() -> list:
+    """容灾组配置（config gateway.fallback_groups，热读）：[{name, keyword}]。
+
+    用户按关键词（如 deepseek）圈一组互为备胎的模型；调用组内模型整体
+    挂掉时自动降级组内其他可用模型（见 chat 端点 _try_fallback）。
+    """
+    try:
+        v = (load_config().get("gateway") or {}).get("fallback_groups")
+    except Exception:
+        return []
+    return v if isinstance(v, list) else []
+
+
 def _payload_has_image(payload: dict) -> bool:
     """消息里是否携带图片 part（判定逻辑与 strip_images 同源）。"""
     msgs = payload.get("messages")
@@ -618,6 +631,107 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                     return {**payload,
                             "messages": _memory.inject_messages(msgs, entries)}
 
+            def _finish_chat(doc, resp, actual_model: str,
+                             extra_hdr: dict | None = None):
+                """成功响应包装（原路径与容灾降级路径共用）。"""
+                hdr_note = (f"（记忆 {mem_hdr()} 已注入）" if mem_hit else "")
+                _gw_log(f"对话：{actual_model} ← 「{doc.label()}」{hdr_note}")
+
+                hdrs = {"X-Wbspy-Account": doc.uid[:12],
+                        "X-Wbspy-Memory": mem_hdr()}
+                if extra_hdr:
+                    hdrs.update(extra_hdr)
+                if raw.get("stream"):
+                    def sse() -> Iterator[bytes]:
+                        try:
+                            for chunk in resp.iter_content(chunk_size=None):
+                                if chunk:
+                                    yield chunk
+                        finally:
+                            resp.close()
+                            LEDGER.record(model=actual_model, provider=lane,
+                                          account=doc.uid[:12],
+                                          prompt_tokens=estimate_tokens(raw.get("messages", [])))
+                    return StreamingResponse(sse(), media_type="text/event-stream",
+                                             headers=hdrs)
+                body = _sse_aggregate(resp, actual_model)
+                resp.close()
+                LEDGER.record(model=actual_model, provider=lane, account=doc.uid[:12],
+                              prompt_tokens=estimate_tokens(raw.get("messages", [])),
+                              completion_tokens=len(str(body.get("choices", [{}])[0]
+                                                       .get("message", {}).get("content") or "")) // 3)
+                return JSONResponse(body, headers=hdrs)
+
+            def _try_fallback() -> Any | None:
+                """模型级容灾（v0.2.55）：调用的模型整体挂掉时按「容灾组」自动降级。
+
+                配置 gateway.fallback_groups = [{name, keyword}]——用户按关键词
+                （如 deepseek）圈出一组互为备胎的模型。请求模型失败（封控/额度尽/
+                全冷却/泳道无账号）时：
+                  1. 同泳道组内备胎（名字相似度降序）；
+                  2. 跨泳道备胎（cline/qoder/zcode 挂了用 workbuddy 顶，反之不然）；
+                  3. 聚合渠道兜底（已配置 API Key 的厂商中按关键词找）。
+                最多试 3 个备胎；响应头 X-Wbspy-Fallback 如实标注
+                「请求模型 → 实际模型」，body 的 model 为上游实际执行的模型。
+                """
+                import difflib
+                groups = _fb_groups()
+                if not groups:
+                    return None
+                m = str(model).casefold()
+                grp = next((g for g in groups
+                            if isinstance(g, dict)
+                            and str(g.get("keyword") or "").strip()
+                            and str(g["keyword"]).strip().casefold() in m), None)
+                if grp is None:
+                    return None
+                kw = str(grp["keyword"]).strip().casefold()
+                LANES = ("cline", "qoder", "qodercn", "zcode")
+                cands: list[tuple[int, float, str]] = []
+                for r in app.state.model_cache or []:
+                    rid = str(r.get("id") or "")
+                    if not rid or rid == model or kw not in rid.casefold():
+                        continue
+                    pref = rid.split(":", 1)[0] if ":" in rid else ""
+                    pref = pref if pref in LANES + ("workbuddy",) else "workbuddy"
+                    # 同泳道优先 → 名字相似度降序
+                    sim = difflib.SequenceMatcher(None, m, rid.casefold()).ratio()
+                    cands.append((0 if pref == lane else 1, -sim, rid))
+                cands.sort()
+                tried = 0
+                for _p, _s, rid in cands:
+                    if tried >= 3:
+                        break
+                    head, _, mname = rid.partition(":")
+                    fb_lane = head if head in LANES else "workbuddy"
+                    try:
+                        fdoc, fresp = pool.chat_failover(
+                            {**raw, "model": mname}, session=session,
+                            lane=fb_lane, inject=inject_cb)
+                    except UpstreamError:
+                        tried += 1
+                        continue
+                    _gw_log(f"容灾降级：{model} 不可用 → 自动改用 {rid}"
+                            f"（容灾组「{grp.get('name') or kw}」）")
+                    return _finish_chat(fdoc, fresp, mname,
+                                        {"X-Wbspy-Fallback": f"{model} -> {rid}"})
+                # 第三层：聚合渠道兜底（仅已配置 API Key 的厂商）
+                for mrow in aggregate.models():
+                    rid_a = str(mrow.get("id") or "")
+                    if kw not in rid_a.casefold():
+                        continue
+                    if not ((mrow.get("wbspy") or {}).get("configured")):
+                        continue
+                    try:
+                        agg_resp = _aggregate_chat({**raw, "model": rid_a})
+                    except Exception:
+                        continue
+                    if getattr(agg_resp, "status_code", 200) < 400:
+                        _gw_log(f"容灾降级：{model} 不可用 → 聚合渠道 {rid_a}"
+                                f"（容灾组「{grp.get('name') or kw}」）")
+                        return agg_resp
+                return None
+
             doc, resp = pool.chat_failover(raw, session=session, lane=lane,
                                            inject=inject_cb)
         except UpstreamError as exc:
@@ -625,35 +739,11 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             # 失败请求也要入账：封控/限流/失效不进统计的话，健康横幅
             # 就看不见「最近正在报错」，7 日错误率与实时可用率全失真
             LEDGER.record(model=model, provider=lane, error=exc.code)
+            fb = _try_fallback()
+            if fb is not None:
+                return fb
             return _error(exc)
-        _gw_log(f"对话：{model} ← 「{doc.label()}」"
-                + (f"（记忆 {mem_hdr()} 已注入）" if mem_hit else ""))
-
-        if raw.get("stream"):
-            def sse() -> Iterator[bytes]:
-                try:
-                    for chunk in resp.iter_content(chunk_size=None):
-                        if chunk:
-                            yield chunk
-                finally:
-                    resp.close()
-                    LEDGER.record(model=model, provider=lane, account=doc.uid[:12],
-                                  prompt_tokens=estimate_tokens(raw.get("messages", [])))
-            mem_hdr_ = mem_hdr()
-            return StreamingResponse(sse(), media_type="text/event-stream",
-                                     headers={"X-Wbspy-Account": doc.uid[:12],
-                                              "X-Wbspy-Memory": mem_hdr_})
-
-        # 上游恒为流式（payload 强制 stream:true），非流式请求聚合为完整对象
-        body = _sse_aggregate(resp, model)
-        resp.close()
-        LEDGER.record(model=model, provider=lane, account=doc.uid[:12],
-                      prompt_tokens=estimate_tokens(raw.get("messages", [])),
-                      completion_tokens=len(str(body.get("choices", [{}])[0]
-                                               .get("message", {}).get("content") or "")) // 3)
-        mem_hdr_ = mem_hdr()
-        return JSONResponse(body, headers={"X-Wbspy-Account": doc.uid[:12],
-                                           "X-Wbspy-Memory": mem_hdr_})
+        return _finish_chat(doc, resp, model)
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request, authorization: str = Header("")) -> Any:

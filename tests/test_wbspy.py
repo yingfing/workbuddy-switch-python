@@ -5186,3 +5186,88 @@ class TestDiagnose(unittest.TestCase):
         rep = c.get("/api/diagnose").json()["data"]["report"]
         self.assertIn("死亡标记", rep)
         self.assertIn("冷却: deepseek-v4.1-flash", rep)
+
+
+class TestFallbackGroups(unittest.TestCase):
+    """模型容灾组：关键词分组备胎，模型整体挂掉时自动降级。"""
+
+    def _app(self):
+        import tempfile
+        from fastapi.testclient import TestClient
+        from wbspy.webui import create_web_app
+        from wbspy.pool import AccountPool
+        from wbspy import store
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        ctx = (patch.object(store, "CONFIG_PATH", Path(self._tmp.name) / "config.json"),
+               patch("wbspy.webui.load_config", store.load_config),
+               patch("wbspy.webui.save_config", store.save_config),
+               patch("wbspy.webui.load_accounts", return_value=[]))
+        for p in ctx:
+            p.start()
+            self.addCleanup(p.stop)
+        app = create_web_app(AccountPool([]), api_key="")
+        return TestClient(app), app
+
+    def test_fb_groups_config_roundtrip(self):
+        """容灾组保存 → 落盘 → GET 返回含匹配预览。"""
+        c, app = self._app()
+        r = c.post("/api/settings/gateway", json={
+            "fallback_groups": [{"name": "DeepSeek 组", "keyword": "deepseek"},
+                                {"keyword": ""}]})            # 空关键词被清洗掉
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.json()["data"]["fallback_groups"]), 1)
+        g = c.get("/api/settings/gateway").json()["data"]["fallback_groups"]
+        self.assertEqual(g[0]["keyword"], "deepseek")
+        self.assertIn("count", g[0])
+
+    def test_gateway_fallbacks_to_group_model(self):
+        """请求模型全灭 → 自动降级组内备胎，响应头如实标注。"""
+        c, app = self._app()
+        from wbspy.pool import _key as _pool_key
+        from wbspy.document import Document
+        from wbspy.upstream import UpstreamError
+        d1 = Document(raw={"account": {"uid": "u-fb"}}, uid="u-fb", token="t",
+                      domain="workbuddy.cn")
+        pool = app.state.pool if hasattr(app.state, "pool") else None
+        pool.documents = {_pool_key(d1): d1}
+        pool.healthy = Mock(return_value=[d1])
+        pool._lane_of = Mock(return_value="workbuddy")
+        model_rows = [{"id": "workbuddy:deepseek-v4.1-flash"},
+                      {"id": "workbuddy:deepseek-v4.1-flash-sg"},
+                      {"id": "workbuddy:kimi-k3"}]
+        app.state.model_cache = model_rows
+        calls = []
+
+        def fake_failover(payload, session=None, lane="workbuddy", inject=None):
+            calls.append(payload["model"])
+            if payload["model"] == "deepseek-v4.1-flash":
+                raise UpstreamError(503, "no_available_accounts", "全灭")
+            return d1, Mock()            # resp 桩：须支持 close()/iter_content
+
+        pool.chat_failover = Mock(side_effect=fake_failover)
+        with patch("wbspy.gateway._sse_aggregate",
+                   return_value={"model": "deepseek-v4.1-flash-sg",
+                                 "choices": [{"message": {"content": "ok"}}]}):
+            _pr = c.post("/api/settings/gateway", json={
+                "fallback_groups": [{"name": "DeepSeek 组", "keyword": "deepseek"}]})
+            self.assertEqual(_pr.status_code, 200)
+            r = c.post("/v1/chat/completions", json={
+                "model": "workbuddy:deepseek-v4.1-flash", "stream": False,
+                "messages": [{"role": "user", "content": "hi"}]})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.headers.get("X-Wbspy-Fallback"),
+                             "workbuddy:deepseek-v4.1-flash -> workbuddy:deepseek-v4.1-flash-sg")
+            self.assertEqual(calls, ["deepseek-v4.1-flash", "deepseek-v4.1-flash-sg"])
+
+    def test_no_group_no_fallback(self):
+        """未配置容灾组 → 保持原行为直接报错，不乱降级。"""
+        c, app = self._app()
+        from wbspy.upstream import UpstreamError
+        pool = app.state.pool
+        pool.chat_failover = Mock(
+            side_effect=UpstreamError(503, "no_available_accounts", "全灭"))
+        r = c.post("/v1/chat/completions", json={
+            "model": "workbuddy:deepseek-v4.1-flash", "stream": False,
+            "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 503)

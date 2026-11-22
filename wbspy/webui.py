@@ -178,6 +178,7 @@ def health_state(total: int, api_ready: int, checkin: dict, mobile: dict,
 def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None) -> FastAPI:
     app = create_app(pool, api_key=api_key)     # 网关路由（/v1/*、/healthz）
     app.state.web_port = port                   # 当前监听端口（重启 argv 重建用）
+    app.state.pool = pool                       # 诊断/测试可直达账号池
     sessions = LoginSessionManager()
     try:
         pool.start_auto_refresh()               # token 临期自动续期（后台线程）
@@ -1064,6 +1065,29 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
 
     # -- 网关开关 + 服务端口（开关立即生效；端口保存前试绑校验，重启生效）--------
 
+    def _fb_group_rows() -> list[dict]:
+        """容灾组 + 每组当前目录里匹配到的模型 id（关键词筛选预览）。"""
+        from .gateway import _fb_groups
+        groups = _fb_groups()
+        cat: list[str] = []
+        for r in app.state.model_cache or []:
+            rid = str(r.get("id") or "")
+            if rid:
+                cat.append(rid)
+        try:
+            from . import aggregate as _agg
+            for r in _agg.models():
+                cat.append(str(r.get("id") or ""))
+        except Exception:
+            pass
+        out = []
+        for g in groups:
+            kw = str(g.get("keyword") or "").strip().casefold()
+            matched = [rid for rid in cat if kw and kw in rid.casefold()]
+            out.append({"name": g.get("name") or kw, "keyword": kw,
+                        "matched": matched, "count": len(matched)})
+        return out
+
     @app.get("/api/settings/gateway")
     def gateway_settings_get():
         cfg = load_config()
@@ -1076,6 +1100,7 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
             "distribution": str((cfg.get("gateway") or {}).get("distribution")
                                 or "round-robin"),
             "priority_threshold": pool._priority_threshold(),
+            "fallback_groups": _fb_group_rows(),
             "port": (cfg.get("web") or {}).get("port") or "",
             "current_port": cur,
         })
@@ -1159,6 +1184,26 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
             result["memory_inject"] = mem
             _log("记忆注入：" + ("已开启——workbuddy 泳道对话自动携带该账号的服务端记忆。"
                                  if mem else "已关闭——对话不再注入记忆。"))
+
+        if "fallback_groups" in body:
+            groups = body.get("fallback_groups")
+            if not isinstance(groups, list):
+                return _err("fallback_groups 须为 [{name, keyword}] 列表")
+            clean = []
+            for g in groups:
+                if not isinstance(g, dict):
+                    continue
+                kw = str(g.get("keyword") or "").strip()
+                if not kw:
+                    continue
+                clean.append({"name": str(g.get("name") or kw)[:40],
+                              "keyword": kw[:60]})
+            cfg.setdefault("gateway", {})["fallback_groups"] = clean
+            result["fallback_groups"] = clean
+            _log(f"容灾组已保存：{len(clean)} 组（"
+                 + "、".join(f"{g['name']}~{g['keyword']}" for g in clean[:6])
+                 + (f" 等 {len(clean)} 组" if len(clean) > 6 else "")
+                 + "）。调用的模型整体挂掉时自动降级组内其他可用模型。")
 
         if "port" in body and str(body.get("port") or "").strip():
             raw = str(body.get("port")).strip()
