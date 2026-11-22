@@ -31,10 +31,26 @@ import requests
 
 TTL_S = 600                       # 与桌面端 10 分钟同步节奏对齐
 NEG_TTL_S = 60                    # 失败负缓存：60 秒内不重试（接口挂时防每发卡超时）
-_FETCH_TIMEOUT = 12
+_FETCH_TIMEOUT = 12               # 选中账号（关键路径）拉取超时
+PEER_TIMEOUT = 6                  # 其余账号拉取超时——宁缺毋滥，不拖慢对话
+_MAX_PEERS_WORKERS = 8
 
-_cache: dict[str, tuple[float, dict[str, Any]]] = {}   # uid -> (fetched_at, data)
+_cache: dict[str, tuple[float, Any]] = {}   # ckey -> (fetched_at, data|None)
 _lock = threading.Lock()
+
+
+def _ckey(doc) -> str:
+    """缓存键：storage_scope|uid 复合键。
+
+    国际版与国内版的 uid 命名空间互相独立（同 uid 是两个不同的人），
+    裸 uid 做键会让两地账号记忆互串——与 pool._key 同一约定。
+    """
+    uid = getattr(doc, "uid", None)
+    try:
+        scope = doc.storage_scope
+    except Exception:
+        scope = getattr(doc, "domain", "") or "unknown"
+    return f"{scope}|{uid}"
 
 
 def fetch_profile(doc, timeout: int = _FETCH_TIMEOUT) -> dict[str, Any] | None:
@@ -63,35 +79,37 @@ def fetch_profile(doc, timeout: int = _FETCH_TIMEOUT) -> dict[str, Any] | None:
         return None
 
 
-def get_profile(doc, force: bool = False) -> dict[str, Any] | None:
+def get_profile(doc, force: bool = False,
+                timeout: int = _FETCH_TIMEOUT) -> dict[str, Any] | None:
     """带 TTL 缓存的记忆快照；force=True 跳过缓存。
 
     成功缓存 TTL_S（10 分钟）；失败也缓存（负缓存 NEG_TTL_S，60 秒）——
     接口挂掉时每分钟最多白等一次，不会每个对话都卡满超时。
     """
-    uid = getattr(doc, "uid", None)
-    if not uid:
+    if not getattr(doc, "uid", None):
         return None
+    key = _ckey(doc)
     now = time.time()
     with _lock:
-        hit = _cache.get(uid)
+        hit = _cache.get(key)
         if hit and not force:
             ts, data = hit
             if now - ts < (TTL_S if data is not None else NEG_TTL_S):
                 return data or None
-    data = fetch_profile(doc)
+    data = fetch_profile(doc, timeout=timeout)
     with _lock:
-        _cache[uid] = (now, data)
+        _cache[key] = (now, data)
     return data
 
 
 def invalidate(uid: str | None = None) -> None:
-    """清缓存（手动刷新用）；uid=None 全清。"""
+    """清缓存（手动刷新用）；uid=None 全清。传 uid 时匹配任意 scope 下该 uid。"""
     with _lock:
         if uid is None:
             _cache.clear()
         else:
-            _cache.pop(uid, None)
+            for k in [k for k in _cache if k.endswith(f"|{uid}")]:
+                _cache.pop(k, None)
 
 
 def _label(doc) -> str:
@@ -130,7 +148,7 @@ def inject_messages(messages: list, entries: list[tuple[str, dict[str, Any]]]) -
 def collect_entries(doc, peers: Iterable | None = None) -> list:
     """收集选中账号 + 其余账号的记忆快照，选中账号排最前。
 
-    peers 并行拉取（TTL 缓存复用），失败静默跳过该账号。
+    peers 并行拉取（TTL 缓存复用，短超时不拖慢对话），失败静默跳过该账号。
     返回 [(label, profile), …]；全空返回 []。
     """
     entries: list[tuple[str, dict[str, Any]]] = []
@@ -139,8 +157,10 @@ def collect_entries(doc, peers: Iterable | None = None) -> list:
         entries.append((_label(doc), main))
     peer_docs = [d for d in (peers or []) if d is not doc]
     if peer_docs:
-        with ThreadPoolExecutor(max_workers=min(6, len(peer_docs))) as ex:
-            for p_doc, prof in zip(peer_docs, ex.map(get_profile, peer_docs)):
+        with ThreadPoolExecutor(max_workers=min(_MAX_PEERS_WORKERS, len(peer_docs))) as ex:
+            for p_doc, prof in zip(peer_docs,
+                                   ex.map(lambda d: get_profile(d, timeout=PEER_TIMEOUT),
+                                          peer_docs)):
                 if prof:
                     entries.append((_label(p_doc), prof))
     return entries

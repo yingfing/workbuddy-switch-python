@@ -591,9 +591,16 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         try:
             inject_cb = None
             mem_hit: list = []
+
+            def mem_hdr() -> str:          # 注入摘要：主号版本 + 注入账号数
+                if not mem_hit:
+                    return "off"
+                v = mem_hit[0][1].get("version")
+                return ("v%s" % (v if v is not None else "?")) \
+                    + "·%dacc" % len(mem_hit)
+
             if lane == "workbuddy" and getattr(app.state, "gw_memory", True):
                 from . import memory as _memory
-                base_n = len(raw.get("messages") or [])
 
                 def inject_cb(d, payload):     # noqa: E306 — 选号后合并注入全池记忆
                     # 其余 WorkBuddy 账号的记忆也一并注入（选中号排最前）：
@@ -601,15 +608,15 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                     peers = [x for x in pool.documents.values()
                              if getattr(x, "channel_id", None)
                              not in ("cline", "qoder", "qodercn", "zcode")]
-                    out = _memory.inject_payload(d, payload, peers=peers)
-                    try:
-                        if len(out.get("messages") or []) > base_n:
-                            prof = _memory.get_profile(d)
-                            if prof:
-                                mem_hit.append(prof)
-                    except Exception:
-                        pass
-                    return out
+                    entries = _memory.collect_entries(d, peers=peers)
+                    if not entries:
+                        return payload
+                    msgs = payload.get("messages")
+                    if not isinstance(msgs, list):
+                        return payload
+                    mem_hit.extend(entries)
+                    return {**payload,
+                            "messages": _memory.inject_messages(msgs, entries)}
 
             doc, resp = pool.chat_failover(raw, session=session, lane=lane,
                                            inject=inject_cb)
@@ -617,7 +624,7 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             _gw_log(f"对话失败：{model} → HTTP {exc.status} {exc.code}：{exc.message[:160]}")
             return _error(exc)
         _gw_log(f"对话：{model} ← 「{doc.label()}」"
-                + ("（记忆 v%s 已注入）" % mem_hit[0]["version"] if mem_hit else ""))
+                + (f"（记忆 {mem_hdr()} 已注入）" if mem_hit else ""))
 
         if raw.get("stream"):
             def sse() -> Iterator[bytes]:
@@ -629,10 +636,10 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                     resp.close()
                     LEDGER.record(model=model, provider=lane, account=doc.uid[:12],
                                   prompt_tokens=estimate_tokens(raw.get("messages", [])))
-            mem_hdr = "v" + str(mem_hit[0]["version"]) if mem_hit else "off"
+            mem_hdr_ = mem_hdr()
             return StreamingResponse(sse(), media_type="text/event-stream",
                                      headers={"X-Wbspy-Account": doc.uid[:12],
-                                              "X-Wbspy-Memory": mem_hdr})
+                                              "X-Wbspy-Memory": mem_hdr_})
 
         # 上游恒为流式（payload 强制 stream:true），非流式请求聚合为完整对象
         body = _sse_aggregate(resp, model)
@@ -641,9 +648,9 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                       prompt_tokens=estimate_tokens(raw.get("messages", [])),
                       completion_tokens=len(str(body.get("choices", [{}])[0]
                                                .get("message", {}).get("content") or "")) // 3)
-        mem_hdr = "v" + str(mem_hit[0]["version"]) if mem_hit else "off"
+        mem_hdr_ = mem_hdr()
         return JSONResponse(body, headers={"X-Wbspy-Account": doc.uid[:12],
-                                           "X-Wbspy-Memory": mem_hdr})
+                                           "X-Wbspy-Memory": mem_hdr_})
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request, authorization: str = Header("")) -> Any:

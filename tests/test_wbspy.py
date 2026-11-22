@@ -4850,6 +4850,50 @@ class TestMemoryInject(unittest.TestCase):
             self.assertEqual(p2.call_count, 1)
         mem.invalidate()
 
+    def test_cache_key_no_cross_region_leak(self):
+        """同 uid 不同 region（国内/国际）→ 缓存键不同，记忆不互串。"""
+        from wbspy.document import Document
+        import wbspy.memory as mem
+        mem.invalidate()
+        cn = Document(raw={"account": {"uid": "u-dup"}}, uid="u-dup",
+                      token="t-cn", domain="workbuddy.cn")
+        intl = Document(raw={"account": {"uid": "u-dup"}}, uid="u-dup",
+                        token="t-intl", domain="workbuddy.ai")
+        self.assertNotEqual(mem._ckey(cn), mem._ckey(intl))
+        prof_cn = dict(self._PROFILE, data=dict(self._PROFILE["data"],
+                                                foryou_prompt="CN-MEM"))
+        prof_intl = dict(self._PROFILE, data=dict(self._PROFILE["data"],
+                                                  foryou_prompt="INTL-MEM"))
+        with patch("wbspy.memory.requests.get",
+                   side_effect=[self._resp(prof_cn), self._resp(prof_intl)]) as p:
+            self.assertIn("CN-MEM", mem.get_profile(cn)["foryou_prompt"])
+            self.assertIn("INTL-MEM", mem.get_profile(intl)["foryou_prompt"])
+        self.assertEqual(p.call_count, 2)
+        mem.invalidate()
+
+    def test_peer_fetch_short_timeout(self):
+        """其余账号拉取用短超时（PEER_TIMEOUT），不拖慢对话关键路径。"""
+        from wbspy.document import Document
+        import wbspy.memory as mem
+        doc = self._doc()
+        peer = Document(raw={"account": {"uid": "u-peer3"}}, uid="u-peer3",
+                        token="t4", domain="workbuddy.cn")
+        payload = {"messages": [{"role": "user", "content": "x"}]}
+        profs = {"u-mem": {"version": 1, "updated_at": "", "foryou_prompt": "M"},
+                 "u-peer3": {"version": 1, "updated_at": "", "foryou_prompt": "P"}}
+        with patch.object(mem, "get_profile",
+                          side_effect=lambda d, timeout=mem._FETCH_TIMEOUT:
+                          ({"version": 1, "updated_at": "",
+                            "foryou_prompt": "PEER-SHORT"}
+                           if d.uid == "u-peer3" and timeout == mem.PEER_TIMEOUT
+                           else ({"version": 1, "updated_at": "",
+                                 "foryou_prompt": "MAIN-OK"}
+                                if d.uid == "u-mem" else None))):
+            out = mem.inject_payload(doc, payload, peers=[peer])
+        content = out["messages"][0]["content"]
+        self.assertIn("MAIN-OK", content)
+        self.assertIn("PEER-SHORT", content)
+
     def test_inject_messages_prepends_system(self):
         """注入：头部插 system，原列表不动。"""
         import wbspy.memory as mem
@@ -4873,7 +4917,7 @@ class TestMemoryInject(unittest.TestCase):
         profs = {"u-mem": {"version": 7, "updated_at": "u", "foryou_prompt": "MAIN-MEM"},
                  "u-peer": {"version": 3, "updated_at": "u", "foryou_prompt": "PEER-MEM"}}
         with patch.object(mem, "get_profile",
-                          side_effect=lambda d: profs.get(d.uid)):
+                          side_effect=lambda d, timeout=None: profs.get(d.uid)):
             out = mem.inject_payload(doc, payload, peers=[peer])
         content = out["messages"][0]["content"]
         self.assertIn("MAIN-MEM", content)
@@ -4890,7 +4934,7 @@ class TestMemoryInject(unittest.TestCase):
                         token="tok3")
         payload = {"messages": [{"role": "user", "content": "x"}]}
         with patch.object(mem, "get_profile",
-                          side_effect=lambda d: ({"version": 1, "updated_at": "",
+                          side_effect=lambda d, timeout=None: ({"version": 1, "updated_at": "",
                                                   "foryou_prompt": "SOLO"}
                                                  if d.uid == "u-mem" else None)):
             out = mem.inject_payload(doc, payload, peers=[peer])
