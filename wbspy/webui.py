@@ -706,6 +706,27 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
                     if mobile_enabled else "")
                  + f" · 网关端口 {getattr(app.state, 'web_port', '?')}")
         L.append("")
+        L.append("── 模型目录 ──")
+        # 只读池内已加载缓存，不主动打上游（诊断零副作用、无网络依赖）
+        cache = getattr(pool, "_mba_cache", None) or []
+        try:
+            n_all = sum(len(rows) for _d, rows in cache)
+            n_cm = sum(1 for _d, rows in cache for m in rows
+                       if isinstance(m.get("credit_multiplier"), (int, float))
+                       and not isinstance(m.get("credit_multiplier"), bool))
+            tail = ("（目录缓存未加载，打开「我的模型」页后再诊断）"
+                    if not cache else
+                    " —— 倍率全部缺失，官方目录疑已改版（看样本 keys 认字段）"
+                    if n_all and n_cm == 0 else "")
+            L.append(f"{len(cache)} 个账号共 {n_all} 个模型 · 带倍率 {n_cm} 个" + tail)
+            for d, rows in cache[:2]:           # 样本：字段名一眼识别改版姿势
+                for m in rows[:3]:
+                    keys = ",".join(sorted(str(k) for k in m.keys()))
+                    L.append(f"  · [{d.label()}] {m['id']} "
+                             f"cm={m.get('credit_multiplier')!r} keys={keys}")
+        except Exception as exc:
+            L.append(f"目录读取失败：{type(exc).__name__}: {exc}")
+        L.append("")
         L.append(f"── 最近运行日志（{min(30, len(app.state.auto_log))} 行）──")
         L.extend(app.state.auto_log[-30:])
         report = "\n".join(L)

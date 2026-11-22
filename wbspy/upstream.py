@@ -110,6 +110,66 @@ def parse_reasoning(raw: Any) -> dict:
     return out
 
 
+# -- 计费倍率宽容提取（官方目录改版自救） --------------------------------------
+# 倍率功能上线后官方目录已多次换姿势下发：平铺改名（camelCase）、挪进嵌套
+# 对象、改发字符串。解析层一旦只认 ``credit_multiplier`` 平铺数值，一次改版
+# 就是全军覆没——网关模型名后缀、网页「我的模型」倍率列同时消失。这里逐级
+# 宽容提取拿到数值；展示层（网关拼接/排序）保持严格只认数值，纵深防御。
+
+_CM_FIELDS = ("credit_multiplier", "creditMultiplier", "priceFactor",
+              "price_factor", "priceMultiplier", "price_multiplier")
+_CM_KEY_RE = re.compile(r"credit.?mult|price.?(?:factor|mult)|^multiplier$",
+                        re.IGNORECASE)
+_NUM_STR_RE = re.compile(r"^(\d+(?:\.\d+)?)x?$")
+
+
+def _num(v: Any) -> float | None:
+    """宽容数值化：数值直接用；字符串只接受安全数字（可带 ``x`` 尾缀）；
+    脏数据/长文本/布尔一律 None。注意 0 是合法值（限时免费）不可误删。"""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        m = _NUM_STR_RE.match(v.strip()[:16])
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def _extract_cm(row: Any, extra: Any = None) -> float | None:
+    """从目录行（或 availableModels 元数据条目）提取计费倍率。
+
+    逐级尝试：① 常见平铺字段名 → ② 一层嵌套容器内 key 正则匹配 →
+    ③ 平铺 key 正则兜底。任一级拿到可数值化的值即返回；全空返回 None
+    （展示层不拼后缀、排序殿后，绝不编造）。"""
+    for src in (row, extra):
+        if not isinstance(src, dict):
+            continue
+        for k in _CM_FIELDS:                       # ① 常见平铺字段名
+            n = _num(src.get(k))
+            if n is not None:
+                return n
+        for k, v in src.items():                   # ② 一层嵌套容器
+            if isinstance(v, dict):
+                for k2, v2 in v.items():
+                    if _CM_KEY_RE.match(str(k2)):
+                        n = _num(v2)
+                        if n is not None:
+                            return n
+        for k, v in src.items():                   # ③ 平铺 key 正则兜底
+            if isinstance(v, dict):
+                continue
+            if _CM_KEY_RE.match(str(k)):
+                n = _num(v)
+                if n is not None:
+                    return n
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 错误分类
 # ---------------------------------------------------------------------------
@@ -979,9 +1039,15 @@ class WorkBuddyClient:
         if not isinstance(catalog, list):
             return []
         allowed_ids = None
+        allowed_meta: dict[str, dict] = {}   # availableModels dict 条目（可能带倍率）
         if isinstance(allowed, list):
-            allowed_ids = {v if isinstance(v, str) else v.get("id")
-                           for v in allowed if isinstance(v, (str, dict))}
+            allowed_ids = set()
+            for v in allowed:
+                if isinstance(v, str):
+                    allowed_ids.add(v)
+                elif isinstance(v, dict) and isinstance(v.get("id"), str):
+                    allowed_ids.add(v["id"])
+                    allowed_meta[v["id"]] = v
         out, seen = [], set()
         for row in catalog:
             if not isinstance(row, dict):
@@ -997,8 +1063,8 @@ class WorkBuddyClient:
             entry = {"id": mid,
                      "name": str(row.get("display_name") or row.get("name") or mid)[:80],
                      "region": self.doc.region}
-            cm = row.get("credit_multiplier")   # 官方计费倍率（0 = 限时免费）
-            if isinstance(cm, (int, float)) and not isinstance(cm, bool):
+            cm = _extract_cm(row, allowed_meta.get(mid))   # 官方计费倍率（0 = 限时免费）
+            if cm is not None:
                 entry["credit_multiplier"] = cm
             # 图片输入标志：正拼法 supportsImages；部分条目用否定拼法
             # disabledMultimodal（dsh-xdpool 实测同义）。只信布尔，都没有

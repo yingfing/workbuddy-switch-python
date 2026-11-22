@@ -2707,6 +2707,82 @@ class TestCatalogCapabilities(unittest.TestCase):
         self.assertNotIn("supported_efforts", by_id["m4"])
 
 
+class TestCatalogMultiplierRescue(unittest.TestCase):
+    """计费倍率宽容提取：官方目录改版（改名/挪嵌套/改字符串）不再全军覆没。
+
+    曾经只认 ``credit_multiplier`` 平铺数值，官方一换姿势两处倍率同时
+    消失（网关模型名后缀 + 网页倍率列）。解析层逐级宽容提取，展示层
+    保持严格只认数值——纵深防御。"""
+
+    def _client(self):
+        from wbspy.document import parse_auth
+        from wbspy.upstream import WorkBuddyClient
+        doc = parse_auth({"account": {"uid": "cm1", "nickname": "号"},
+                          "auth": {"accessToken": "t",
+                                   "domain": "www.codebuddy.cn"}})
+        return WorkBuddyClient(doc)
+
+    def _catalog(self, cl, payload):
+        from unittest.mock import patch, MagicMock
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = payload
+        with patch.object(cl.http, "get", return_value=resp):
+            return {r["id"]: r for r in cl.models()}
+
+    def test_camel_case_multiplier(self):
+        cl = self._client()
+        by_id = self._catalog(cl, {"data": [{"id": "m1", "creditMultiplier": 0.5}]})
+        self.assertEqual(by_id["m1"]["credit_multiplier"], 0.5)
+
+    def test_string_multiplier_normalized(self):
+        """字符串倍率（含 x 尾缀）安全数值化——上游改发字符串也不丢。"""
+        cl = self._client()
+        by_id = self._catalog(cl, {"data": [{"id": "a", "credit_multiplier": "0.50"},
+                                            {"id": "b", "credit_multiplier": "1.5x"}]})
+        self.assertEqual(by_id["a"]["credit_multiplier"], 0.5)
+        self.assertEqual(by_id["b"]["credit_multiplier"], 1.5)
+
+    def test_nested_pricing_multiplier(self):
+        """倍率挪进嵌套对象（pricing/credit 等）也能找到。"""
+        cl = self._client()
+        by_id = self._catalog(cl, {"data": [
+            {"id": "m1", "pricing": {"credit_multiplier": 0.3}},
+            {"id": "m2", "credit": {"multiplier": 2}},
+            {"id": "m3", "meta": {"priceFactor": 0.75}}]})
+        self.assertEqual(by_id["m1"]["credit_multiplier"], 0.3)
+        self.assertEqual(by_id["m2"]["credit_multiplier"], 2.0)
+        self.assertEqual(by_id["m3"]["credit_multiplier"], 0.75)
+
+    def test_allowed_meta_fallback(self):
+        """catalog 行不带倍率、availableModels 的 dict 条目带——从那里补。"""
+        cl = self._client()
+        by_id = self._catalog(cl, {"data": {
+            "models": [{"id": "m4"}],
+            "availableModels": [{"id": "m4", "creditMultiplier": 1.2}]}})
+        self.assertEqual(by_id["m4"]["credit_multiplier"], 1.2)
+
+    def test_dirty_string_still_dropped(self):
+        """脏字符串照旧不进目录（防御不放松），0（限时免费）不被误删。"""
+        cl = self._client()
+        by_id = self._catalog(cl, {"data": [
+            {"id": "bad1", "credit_multiplier": "abc"},
+            {"id": "bad2", "credit_multiplier": "限时免费 See docs " * 4},
+            {"id": "bad3", "credit_multiplier": True},
+            {"id": "zero", "credit_multiplier": 0}]})
+        for bad in ("bad1", "bad2", "bad3"):
+            self.assertNotIn("credit_multiplier", by_id[bad])
+        self.assertEqual(by_id["zero"]["credit_multiplier"], 0)
+
+    def test_flat_key_regex_fallback(self):
+        """未知命名（如裸 ``multiplier`` / ``priceMult``）正则兜底也能拿到。"""
+        cl = self._client()
+        by_id = self._catalog(cl, {"data": [{"id": "m1", "multiplier": 0.9},
+                                            {"id": "m2", "priceMult": 3}]})
+        self.assertEqual(by_id["m1"]["credit_multiplier"], 0.9)
+        self.assertEqual(by_id["m2"]["credit_multiplier"], 3.0)
+
+
 class TestCapabilityGuard(unittest.TestCase):
     """池泳道能力闸：目录明说做不了就明 400（人话），不扔给上游收谜语错误。
 
@@ -5186,6 +5262,30 @@ class TestDiagnose(unittest.TestCase):
         rep = c.get("/api/diagnose").json()["data"]["report"]
         self.assertIn("死亡标记", rep)
         self.assertIn("冷却: deepseek-v4.1-flash", rep)
+
+    def test_diagnose_catalog_section(self):
+        """目录段进报告：缓存为空给引导语，倍率全缺失直接点名改版嫌疑。"""
+        c, pool, app = self._app()
+        doc = next(iter(pool.documents.values()))
+        # ① 缓存未加载：给引导语而不是空白
+        rep = c.get("/api/diagnose").json()["data"]["report"]
+        self.assertIn("模型目录", rep)
+        self.assertIn("目录缓存未加载", rep)
+        # ② 倍率全部缺失：点名官方改版嫌疑 + 样本 keys 可认字段
+        pool._mba_cache = [(doc, [
+            {"id": "workbuddy:glm-4.6", "name": "GLM-4.6", "region": "cn"},
+            {"id": "workbuddy:kimi-k3", "name": "Kimi-K3", "region": "cn"}])]
+        rep = c.get("/api/diagnose").json()["data"]["report"]
+        self.assertIn("2 个模型 · 带倍率 0 个", rep)
+        self.assertIn("官方目录疑已改版", rep)
+        self.assertIn("keys=", rep)                    # 样本行带原始字段名
+        self.assertIn("workbuddy:glm-4.6", rep)
+        # ③ 倍率在：无嫌疑提示
+        pool._mba_cache = [(doc, [{"id": "workbuddy:glm-4.6", "name": "GLM-4.6",
+                                   "credit_multiplier": 0.5}])]
+        rep = c.get("/api/diagnose").json()["data"]["report"]
+        self.assertIn("带倍率 1 个", rep)
+        self.assertNotIn("官方目录疑已改版", rep)
 
 
 class TestFallbackGroups(unittest.TestCase):
