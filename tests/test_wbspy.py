@@ -6090,6 +6090,7 @@ class TestDownloadProbe(unittest.TestCase):
     def test_download_all_unreachable_raises(self):
         """全部探测不可达 → 明确报错而非挂死。"""
         from unittest.mock import patch
+        import tempfile
         import wbspy.update as U
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(U, "_candidate_ips",
