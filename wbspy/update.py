@@ -364,7 +364,9 @@ def _git_pull(repo: Path) -> tuple[bool, str]:
 
 
 def _download_tarball(ref: str, dest: Path) -> str:
-    """经优选 IP 下载源码包（codeload.github.com）到 dest。返回通道说明。"""
+    """经优选 IP 下载源码包（codeload.github.com）到 dest。返回通道说明。
+
+    逐通道打印尝试进度——下载兜底往往要试好几个 IP，静默会让用户以为卡死。"""
     host = "codeload.github.com"
     path = f"/{REPO}/tar.gz/{ref}"
     errs: list[str] = []
@@ -373,24 +375,30 @@ def _download_tarball(ref: str, dest: Path) -> str:
     if best.get("ip"):
         candidates.append((best["ip"], "上次优选"))   # GitHub 各子域通常共享 IP 段
     candidates += _candidate_ips(host=host)
-    for ip, label in candidates:
+    print(f"  共 {len(candidates)} 条候选通道，逐条尝试：")
+    for i, (ip, label) in enumerate(candidates, 1):
         time.sleep(STAGGER_SEC)
+        print(f"  · 通道 {i}/{len(candidates)}：{label} {ip} …", flush=True)
         try:
             resp = _pool_request(ip, host, path, DOWNLOAD_TIMEOUT)
         except Exception as exc:                     # noqa: BLE001
             errs.append(f"{label}/{ip}({exc.__class__.__name__})")
+            print(f"    ✗ {exc.__class__.__name__}")
             continue
         if resp.status == 200:
             dest.write_bytes(resp.data)
             _save_best_ip(ip, host)
+            print(f"    ✓ 下载完成（{len(resp.data) / 1024:.0f} KB）")
             return f"{label} {ip}"
         errs.append(f"{label}/{ip}(HTTP {resp.status})")
+        print(f"    ✗ HTTP {resp.status}")
     raise RuntimeError("；".join(errs) or "无可用下载通道")
 
 
 def _apply_tarball(tar_path: Path, tag: str, repo: Path) -> None:
     """解开源码包并覆盖项目目录（保留 .git；校验版本一致才落盘）。"""
     expect = str(tag).lstrip("v")
+    print(f"  · 解包并校验包内版本（期望 {expect}）……", flush=True)
     with tempfile.TemporaryDirectory() as tmp:
         with tarfile.open(tar_path, "r:gz") as tf:
             tf.extractall(tmp)                        # noqa: S202 源为官方 codeload
@@ -402,8 +410,10 @@ def _apply_tarball(tar_path: Path, tag: str, repo: Path) -> None:
             got = m.group(1) if m else ""
         if got != expect:
             raise RuntimeError(f"下载包版本 {got or '?'} 与发布版本 {expect} 不一致，放弃替换")
+        print("  · 校验通过，替换项目文件（保留 .git）……", flush=True)
         shutil.copytree(root, repo, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns(".git"))
+        print("  ✓ 文件替换完成")
 
 
 def _try_restart() -> bool:
@@ -465,7 +475,8 @@ def apply_update(assume_yes: bool = False, repo: Path | None = None) -> int:
             print("已放弃。之后可手动更新：git pull（或重跑 wbspy update --apply）")
             return 0
     print(f"项目目录：{repo}")
-    # 第一条腿：git pull
+    # 第一条腿：git pull——60s 内无输出属正常（git 进度不透传，避免输出混乱）
+    print(f"[1/4] git pull（最长等 {GIT_PULL_TIMEOUT:.0f}s，期间无输出属正常）……", flush=True)
     ok, msg = _git_pull(repo)
     if ok:
         print(f"✓ git pull 完成：{msg}")
@@ -473,7 +484,8 @@ def apply_update(assume_yes: bool = False, repo: Path | None = None) -> int:
         return 0
     print(f"⇣ git pull 未成：{msg}")
     # 第二条腿：优选 IP 下载源码包替换（.git 保留，git 历史不丢）
-    print("改走优选 IP 直接下载源码包……")
+    print("[2/4] 改走优选 IP 直接下载源码包……", flush=True)
+    print("[3/4] 校验并替换项目文件……", flush=True)
     with tempfile.TemporaryDirectory() as tmp:
         tar_path = Path(tmp) / "src.tar.gz"
         try:
@@ -484,6 +496,6 @@ def apply_update(assume_yes: bool = False, repo: Path | None = None) -> int:
             print(f"✗ 下载兜底也失败：{exc}")
             print(f"  可手动打开发布页：{RELEASE_PAGE}")
             return 2
-    print(f"✓ 已更新到 {target}（.git 保留，后续仍可用 git pull）")
+    print(f"[4/4] 更新到 {target} 完成（.git 保留，后续仍可用 git pull）")
     _try_restart()
     return 0
