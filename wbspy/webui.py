@@ -960,6 +960,7 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
             "enabled": bool(getattr(app.state, "gw_enabled", True)),
             "aggregate": bool(getattr(app.state, "gw_aggregate", True)),
             "vision": bool(getattr(app.state, "gw_vision", True)),
+            "memory_inject": bool(getattr(app.state, "gw_memory", True)),
             "distribution": str((cfg.get("gateway") or {}).get("distribution")
                                 or "round-robin"),
             "priority_threshold": pool._priority_threshold(),
@@ -986,6 +987,7 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         result = {"enabled": bool(getattr(app.state, "gw_enabled", True)),
                   "aggregate": bool(getattr(app.state, "gw_aggregate", True)),
                   "vision": bool(getattr(app.state, "gw_vision", True)),
+            "memory_inject": bool(getattr(app.state, "gw_memory", True)),
                   "distribution": str((cfg.get("gateway") or {}).get("distribution")
                                       or "round-robin"),
                   "priority_threshold": pool._priority_threshold(),
@@ -1037,6 +1039,14 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
             result["vision"] = vis
             _log("视觉透传：" + ("已开启——客户端可传图，图片原样发往上游。" if vis
                                  else "已关闭——图片在网关剥除（文字占位），上游零图片流量。"))
+
+        if "memory_inject" in body:
+            mem = bool(body.get("memory_inject"))
+            cfg.setdefault("gateway", {})["memory_inject"] = mem
+            app.state.gw_memory = mem
+            result["memory_inject"] = mem
+            _log("记忆注入：" + ("已开启——workbuddy 泳道对话自动携带该账号的服务端记忆。"
+                                 if mem else "已关闭——对话不再注入记忆。"))
 
         if "port" in body and str(body.get("port") or "").strip():
             raw = str(body.get("port")).strip()

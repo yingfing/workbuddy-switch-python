@@ -172,6 +172,11 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
     # 目录不声明、图片 part 剥成文字占位（上游零图片流量）。
     app.state.gw_vision = bool(
         (load_config().get("gateway") or {}).get("vision", True))
+    # 记忆注入开关（config gateway.memory_inject，默认开）：workbuddy 泳道对话
+    # 在选号后拉该账号的服务端记忆（foryou_prompt，见 memory.py），插入 system
+    # 消息——手机端让 AI「记住」的事跨端生效。失败静默不阻塞对话。
+    app.state.gw_memory = bool(
+        (load_config().get("gateway") or {}).get("memory_inject", True))
     # 网关运行日志（与自动化共用网页日志抽屉 /api/logs）
     app.state.auto_log: list[str] = []
     app.state.auto_total = 0
@@ -584,11 +589,30 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                 session = "auto:" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
 
         try:
-            doc, resp = pool.chat_failover(raw, session=session, lane=lane)
+            inject_cb = None
+            mem_hit: list = []
+            if lane == "workbuddy" and getattr(app.state, "gw_memory", True):
+                from . import memory as _memory
+                base_n = len(raw.get("messages") or [])
+
+                def inject_cb(d, payload):     # noqa: E306 — 选号后按账号注入
+                    out = _memory.inject_payload(d, payload)
+                    try:
+                        if len(out.get("messages") or []) > base_n:
+                            prof = _memory.get_profile(d)
+                            if prof:
+                                mem_hit.append(prof)
+                    except Exception:
+                        pass
+                    return out
+
+            doc, resp = pool.chat_failover(raw, session=session, lane=lane,
+                                           inject=inject_cb)
         except UpstreamError as exc:
             _gw_log(f"对话失败：{model} → HTTP {exc.status} {exc.code}：{exc.message[:160]}")
             return _error(exc)
-        _gw_log(f"对话：{model} ← 「{doc.label()}」")
+        _gw_log(f"对话：{model} ← 「{doc.label()}」"
+                + ("（记忆 v%s 已注入）" % mem_hit[0]["version"] if mem_hit else ""))
 
         if raw.get("stream"):
             def sse() -> Iterator[bytes]:
@@ -600,8 +624,10 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                     resp.close()
                     LEDGER.record(model=model, provider=lane, account=doc.uid[:12],
                                   prompt_tokens=estimate_tokens(raw.get("messages", [])))
+            mem_hdr = "v" + str(mem_hit[0]["version"]) if mem_hit else "off"
             return StreamingResponse(sse(), media_type="text/event-stream",
-                                     headers={"X-Wbspy-Account": doc.uid[:12]})
+                                     headers={"X-Wbspy-Account": doc.uid[:12],
+                                              "X-Wbspy-Memory": mem_hdr})
 
         # 上游恒为流式（payload 强制 stream:true），非流式请求聚合为完整对象
         body = _sse_aggregate(resp, model)
@@ -610,7 +636,9 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                       prompt_tokens=estimate_tokens(raw.get("messages", [])),
                       completion_tokens=len(str(body.get("choices", [{}])[0]
                                                .get("message", {}).get("content") or "")) // 3)
-        return JSONResponse(body, headers={"X-Wbspy-Account": doc.uid[:12]})
+        mem_hdr = "v" + str(mem_hit[0]["version"]) if mem_hit else "off"
+        return JSONResponse(body, headers={"X-Wbspy-Account": doc.uid[:12],
+                                           "X-Wbspy-Memory": mem_hdr})
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request, authorization: str = Header("")) -> Any:

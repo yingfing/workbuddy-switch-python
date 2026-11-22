@@ -548,6 +548,11 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       </div>
 
       <div class="gwSec">
+        <div class="gwTitle">记忆注入 <button class="btn sm" id="memSwitch" onclick="memSwitchToggle()">…</button></div>
+        <span class="qmark" data-tip="记忆开关：开启后 workbuddy 泳道对话自动拉取该账号在服务端的长期记忆（手机 App「记忆」同源，含工作背景/近期动态等），以 system 消息注入上下文——手机端让 AI「记住」的事在 API 调用里也生效。快照缓存 10 分钟，与桌面端同步节奏一致；拉取失败静默跳过不阻塞对话。响应头 <code>X-Wbspy-Memory</code> 标注注入版本。立即生效。" tabindex="0">?</span>
+      </div>
+
+      <div class="gwSec">
         <div class="gwTitle">服务端口 <span class="tag" id="gwPortNow">—</span></div>
         <div class="row">
           <input id="gwPortInput" placeholder="新端口（1-65535，重启后生效）" style="flex:1">
@@ -1703,6 +1708,7 @@ async function loadGateway() {
   gwState.enabled = !!gs.data.enabled;
   gwState.aggregate = gs.data.aggregate !== false;
   gwState.vision = gs.data.vision !== false;
+  gwState.memory_inject = gs.data.memory_inject !== false;
   gwState.port = gs.data.port || '';
   $('#gwPortNow').textContent = gs.data.current_port
     ? `${gs.data.current_port}（当前监听）` + (gwState.port && +gwState.port !== gs.data.current_port ? ` → 待重启切到 ${gwState.port}` : '')
@@ -1710,6 +1716,7 @@ async function loadGateway() {
   paintGwSwitch();
   paintAggSwitch();
   paintVisSwitch();
+  paintMemSwitch();
   const m = await api('/api/models');
   const list = m.data || [];
   $('#modelEmpty').hidden = list.length > 0;
@@ -1782,6 +1789,24 @@ function paintVisSwitch() {
   const b = $('#visSwitch');
   b.textContent = gwState.vision ? '识图开启 · 点击关闭' : '识图关闭 · 点击开启';
   b.style.color = gwState.vision ? 'var(--ok)' : 'var(--bad)';
+}
+
+function paintMemSwitch() {
+  const b = $('#memSwitch');
+  b.textContent = gwState.memory_inject ? '注入开启 · 点击关闭' : '注入关闭 · 点击开启';
+  b.style.color = gwState.memory_inject ? 'var(--ok)' : 'var(--bad)';
+}
+
+async function memSwitchToggle() {
+  const r = await api('/api/settings/gateway', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({memory_inject: !gwState.memory_inject})});
+  if (!r.ok) return toast(r.error, false);
+  gwState.memory_inject = !!r.data.memory_inject;
+  paintMemSwitch();
+  toast(gwState.memory_inject
+    ? '记忆注入已开启——对话自动携带账号长期记忆（立即生效）'
+    : '记忆注入已关闭——对话不再注入记忆（立即生效）');
 }
 
 async function visSwitchToggle() {

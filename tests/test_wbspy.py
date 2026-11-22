@@ -1559,7 +1559,7 @@ class TestPoolStrategies(unittest.TestCase):
         seen: list = []
 
         class _P(AccountPool):
-            def chat_failover(self, payload, session=None, lane="workbuddy"):
+            def chat_failover(self, payload, session=None, lane="workbuddy", inject=None):
                 seen.append((session, lane))
                 raise UpstreamError(503, "no_available_accounts", "无账号")
 
@@ -1824,7 +1824,7 @@ class TestGatewayLogging(unittest.TestCase):
         self.assertIn("****", e["auth"])
         # 对话失败 → 错误进日志
         class _P(AccountPool):
-            def chat_failover(self, payload, session=None, lane="workbuddy"):
+            def chat_failover(self, payload, session=None, lane="workbuddy", inject=None):
                 raise UpstreamError(503, "no_available_accounts", "无账号")
         app2 = create_app(_P([]), api_key="")
         c2 = TestClient(app2, raise_server_exceptions=False)
@@ -4395,7 +4395,7 @@ class TestEdgeSync(unittest.TestCase):
             def models(self):
                 return [{"id": "workbuddy:fast-model"}]
 
-            def chat_failover(self, payload, session=None, lane="workbuddy"):
+            def chat_failover(self, payload, session=None, lane="workbuddy", inject=None):
                 doc = self._doc
                 resp = Mock()
                 resp.json.return_value = {"choices": [
@@ -4774,3 +4774,121 @@ class TestHealthBanner(unittest.TestCase):
                          mobile={"enabled": False}, week_requests=0,
                          week_errors=0, auto_enabled=False)
         self.assertEqual(h["level"], "ok")
+
+
+class TestMemoryInject(unittest.TestCase):
+    """服务端记忆同步（foryou_prompt）与网关注入。"""
+
+    @staticmethod
+    def _doc():
+        from wbspy.document import Document
+        return Document(raw={"account": {"uid": "u-mem"}}, uid="u-mem",
+                        token="tok123")
+
+    @staticmethod
+    def _resp(payload, status=200):
+        m = Mock()
+        m.status_code = status
+        m.json.return_value = payload
+        return m
+
+    _PROFILE = {"code": 0, "data": {"user_id": "u-mem", "user_name": "x",
+                                    "foryou_prompt": "**工作背景**\n测试内容",
+                                    "version": 4,
+                                    "updated_at": "2026-08-10T05:33:08+08:00"}}
+
+    def test_fetch_profile_shape(self):
+        """GET /api/memory/profile：Bearer + x-user-id 双 uid + UA node。"""
+        import wbspy.memory as mem
+        with patch("wbspy.memory.requests.get",
+                   return_value=self._resp(self._PROFILE)) as p:
+            d = mem.fetch_profile(self._doc())
+        self.assertEqual(d["version"], 4)
+        self.assertEqual(d["foryou_prompt"], "**工作背景**\n测试内容")
+        url = p.call_args.args[0]
+        self.assertIn("/api/memory/profile", url)
+        h = p.call_args.kwargs["headers"]
+        self.assertEqual(h["x-user-id"], "u-mem, u-mem")
+        self.assertIn("Bearer tok123", h["Authorization"])
+
+    def test_fetch_failure_silent(self):
+        """404/网络异常 → None，不抛异常。"""
+        import wbspy.memory as mem
+        with patch("wbspy.memory.requests.get",
+                   return_value=self._resp({"error": 404}, status=404)):
+            self.assertIsNone(mem.fetch_profile(self._doc()))
+        with patch("wbspy.memory.requests.get",
+                   side_effect=RuntimeError("boom")):
+            self.assertIsNone(mem.fetch_profile(self._doc()))
+
+    def test_cache_ttl(self):
+        """同 uid 短时间内复用缓存，不重复发请求。"""
+        import wbspy.memory as mem
+        mem.invalidate()
+        with patch("wbspy.memory.requests.get",
+                   return_value=self._resp(self._PROFILE)) as p:
+            mem.get_profile(self._doc())
+            mem.get_profile(self._doc())
+        self.assertEqual(p.call_count, 1)
+        mem.invalidate()
+
+    def test_inject_messages_prepends_system(self):
+        """注入：头部插 system，原列表不动。"""
+        import wbspy.memory as mem
+        msgs = [{"role": "user", "content": "hi"}]
+        out = mem.inject_messages(msgs, {"version": 4, "updated_at": "t",
+                                         "foryou_prompt": "MEM"})
+        self.assertEqual(out[0]["role"], "system")
+        self.assertIn("MEM", out[0]["content"])
+        self.assertIn("v4", out[0]["content"])
+        self.assertEqual(len(out), 2)
+        self.assertEqual(msgs, [{"role": "user", "content": "hi"}])
+
+    def test_inject_payload_missing_memory_passthrough(self):
+        """无记忆（拉取失败）→ payload 原样返回。"""
+        import wbspy.memory as mem
+        doc = self._doc()
+        payload = {"messages": [{"role": "user", "content": "x"}]}
+        with patch.object(mem, "get_profile", return_value=None):
+            self.assertEqual(mem.inject_payload(doc, payload), payload)
+
+    def test_inject_payload_adds_system(self):
+        """有记忆 → messages 头部多一条 system。"""
+        import wbspy.memory as mem
+        doc = self._doc()
+        payload = {"messages": [{"role": "user", "content": "x"}]}
+        with patch.object(mem, "get_profile",
+                          return_value={"version": 7, "updated_at": "u",
+                                        "foryou_prompt": "PROMPT"}):
+            out = mem.inject_payload(doc, payload)
+        self.assertEqual(len(out["messages"]), 2)
+        self.assertIn("PROMPT", out["messages"][0]["content"])
+        self.assertIn("v7", out["messages"][0]["content"])
+
+    def test_chat_failover_calls_inject(self):
+        """chat_failover：inject 回调在选号后执行（可改 payload）。"""
+        from wbspy.pool import AccountPool
+        from wbspy.upstream import UpstreamError
+        pool = AccountPool([])
+        doc = self._doc()
+        fake_client = Mock()
+        fake_client.chat = Mock(return_value="resp")
+        from wbspy.pool import _key as _pool_key
+        pool.clients = {_pool_key(doc): fake_client}
+        pool.documents = {"u-mem": doc}
+        pool.healthy = Mock(return_value=[doc])
+        pool._lane_of = Mock(return_value="workbuddy")
+        pool.pick = Mock(return_value=doc)
+        seen = {}
+
+        def inject(d, payload):
+            seen["uid"] = d.uid
+            return {**payload, "messages": [{"role": "system", "content": "M"},
+                                            *payload["messages"]]}
+
+        out = pool.chat_failover({"messages": [{"role": "user", "content": "q"}]},
+                                 inject=inject)
+        self.assertEqual(out[0], doc)
+        self.assertEqual(seen["uid"], "u-mem")
+        sent = fake_client.chat.call_args.args[0]
+        self.assertEqual(sent["messages"][0]["content"], "M")

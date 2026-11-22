@@ -467,7 +467,8 @@ class AccountPool:
         return exc.code == "upstream_transport_error" or exc.upstream_status >= 500
 
     def chat_failover(self, payload: dict, session: str | None = None,
-                      lane: str = "workbuddy"):
+                      lane: str = "workbuddy",
+                      inject: Callable[[Document, dict], dict] | None = None):
         """带自动换号的对话。返回 (document, response)。
 
         生成器场景下 response 由调用方负责 close()。
@@ -499,6 +500,8 @@ class AccountPool:
                     alt = self.pick(fb, exclude=tried, session=None, lane=lane)
                     if alt is not None:
                         try:
+                            if inject is not None:
+                                payload = inject(alt, payload)
                             return alt, self.clients[_key(alt)].chat({**payload, "model": fb})
                         except UpstreamError as exc:
                             last_error = exc
@@ -522,6 +525,9 @@ class AccountPool:
                                     "救命续期也未救回）。请到 wbspy 账号页检查账号状态。")
             tried.add(_key(doc))
             try:
+                # 记忆注入（选号后按该账号拉取；换号容错时对新号重新注入）
+                if inject is not None:
+                    payload = inject(doc, payload)
                 return doc, self.clients[_key(doc)].chat(payload)
             except UpstreamError as exc:
                 last_error = exc

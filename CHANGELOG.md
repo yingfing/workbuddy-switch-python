@@ -2,6 +2,14 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.47] — 2026-11-22
+
+### 新增
+- **服务端记忆注入网关上下文**。侦察确认 WorkBuddy 记忆机制：记忆本体是服务端异步总结的 `foryou_prompt`（工作背景/个人背景/当前关注/近期动态四段式），接口 `GET /api/memory/profile`（Bearer + x-user-id 双 uid），客户端每 10 分钟整点轮询快照；总结时机由服务端决定（实测 API 调用后 10 分钟内 version 不变，不即时触发）。新增 `memory.py`：带 TTL 缓存（10 分钟）拉取记忆快照，`chat_failover` 选号后按账号注入 system 消息（换号容错对新号重新注入），失败静默不阻塞对话；响应头 `X-Wbspy-Memory` 标注注入版本。网关页新增「记忆注入」开关（默认开，热生效）。实测：API 对话准确引用记忆中「切换到模式」语音回退暗号。测试 284 项全绿（新增 `TestMemoryInject` 7 项）。
+
+### 变更
+- `chat_failover` 增加 `inject` 回调参数（选号后、发请求前可修改 payload）。
+
 ## [0.2.46] — 2026-11-22
 
 ### 修复
