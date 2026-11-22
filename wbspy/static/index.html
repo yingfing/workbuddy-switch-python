@@ -256,6 +256,17 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
   font-variant-numeric:tabular-nums}
 .donutWrap{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .donutWrap svg{flex:none}
+
+/* -- 问号帮助气泡（hover + 点击双支持）-- */
+.qmark{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;
+  border-radius:50%;border:1px solid var(--dim);color:var(--dim);font-size:10px;font-weight:700;
+  cursor:help;flex:none;user-select:none;margin-left:4px;transition:.15s;line-height:1;
+  vertical-align:middle}
+.qmark:hover,.qmark.on{border-color:var(--accent);color:var(--accent);transform:scale(1.12)}
+#qtip{position:fixed;max-width:360px;background:var(--panel-2);border:1px solid var(--line);
+  border-radius:8px;padding:10px 13px;font-size:12px;line-height:1.65;color:var(--text);
+  box-shadow:0 8px 28px rgba(0,0,0,.4);z-index:9999;pointer-events:none}
+#qtip code{font-size:11px}
 </style>
 </head>
 <body>
@@ -312,7 +323,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
   <!-- 登录 -->
   <section id="tab-login" hidden>
     <div class="card">
-      <h2>登录渠道 <span class="tag">扫码 → 网页 → 本机，自动回退</span></h2>
+      <h2>登录渠道 <span class="qmark" data-tip="三种方式按顺序自动回退：优先协议级扫码出码（手机 App 扫一扫），失败则退到打开官方网页登录，再退到本机浏览器抓会话。" tabindex="0">?</span></h2>
       <div class="grid" id="channels"></div>
     </div>
   </section>
@@ -335,7 +346,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
           <button class="btn sm" id="thrSaveBtn" onclick="saveThreshold(this)" hidden>保存</button>
           <span class="tag" id="thrCleanTag" style="color:var(--ok)">✓ 阈值已生效</span>
         </span>
-        <span class="hint" style="margin:0" id="distHint">「按优先级」时固定用排最前的账号，积分烧穿阈值自动换积分最高的，直到全部低于阈值（组间互不影响）。先<b>查询余额</b>再启用降级更准。</span>
+        <span class="qmark" data-tip="取号策略说明：<b>轮换</b> = 每次请求轮流用号；<b>按优先级</b> = 固定用排最前的账号，积分烧穿阈值自动换积分最高的，直到全部低于阈值（组间互不影响）；<b>均衡负载</b> = 按各号剩余额度摊派。先<b>查询余额</b>再启用降级更准。表格首列可拖动调整组内优先级。" tabindex="0">?</span>
       </div>
       <table id="accTable"><thead><tr>
         <th style="width:24px" title="拖动调整优先级（仅同渠道同地区内）"></th><th>状态</th><th>账号</th><th>渠道</th><th>地区</th><th>API</th><th>余额</th><th>操作</th>
@@ -383,10 +394,10 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       <table id="mymAccTable"><thead><tr>
         <th>账号</th><th>地区</th><th>可调模型数</th>
       </tr></thead><tbody></tbody></table>
-      <span class="tag">目录缓存 5 分钟；调用一律走网关 <code>/v1/chat/completions</code>，<code>workbuddy:*</code> 走账号池、<code>cline:*</code> 走 Cline；倍率由官方目录下发，未下发显示 —（0 = 限时免费）</span>
+      <span class="qmark" data-tip="模型目录缓存 5 分钟。调用一律走网关 <code>/v1/chat/completions</code>：<code>workbuddy:*</code> 走账号池、<code>cline:*</code> 走 Cline 官方。倍率由官方目录下发，未下发显示 —（0 = 限时免费）。" tabindex="0">?</span>
     </div>
     <div class="card">
-      <h2>聚合渠道密钥 <span class="tag">填了 Key 的渠道，其模型才会出现在网关目录</span></h2>
+      <h2>聚合渠道密钥 <span class="qmark" data-tip="聚合渠道 = 第三方模型厂商（OpenRouter / NVIDIA NIM 等）。只有填了 Key 的渠道，其模型才会出现在网关 /v1/models 目录里；免 Key 渠道留空保存即可。" tabindex="0">?</span></h2>
       <table id="keyCardTable"><thead><tr>
         <th>渠道</th><th>Key</th><th>模型数</th><th>操作</th>
       </tr></thead><tbody></tbody></table>
@@ -397,7 +408,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         <button class="btn" id="ckSaveBtn" onclick="saveChannelKey(this)" hidden>💾 保存渠道 Key</button>
         <span class="tag" id="ckCleanTag" style="color:var(--ok)">✓ 渠道密钥已保存</span>
       </div>
-      <span class="tag">渠道 ID 可输入自动补全（76 家注册表）；Key 只落本机 <code>~/.wbspy/aggregate-keys.json</code>，不会上传，保存后网关目录即时刷新</span>
+      <span class="qmark" data-tip="渠道 ID 输入时自动补全（内置 76 家注册表）。Key 只落本机 <code>~/.wbspy/aggregate-keys.json</code>，不会上传；保存后网关目录即时刷新，无需重启。" tabindex="0">?</span>
     </div>
   </section>
 
@@ -410,7 +421,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         <button class="btn ghost" id="autoPoll" onclick="autoToggle()">自动签到：关</button>
         <span class="pill" id="autoState"></span>
         <button class="btn ghost" onclick="serviceRestart()">⟳ 重启服务</button>
-        <span class="tag">开关与节奏落盘 config.json，服务重启自动恢复</span>
+        <span class="qmark" data-tip="自动签到开关与下面的托管节奏、结果推送地址全部落盘 <code>config.json</code>，服务重启后自动恢复，不用重新配置。" tabindex="0">?</span>
       </div>
       <div class="row" style="margin-bottom:12px">
         <b>托管节奏：</b>
@@ -430,30 +441,30 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         </select>
         <input id="pollCustom" type="number" min="5" max="1440" placeholder="分钟（5~1440）" style="width:150px" hidden>
         <input id="pollDaily" type="time" value="09:00" hidden>
-        <span class="tag">轮询模式：每轮查签到接口，未签自动补签，每天首轮全量托管；定点模式：每天该时刻跑一次全量托管</span>
+        <span class="qmark" data-tip="<b>固定间隔轮询</b>：每轮只查签到接口判断是否已签，未签才全量托管；每天首轮全量托管（签到/任务/旅行/抽奖）。<b>每天定点</b>：只在设定时刻跑一次全量托管，适合额度敏感、不想频繁打接口的场景。自定义范围 5~1440 分钟。" tabindex="0">?</span>
       </div>
       <div class="row" style="margin-bottom:12px">
         <b>结果推送：</b>
         <input id="pollNotify" placeholder="webhook 地址（每轮托管完 POST JSON，留空关闭）" style="flex:1">
-        <span class="tag">填 Server酱/企业微信/自建接口等</span>
+        <span class="qmark" data-tip="每轮托管完成后向此地址 POST 一份 JSON 结果摘要。可填 Server酱、企业微信机器人、自建 webhook 等，留空关闭推送。" tabindex="0">?</span>
       </div>
       <div class="row" style="margin-bottom:12px">
         <button class="btn" id="pollSaveBtn" onclick="pollSave(this)" hidden>💾 保存并生效</button>
         <span class="pill" id="pollCleanTag" style="color:var(--ok)">✓ 节奏与推送已保存并生效</span>
-        <span class="tag">改上面任意一项后，这里会亮起保存按钮——没亮就是没改动</span>
+        <span class="qmark" data-tip="改动节奏或推送地址后，保存按钮才会亮起；没亮就说明当前配置已是保存过的。保存立即生效，无需重启。" tabindex="0">?</span>
       </div>
-      <div class="pill">历史轮次看下面的「运行历史」；右下角 📜 悬浮钮任何页面可开日志抽屉。</div>
+      <div class="pill">历史轮次看下面的「运行历史」；右下角 📜 悬浮钮任何页面可开日志抽屉。<span class="qmark" data-tip="每轮托管的时间线、逐账号结果、报错详情：短日志看「运行历史」表格，完整输出点右下角 📜 打开日志抽屉（实时/历史/调试三个页签）。" tabindex="0">?</span></div>
     </div>
     <div class="card">
       <h2>手机连接 <span class="tag">手机 App「连接电脑端」直连本网关 · edge-sync 协议</span></h2>
       <div class="row" style="margin-bottom:12px">
         <button class="btn ghost" id="mobileConn" onclick="mobileToggle()">手机连接：关</button>
         <span class="pill" id="mobileState"></span>
-        <span class="tag">开启后本机伪装成一台桌面端上线：手机「连接电脑端」即可检测到并派任务（消耗账号池额度）</span>
+        <span class="qmark" data-tip="开启后本机会伪装成一台 WorkBuddy 桌面端登录上线，手机 App 的「连接电脑端」就能检测到这台「电脑」并给它派任务，任务由账号池里的账号执行（消耗对应账号额度）。协议为 edge-sync，详见 <code>docs/mobile-pairing-protocol.md</code>。" tabindex="0">?</span>
       </div>
       <div class="row" style="margin-bottom:4px">
         <b>设备：</b><span id="mobileDevice" style="color:var(--dim)">—</span>
-        <span class="tag">设备身份持久化，对手机始终是同一台电脑</span>
+        <span class="qmark" data-tip="设备 ID 持久化保存在 <code>~/.wbspy/</code>，重启服务后对手机仍然是同一台「电脑」，不会在手机端反复出现新设备。" tabindex="0">?</span>
       </div>
       <div class="row" id="mobileErrRow" style="margin-bottom:4px" hidden>
         <b style="color:var(--bad)">最近异常：</b><span id="mobileErr" style="color:var(--bad)"></span>
@@ -467,7 +478,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         color:var(--log-fg);font:11.5px/1.7 ui-monospace,Consolas,monospace;white-space:pre-wrap">暂无日志。</pre>
     </div>
     <div class="card">
-      <h2>运行历史 <span class="tag">最近 10 轮 · 落盘 ~/.wbspy/automation-history.json</span></h2>
+      <h2>运行历史 <span class="qmark" data-tip="保留最近 10 轮，落盘 <code>~/.wbspy/automation-history.json</code>，重启不丢。" tabindex="0">?</span></h2>
       <table id="autoHistTable"><thead><tr>
         <th>时间</th><th>概况</th><th>各账号结果</th>
       </tr></thead><tbody></tbody></table>
@@ -478,7 +489,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
   <!-- 切换 -->
   <section id="tab-switch" hidden>
     <div class="card">
-      <h2>桌面客户端账号切换 <span class="tag">保留机器本地元数据，只换登录字段</span></h2>
+      <h2>桌面客户端账号切换 <span class="qmark" data-tip="把桌面客户端当前登录的账号存成快照，之后可一键恢复。只替换登录字段，机器本地元数据（设备指纹等）原样保留，降低风控敏感度。" tabindex="0">?</span></h2>
       <div class="row" style="margin-bottom:12px">
         <select id="snapRegion"><option value="cn">国内版</option><option value="global">国际版</option></select>
         <input id="snapName" placeholder="快照名（可留空自动命名）" style="width:220px">
@@ -501,7 +512,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
         <code>GET /v1/models</code> · <code>POST /v1/embeddings</code></p>
 
       <div class="gwSec">
-        <div class="gwTitle">连接信息 <span class="tag">给客户端填的，只读</span></div>
+        <div class="gwTitle">连接信息 <span class="qmark" data-tip="在 ChatBox / NextChat / Cherry Studio 等客户端里按这三项填：地址、API Key、模型从「我的模型」页挑。本块只读。" tabindex="0">?</span></div>
         <div class="gwRow"><span class="gwLabel">网关地址</span><code id="gwUrl">—</code>
           <button class="btn sm ghost" onclick="copyField('gwUrl',this)">复制</button></div>
         <div class="gwRow"><span class="gwLabel">API Key</span><code id="gwKey">—</code>
@@ -516,22 +527,22 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
           <button class="btn" id="gwKeySaveBtn" onclick="gwKeySave(this)" hidden>保存密钥</button>
           <span class="tag" id="gwKeyCleanTag" style="color:var(--ok)">✓ 当前密钥已生效</span>
         </div>
-        <div class="hint">客户端调用需带 <code>Authorization: Bearer &lt;key&gt;</code>；保存立即生效，无需重启。</div>
+        <span class="qmark" data-tip="客户端调用需带 <code>Authorization: Bearer &lt;key&gt;</code> 请求头。留空恢复默认 <code>workbuddy</code>。保存立即生效，无需重启。" tabindex="0">?</span>
       </div>
 
       <div class="gwSec">
         <div class="gwTitle">对外网关 <button class="btn sm" id="gwSwitch" onclick="gwSwitchToggle()">…</button></div>
-        <div class="hint">关闭后 /v1 一律返回 404（客户端无法调用），管理界面不受影响；立即生效无需重启。</div>
+        <span class="qmark" data-tip="对外开关：关闭后网关 <code>/v1</code> 一律返回 404（任何客户端都无法调用），面板管理界面不受影响。立即生效无需重启。" tabindex="0">?</span>
       </div>
 
       <div class="gwSec">
         <div class="gwTitle">聚合渠道模型 <button class="btn sm" id="aggSwitch" onclick="aggSwitchToggle()">…</button></div>
-        <div class="hint">关闭后 /v1/models 只暴露账号池（WorkBuddy / Cline）的模型，目录更清爽；已配置 key 的厂商想用随时再开。</div>
+        <span class="qmark" data-tip="聚合开关：关闭后 <code>/v1/models</code> 只暴露账号池（WorkBuddy / Cline）的模型，目录更清爽；已配置 Key 的厂商渠道随时可以再打开。" tabindex="0">?</span>
       </div>
 
       <div class="gwSec">
         <div class="gwTitle">视觉透传（识图） <button class="btn sm" id="visSwitch" onclick="visSwitchToggle()">…</button></div>
-        <div class="hint">开启后 WorkBuddy 泳道模型在目录里声明视觉能力（<code>input: ["text","image"]</code>），客户端可传图、图片原样发往上游；关闭后图片在网关剥成文字占位，上游零图片流量。立即生效。</div>
+        <span class="qmark" data-tip="识图开关：开启后 WorkBuddy 泳道模型在目录里声明视觉能力（<code>input: [&quot;text&quot;,&quot;image&quot;]</code>），客户端可传图，图片原样发往上游；关闭后图片在网关被剥成文字占位，上游零图片流量。立即生效。" tabindex="0">?</span>
       </div>
 
       <div class="gwSec">
@@ -541,7 +552,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
           <button class="btn" id="gwPortSaveBtn" onclick="gwPortSave(this)" hidden>保存端口</button>
           <span class="tag" id="gwPortCleanTag" style="color:var(--ok)">✓ 当前端口已生效</span>
         </div>
-        <div class="hint">保存前自动试绑：端口被占用会拒绝保存；保存后按提示重启服务即切换到新端口。</div>
+        <span class="qmark" data-tip="修改服务监听端口。保存前自动试绑：端口被占用会拒绝保存；保存后按提示重启服务即切换到新端口（范围 1-65535，建议 &gt;1024 免管理员权限）。" tabindex="0">?</span>
       </div>
 
       <div class="gwSec">
@@ -551,13 +562,12 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
           <button class="btn" id="pkSaveBtn" onclick="panelKeySave(this)" hidden>保存密钥</button>
           <button class="btn ghost" onclick="panelKeyClear(this)">一键关闭</button>
         </div>
-        <div class="hint">可选功能，<b>默认关闭</b>。开启后本面板所有管理接口要求密钥（网关 /v1 不受影响）；输入一次本浏览器自动记住，不影响日常使用。用家庭路由器做设备隔离已足够时无需开启。</div>
+        <span class="qmark" data-tip="面板锁：可选功能，<b>默认关闭</b>。开启后本面板所有管理接口要求密钥（网关 /v1 不受影响）；输入一次本浏览器自动记住，不影响日常使用。家庭路由器已做设备隔离时无需开启。" tabindex="0">?</span>
       </div>
 
       <div class="gwSec">
         <div class="gwTitle">11128 取证 <button class="btn sm" onclick="loadForensics()">刷新留存</button></div>
-        <div class="hint">对话被 11128 拒时自动把出站请求体留存在服务器 <code>~/.wbspy/denials/</code>（最近 5 份）；
-          把可疑消息段贴进探针逐段验证——403 的那段就是新指纹所在，200 的排除。</div>
+        <span class="qmark" data-tip="指纹排查工具：对话被 11128 错误拒绝时，出站请求体会自动留存在服务器 <code>~/.wbspy/denials/</code>（最近 5 份）。把可疑消息段贴进探针逐段验证——返回 403 的那段就是触发新指纹的内容，200 的排除。" tabindex="0">?</span>
         <div id="forensicsList" style="margin:6px 0"></div>
         <textarea id="probeInput" class="inp" rows="4" style="width:100%"
                   placeholder='贴一段消息 JSON：[{"role":"system","content":"..."}]；或直接贴纯文本（自动包成 user 消息）'></textarea>
@@ -573,7 +583,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       <div class="empty" id="modelEmpty" hidden>暂无模型（需要已授权账号）</div>
     </div>
     <div class="card">
-      <h2>用量账本 <span class="tag">近 7 天 · 请求/换号救回/token</span>
+      <h2>用量账本 <span class="qmark" data-tip="近 7 天逐日统计：请求数、错误数、换号救回（主账号失败自动换号成功的次数）、token 进出量。右上角可导出 CSV。" tabindex="0">?</span>
         <a href="/api/usage/export"><button class="btn sm ghost">⬇ 导出 CSV</button></a></h2>
       <table id="usageTable"><thead><tr>
         <th>日期</th><th>请求</th><th>错误</th><th>换号救回</th><th>token（进/出）</th>
@@ -601,6 +611,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
 
 <!-- 全局日志：悬浮按钮 + 侧滑抽屉 -->
 <div id="toastBox" aria-live="polite"></div>
+<div id="qtip" role="tooltip" hidden></div>
 <button id="logFab" onclick="toggleLogDrawer()" title="运行日志">
   📜<span id="logBadge" hidden></span>
 </button>
@@ -624,7 +635,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
         <button class="btn sm" id="dbgToggle" onclick="toggleDebug()"></button>
         <button class="btn sm ghost" onclick="clearDebug()">清空</button>
-        <span class="tag">记录客户端对网关 /v1 的每次请求（密钥自动脱敏，环形 300 条）</span>
+        <span class="qmark" data-tip="记录客户端对网关 /v1 的每次请求：模型、耗时、状态、报错详情，密钥自动脱敏，环形保留 300 条。排查「客户端调不通」先看这里。" tabindex="0">?</span>
       </div>
       <div id="ldDebugList" class="log" style="max-height:calc(100vh - 220px)">暂无调试记录。</div>
     </div>
@@ -633,6 +644,45 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
 
 <script>
 const $ = s => document.querySelector(s);
+
+// -- 问号帮助气泡（hover + 点击双支持，单例定位）--
+const qtipEl = $('#qtip');
+let qtipMark = null;
+function qtipShow(mark){
+  qtipMark = mark;
+  qtipEl.innerHTML = mark.dataset.tip;
+  qtipEl.hidden = false;
+  qtipEl.style.visibility = 'hidden';
+  requestAnimationFrame(() => {
+    if (qtipMark !== mark) return;
+    const r = mark.getBoundingClientRect();
+    const tw = qtipEl.offsetWidth, th = qtipEl.offsetHeight;
+    let left = Math.max(10, Math.min(r.left - 20, innerWidth - tw - 10));
+    let top = r.bottom + 8;
+    if (top + th > innerHeight - 10) top = Math.max(10, r.top - th - 8);
+    qtipEl.style.left = left + 'px';
+    qtipEl.style.top = top + 'px';
+    qtipEl.style.visibility = '';
+  });
+}
+function qtipHide(){ qtipEl.hidden = true; qtipMark = null; }
+document.addEventListener('mouseover', e => {
+  const m = e.target.closest('.qmark');
+  if (m && matchMedia('(hover:hover)').matches) qtipShow(m);
+});
+document.addEventListener('mouseout', e => {
+  const m = e.target.closest('.qmark');
+  if (m && !m.contains(e.relatedTarget) && matchMedia('(hover:hover)').matches) qtipHide();
+});
+document.addEventListener('click', e => {
+  const m = e.target.closest('.qmark');
+  if (!m) { if (qtipMark) qtipHide(); return; }
+  if (matchMedia('(hover:hover)').matches) { m.classList.add('on'); qtipShow(m); }
+  else { m.classList.toggle('on') ? qtipShow(m) : qtipHide(); }
+});
+addEventListener('scroll', () => { if (qtipMark) qtipHide(); }, true);
+addEventListener('resize', () => { if (qtipMark) qtipHide(); });
+
 const themeBtn = $('#themeBtn');
 function applyTheme(t){
   document.documentElement.dataset.theme = t;
