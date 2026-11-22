@@ -887,7 +887,7 @@ function renderDashCards(d) {
     {lbl:'最近签到', num:nAcc ? `${okN}<span class="unit">/${nAcc}</span>` : '—', sub:when + (d.auto_enabled ? ' · 自动化运行中' : ' · 自动化未开启'), tab:'auto'},
     {lbl:'积分余额', num:acc.credits_sum != null ? _dashFmt(acc.credits_sum) : '—', sub:`${acc.credits_known ?? 0} 个账号有缓存余额`, tab:'accounts'},
     {lbl:'今日请求', num:_dashFmt(usage.today_requests ?? 0), sub:`7 日 ${_dashFmt(usage.week_requests||0)} 次 · ${usage.week_errors||0} 错误`, tab:'gateway'},
-    {lbl:'手机连接', num:mobile.connected ? '在线' : (mobile.enabled ? '待连' : '关闭'), sub:mobile.enabled ? '手机 App「连接电脑端」可直连' : '设置里开启后手机可连', tab:'login'},
+    {lbl:'手机连接', num:mobile.connected ? '在线' : (mobile.enabled ? '待连' : '关闭'), sub:mobile.enabled ? '手机 App「连接电脑端」可直连' : '在「网关」页打开开关即可', tab:'gateway'},
   ];
   $('#dashCards').innerHTML = cards.map((c,i) => `
     <div class="dashCard" onclick="gotoTab('${c.tab}')">
