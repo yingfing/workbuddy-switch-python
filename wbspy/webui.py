@@ -127,13 +127,17 @@ def _round_health(per_account: dict) -> tuple[int, int]:
 
 def health_state(total: int, api_ready: int, checkin: dict, mobile: dict,
                  week_requests: int, week_errors: int,
-                 auto_enabled: bool) -> dict:
+                 auto_enabled: bool,
+                 recent_requests: int = 0, recent_errors: int = 0,
+                 recent_window_s: int = 600) -> dict:
     """概览页顶部「对号/叉号」横幅的状态判定（纯函数，便于测试）。
 
     error = 硬故障：全部账号 token 失效 / 自动化开启但本轮签到全挂 /
-            手机网关报错。
+            手机网关报错 / 最近几分钟请求错误率 ≥50%（上游封控或服务
+            中断——token 还没被判失效但请求已经在批量失败，只有实时
+            可用率能抓住这种「账面正常、实际不可用」的封控）。
     warn  = 有小问题但不影响运行：部分账号失效 / 部分签到失败 /
-            近 7 日请求错误率高（≥5 次且 >20%）。
+            最近几分钟错误率 ≥20% / 近 7 日请求错误率高（≥5 次且 >20%）。
     ok    = 一切完美。
     """
     issues: list[tuple[str, str]] = []
@@ -153,6 +157,14 @@ def health_state(total: int, api_ready: int, checkin: dict, mobile: dict,
         err = (mobile.get("last_error") or "").strip()
         if err:
             issues.append(("error", f"手机网关异常：{err}"))
+    if recent_requests >= 5 and recent_errors / recent_requests >= 0.5:
+        issues.append(("error",
+                       f"最近 {max(1, round(recent_window_s / 60))} 分钟请求错误率 "
+                       f"{recent_errors}/{recent_requests}（≥50%）——上游可能已封控或服务中断"))
+    elif recent_requests >= 5 and recent_errors / recent_requests >= 0.2:
+        issues.append(("warn",
+                       f"最近 {max(1, round(recent_window_s / 60))} 分钟请求错误率 "
+                       f"{recent_errors}/{recent_requests} 偏高"))
     if week_requests >= 5 and week_errors / week_requests > 0.2:
         issues.append(("warn",
                        f"近 7 日网关请求错误率 {week_errors}/{week_requests}"))
@@ -351,6 +363,7 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         last_round = _last_checkin_round()
         mobile_state = {"enabled": mobile_enabled,
                         "last_error": gw_state.get("last_error") or ""}
+        recent = LEDGER.recent_stats()
         return _ok({
             "version": __version__,
             "accounts": {"total": len(rows), "api_ready": api_ready,
@@ -360,7 +373,8 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
             "usage": {"series": series, "today_requests": today_req,
                       "week_requests": sum(s["requests"] for s in series),
                       "week_tokens": sum(s["tokens"] for s in series),
-                      "week_errors": sum(s["errors"] for s in series)},
+                      "week_errors": sum(s["errors"] for s in series),
+                      "recent": recent},
             "checkin": last_round,
             "pool": {"alive": alive, "total": len(rows)},
             "mobile": {"enabled": mobile_enabled,
@@ -372,7 +386,10 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
                 mobile=mobile_state,
                 week_requests=sum(s["requests"] for s in series),
                 week_errors=sum(s["errors"] for s in series),
-                auto_enabled=auto_enabled),
+                auto_enabled=auto_enabled,
+                recent_requests=recent["requests"],
+                recent_errors=recent["errors"],
+                recent_window_s=recent["window_s"]),
         })
 
     @app.get("/api/accounts")

@@ -622,6 +622,9 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                                            inject=inject_cb)
         except UpstreamError as exc:
             _gw_log(f"对话失败：{model} → HTTP {exc.status} {exc.code}：{exc.message[:160]}")
+            # 失败请求也要入账：封控/限流/失效不进统计的话，健康横幅
+            # 就看不见「最近正在报错」，7 日错误率与实时可用率全失真
+            LEDGER.record(model=model, provider=lane, error=exc.code)
             return _error(exc)
         _gw_log(f"对话：{model} ← 「{doc.label()}」"
                 + (f"（记忆 {mem_hdr()} 已注入）" if mem_hit else ""))
@@ -673,6 +676,7 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
         try:
             return pool.client(doc).embeddings(model, [str(i) for i in inputs])
         except UpstreamError as exc:
+            LEDGER.record(model=model, provider="workbuddy", error=exc.code)
             return _error(exc)
 
     @app.get("/v1/embedding-models")

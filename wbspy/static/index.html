@@ -882,11 +882,15 @@ function renderDashCards(d) {
   }).length;
   const round = ch.at ? new Date(ch.at) : null;
   const when = round ? `最近 ${String(round.getHours()).padStart(2,'0')}:${String(round.getMinutes()).padStart(2,'0')}` : '还没跑过';
+  const recent = usage.recent || {requests: 0, errors: 0};
+  const recentTxt = recent.requests >= 5
+      ? `近 10 分钟可用率 ${Math.round((1 - recent.errors / recent.requests) * 100)}%`
+      : '近 10 分钟暂无请求';
   const cards = [
     {lbl:'账号池', num:String(acc.total ?? 0), sub:`${acc.api_ready ?? 0} 个可用 · ${(Object.keys(acc.by_channel||{})).length} 个渠道`, tab:'accounts'},
     {lbl:'最近签到', num:nAcc ? `${okN}<span class="unit">/${nAcc}</span>` : '—', sub:when + (d.auto_enabled ? ' · 自动化运行中' : ' · 自动化未开启'), tab:'auto'},
     {lbl:'积分余额', num:acc.credits_sum != null ? _dashFmt(acc.credits_sum) : '—', sub:`${acc.credits_known ?? 0} 个账号有缓存余额`, tab:'accounts'},
-    {lbl:'今日请求', num:_dashFmt(usage.today_requests ?? 0), sub:`7 日 ${_dashFmt(usage.week_requests||0)} 次 · ${usage.week_errors||0} 错误`, tab:'gateway'},
+    {lbl:'今日请求', num:_dashFmt(usage.today_requests ?? 0), sub:`${recentTxt} · 7 日 ${_dashFmt(usage.week_requests||0)} 次 ${usage.week_errors||0} 错`, tab:'gateway'},
     {lbl:'手机连接', num:mobile.connected ? '在线' : (mobile.enabled ? '待连' : '关闭'), sub:mobile.enabled ? '手机 App「连接电脑端」可直连' : '在「网关」页打开开关即可', tab:'gateway'},
   ];
   $('#dashCards').innerHTML = cards.map((c,i) => `

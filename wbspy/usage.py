@@ -15,14 +15,17 @@ from pathlib import Path
 
 USAGE_PATH = Path.home() / ".wbspy" / "usage.json"
 RETENTION_DAYS = 90
+RECENT_WINDOW_S = 600            # 最近 10 分钟滑动窗口（瞬时封控/中断检测）
 
 
 class UsageLedger:
     def __init__(self, path: Path = USAGE_PATH):
+        import collections
         self.path = path
         self._lock = threading.Lock()
         self._today = time.strftime("%Y-%m-%d")
         self._data: dict = self._load()
+        self._recent: collections.deque = collections.deque()  # (ts, 0|1)
 
     # -- 持久化 --------------------------------------------------------------
 
@@ -80,7 +83,23 @@ class UsageLedger:
                                                      {"requests": 0, "tokens": 0})
                 slot["requests"] += 1
                 slot["tokens"] += prompt_tokens + completion_tokens
+            self._recent.append((time.time(), 1 if error else 0))
             self._save()
+
+    def recent_stats(self, window_s: int = RECENT_WINDOW_S) -> dict:
+        """最近 window_s 秒内的网关请求/错误（内存滑动窗口，重启清零）。
+
+        用于概览页「最近几分钟可用率」：瞬时封控（上游 403）、服务中断
+        这类「7 日均值看不见」的硬故障在此现形。打点在 record() 内，
+        网关成功/失败路径都进（失败路径 v0.2.53 起补记）。
+        """
+        with self._lock:
+            cutoff = time.time() - window_s
+            while self._recent and self._recent[0][0] < cutoff:
+                self._recent.popleft()
+            total = len(self._recent)
+            errors = sum(e for _, e in self._recent)
+        return {"requests": total, "errors": errors, "window_s": window_s}
 
     # -- 读取 / 导出 ------------------------------------------------------------
 

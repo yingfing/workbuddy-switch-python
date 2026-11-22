@@ -4775,6 +4775,64 @@ class TestHealthBanner(unittest.TestCase):
                          week_errors=0, auto_enabled=False)
         self.assertEqual(h["level"], "ok")
 
+    def test_error_on_recent_outage(self):
+        """最近 10 分钟错误率 ≥50%（≥5 次）→ 红叉：上游封控/服务中断。"""
+        from wbspy.webui import health_state
+        h = health_state(total=1, api_ready=1, checkin={},
+                         mobile={"enabled": False}, week_requests=100,
+                         week_errors=0, auto_enabled=False,
+                         recent_requests=10, recent_errors=6, recent_window_s=600)
+        self.assertEqual(h["level"], "error")
+        self.assertIn("6/10", h["issues"][0]["text"])
+        self.assertIn("封控", h["issues"][0]["text"])
+
+    def test_warn_on_recent_elevated_errors(self):
+        """最近 10 分钟错误率 ≥20% 但 <50% → 黄牌。"""
+        from wbspy.webui import health_state
+        h = health_state(total=1, api_ready=1, checkin={},
+                         mobile={"enabled": False}, week_requests=0,
+                         week_errors=0, auto_enabled=False,
+                         recent_requests=10, recent_errors=3)
+        self.assertEqual(h["level"], "warn")
+        self.assertIn("3/10", h["issues"][0]["text"])
+
+    def test_recent_small_sample_no_noise(self):
+        """最近窗口样本 <5 次不判定（避免单次失败拉红横幅）。"""
+        from wbspy.webui import health_state
+        h = health_state(total=1, api_ready=1, checkin={},
+                         mobile={"enabled": False}, week_requests=0,
+                         week_errors=0, auto_enabled=False,
+                         recent_requests=2, recent_errors=2)
+        self.assertEqual(h["level"], "ok")
+
+    def test_recent_failure_beats_clean_week(self):
+        """7 日干净但最近几分钟全错（封控刚发生）→ 红叉，不是对号。"""
+        from wbspy.webui import health_state
+        h = health_state(total=1, api_ready=1, checkin=self._ck(),
+                         mobile={"enabled": False}, week_requests=50,
+                         week_errors=0, auto_enabled=True,
+                         recent_requests=8, recent_errors=8, recent_window_s=600)
+        self.assertEqual(h["level"], "error")
+
+    def test_ledger_recent_stats_window(self):
+        """LEDGER.recent_stats：只统计窗口内的请求，过期样本滑出。"""
+        import time as _time
+        from wbspy.usage import UsageLedger
+        import pathlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            led = UsageLedger(pathlib.Path(td) / "u.json")
+            led.record(model="m", error="upstream_error")
+            led.record(model="m")
+            led.record(model="m")
+            st = led.recent_stats()
+            self.assertEqual((st["requests"], st["errors"]), (3, 1))
+            # 时间推过窗口 → 全部滑出
+            with patch("wbspy.usage.time.time",
+                       return_value=_time.time() + 700):
+                st2 = led.recent_stats()
+            self.assertEqual(st2["requests"], 0)
+
 
 class TestMemoryInject(unittest.TestCase):
     """服务端记忆同步（foryou_prompt）与网关注入。"""
