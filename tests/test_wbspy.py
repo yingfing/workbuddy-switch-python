@@ -4836,13 +4836,48 @@ class TestMemoryInject(unittest.TestCase):
         """注入：头部插 system，原列表不动。"""
         import wbspy.memory as mem
         msgs = [{"role": "user", "content": "hi"}]
-        out = mem.inject_messages(msgs, {"version": 4, "updated_at": "t",
-                                         "foryou_prompt": "MEM"})
+        out = mem.inject_messages(msgs, [("acc-A", {"version": 4, "updated_at": "t",
+                                                    "foryou_prompt": "MEM"})])
         self.assertEqual(out[0]["role"], "system")
         self.assertIn("MEM", out[0]["content"])
         self.assertIn("v4", out[0]["content"])
         self.assertEqual(len(out), 2)
         self.assertEqual(msgs, [{"role": "user", "content": "hi"}])
+
+    def test_inject_merges_peer_accounts(self):
+        """多账号合并：选中号记忆排最前，其余账号段落标注来源。"""
+        import wbspy.memory as mem
+        doc = self._doc()
+        from wbspy.document import Document
+        peer = Document(raw={"account": {"uid": "u-peer"}}, uid="u-peer",
+                        token="tok2")
+        payload = {"messages": [{"role": "user", "content": "x"}]}
+        profs = {"u-mem": {"version": 7, "updated_at": "u", "foryou_prompt": "MAIN-MEM"},
+                 "u-peer": {"version": 3, "updated_at": "u", "foryou_prompt": "PEER-MEM"}}
+        with patch.object(mem, "get_profile",
+                          side_effect=lambda d: profs.get(d.uid)):
+            out = mem.inject_payload(doc, payload, peers=[peer])
+        content = out["messages"][0]["content"]
+        self.assertIn("MAIN-MEM", content)
+        self.assertIn("PEER-MEM", content)
+        self.assertIn("2 个账号", content)
+        self.assertLess(content.index("MAIN-MEM"), content.index("PEER-MEM"))
+
+    def test_inject_peer_failure_skipped(self):
+        """其余账号拉取失败 → 只注入选中账号，不阻塞。"""
+        import wbspy.memory as mem
+        doc = self._doc()
+        from wbspy.document import Document
+        peer = Document(raw={"account": {"uid": "u-peer2"}}, uid="u-peer2",
+                        token="tok3")
+        payload = {"messages": [{"role": "user", "content": "x"}]}
+        with patch.object(mem, "get_profile",
+                          side_effect=lambda d: ({"version": 1, "updated_at": "",
+                                                  "foryou_prompt": "SOLO"}
+                                                 if d.uid == "u-mem" else None)):
+            out = mem.inject_payload(doc, payload, peers=[peer])
+        self.assertIn("SOLO", out["messages"][0]["content"])
+        self.assertNotIn("u-peer2", out["messages"][0]["content"])
 
     def test_inject_payload_missing_memory_passthrough(self):
         """无记忆（拉取失败）→ payload 原样返回。"""

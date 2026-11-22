@@ -595,8 +595,13 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                 from . import memory as _memory
                 base_n = len(raw.get("messages") or [])
 
-                def inject_cb(d, payload):     # noqa: E306 — 选号后按账号注入
-                    out = _memory.inject_payload(d, payload)
+                def inject_cb(d, payload):     # noqa: E306 — 选号后合并注入全池记忆
+                    # 其余 WorkBuddy 账号的记忆也一并注入（选中号排最前）：
+                    # 调出哪个号都能用上别的号记住的事
+                    peers = [x for x in pool.documents.values()
+                             if getattr(x, "channel_id", None)
+                             not in ("cline", "qoder", "qodercn", "zcode")]
+                    out = _memory.inject_payload(d, payload, peers=peers)
                     try:
                         if len(out.get("messages") or []) > base_n:
                             prof = _memory.get_profile(d)

@@ -15,15 +15,17 @@
 
 ## 网关注入
 
-``inject_payload(doc, payload)`` 在对话 messages 头部插入一条 system 消息
-（含记忆全文与更新时间），让 /v1 客户端也能「记得」手机端让 AI 记住的事。
-带 TTL 缓存（10 分钟，对齐桌面端节奏），失败静默不阻塞对话。
+``inject_payload(doc, payload, peers=...)`` 在对话 messages 头部插入一条 system
+消息，把账号池**全部** WorkBuddy 账号的记忆合并注入（每段标注来源账号与版本）
+——调出哪个号都能用上别的号记住的事。选中账号排在最前。带 TTL 缓存（10 分钟，
+对齐桌面端节奏），其余账号记忆并行拉取，失败静默不阻塞对话。
 """
 from __future__ import annotations
 
 import threading
 import time
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Iterable
 
 import requests
 
@@ -86,32 +88,66 @@ def invalidate(uid: str | None = None) -> None:
             _cache.pop(uid, None)
 
 
-def _memory_text(profile: dict[str, Any]) -> str:
+def _label(doc) -> str:
+    """账号展示名（label() 异常时退回 uid 前 12 位）。"""
+    try:
+        return doc.label()
+    except Exception:
+        return str(getattr(doc, "uid", "?"))[:12]
+
+
+def _seg_text(label: str, profile: dict[str, Any]) -> str:
     ts = str(profile.get("updated_at") or "").replace("T", " ")
-    head = "【用户长期记忆】（WorkBuddy 记忆系统"
+    head = f"── 账号 {label}"
     if profile.get("version") is not None:
         head += f" · v{profile['version']}"
     if ts:
         head += f" · 更新于 {ts}"
-    head += "）\n以下是跨对话有效的既有了解；用户在任一端让你「记住」的事也会总结进这里："
     return head + "\n" + profile["foryou_prompt"]
 
 
-def inject_messages(messages: list, profile: dict[str, Any]) -> list:
+def _memory_text(entries: list[tuple[str, dict[str, Any]]]) -> str:
+    head = (f"【用户长期记忆】（WorkBuddy 记忆系统 · {len(entries)} 个账号）\n"
+            "以下是跨对话有效的既有了解；用户在任一端让你「记住」的事也会总结进这里。"
+            "各账号记忆相互独立，段落开头标注了来源账号：")
+    return head + "\n" + "\n\n".join(_seg_text(lb, p) for lb, p in entries)
+
+
+def inject_messages(messages: list, entries: list[tuple[str, dict[str, Any]]]) -> list:
     """在 messages 头部插入记忆 system 消息（返回新列表，不改原列表）。"""
     if not isinstance(messages, list):
         return messages
-    mem = {"role": "system", "content": _memory_text(profile)}
+    mem = {"role": "system", "content": _memory_text(entries)}
     return [mem, *messages]
 
 
-def inject_payload(doc, payload: dict) -> dict:
-    """chat_failover 注入回调：按选中账号把记忆插进 payload（选号后才注入，
-    换号容错时对新号重新注入，保证记忆与账号一致）。失败静默原样返回。"""
-    profile = get_profile(doc)
-    if profile is None:
+def collect_entries(doc, peers: Iterable | None = None) -> list:
+    """收集选中账号 + 其余账号的记忆快照，选中账号排最前。
+
+    peers 并行拉取（TTL 缓存复用），失败静默跳过该账号。
+    返回 [(label, profile), …]；全空返回 []。
+    """
+    entries: list[tuple[str, dict[str, Any]]] = []
+    main = get_profile(doc)
+    if main:
+        entries.append((_label(doc), main))
+    peer_docs = [d for d in (peers or []) if d is not doc]
+    if peer_docs:
+        with ThreadPoolExecutor(max_workers=min(6, len(peer_docs))) as ex:
+            for p_doc, prof in zip(peer_docs, ex.map(get_profile, peer_docs)):
+                if prof:
+                    entries.append((_label(p_doc), prof))
+    return entries
+
+
+def inject_payload(doc, payload: dict, peers: Iterable | None = None) -> dict:
+    """chat_failover 注入回调：合并选中账号与其余账号的记忆插进 payload
+    （选号后才注入，换号容错时对新号重新收集，保证选中账号的记忆排最前）。
+    失败静默原样返回。"""
+    entries = collect_entries(doc, peers)
+    if not entries:
         return payload
     msgs = payload.get("messages")
     if not isinstance(msgs, list):
         return payload
-    return {**payload, "messages": inject_messages(msgs, profile)}
+    return {**payload, "messages": inject_messages(msgs, entries)}
