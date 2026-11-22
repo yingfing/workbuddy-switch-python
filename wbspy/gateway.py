@@ -589,9 +589,62 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             raise HTTPException(400, "model 不能为空。")
         model = raw["model"]
 
+        # 会话键：客户端可显式传 x-wbspy-session；缺省用「system+首条消息」
+        # 指纹——同一段对话续发时前缀稳定，粘住同一账号保护上游 prompt 缓存
+        session = request.headers.get("x-wbspy-session") or None
+        if not session:
+            msgs = raw.get("messages")
+            if isinstance(msgs, list) and msgs:
+                import hashlib
+                seed = json.dumps(msgs[:2], ensure_ascii=False, default=str)[:2000]
+                session = "auto:" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+
         # ── 路由一：聚合渠道 <provider>/<model> ─────────────────────────────
         if "/" in model and not model.startswith(("workbuddy:", "cn:", "global:")):
-            return _aggregate_chat(raw)
+            try:
+                return _aggregate_chat(raw)
+            except aggregate.AggregateError as exc:
+                # 客户端自带 provider/model 命名（如 cline-deepseek/deepseek-v4.1-flash）
+                # 而该厂商未配置/未收录时，resolve 会抛 AggregateError——此前直接
+                # 穿透成「网关内部错误 500」（实测日志：AggregateError: 未找到模型）。
+                # 现在：若最后一段恰是账号池里的模型 → 按池泳道兜底执行（无感继续）；
+                # 否则按聚合错误的明码状态返回（404），绝不 500。
+                LEDGER.record(model=model, error=exc.code)
+                tail = model.rsplit("/", 1)[-1]
+                head = model.split("/", 1)[0]
+                fb_lane = head if head in ("cline", "qoder", "qodercn", "zcode") \
+                    else "workbuddy"
+                try:
+                    doc2, resp2 = pool.chat_failover({**raw, "model": tail},
+                                                     session=session, lane=fb_lane)
+                except UpstreamError as pool_exc:
+                    _gw_log(f"聚合目录未收录 {model}（{exc.code}），账号池 "
+                            f"{fb_lane}:{tail} 也不可用：{pool_exc.code}")
+                    return _agg_error(exc)
+                _gw_log(f"聚合目录未收录 {model} → 按账号池 {fb_lane}:{tail} 兜底执行")
+                hdrs2 = {"X-Wbspy-Account": doc2.uid[:12],
+                         "X-Wbspy-Fallback": f"{model} -> {fb_lane}:{tail}"}
+                if raw.get("stream"):
+                    def sse2() -> Iterator[bytes]:
+                        try:
+                            yield from _sse_stream(resp2, model)
+                        finally:
+                            resp2.close()
+                            LEDGER.record(model=tail, provider=fb_lane,
+                                          account=doc2.uid[:12],
+                                          prompt_tokens=estimate_tokens(
+                                              raw.get("messages", [])))
+                    return StreamingResponse(sse2(), media_type="text/event-stream",
+                                             headers=hdrs2)
+                body2 = _sse_aggregate(resp2, tail)
+                body2["model"] = model
+                resp2.close()
+                LEDGER.record(model=tail, provider=fb_lane, account=doc2.uid[:12],
+                              prompt_tokens=estimate_tokens(raw.get("messages", [])),
+                              completion_tokens=len(str(body2.get("choices", [{}])[0]
+                                                        .get("message", {}).get("content")
+                                                        or "")) // 3)
+                return JSONResponse(body2, headers=hdrs2)
 
         # ── 路由二：登录账号池（WorkBuddy 系 / Cline / Qoder，按前缀选泳道）──
         # 泳道内多账号轮换容错；纯模型名等价 workbuddy:<model>
@@ -616,16 +669,6 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
                 return _error(exc)
 
         raw, _trimmed = trim_context(raw)
-
-        # 会话键：客户端可显式传 x-wbspy-session；缺省用「system+首条消息」
-        # 指纹——同一段对话续发时前缀稳定，粘住同一账号保护上游 prompt 缓存
-        session = request.headers.get("x-wbspy-session") or None
-        if not session:
-            msgs = raw.get("messages")
-            if isinstance(msgs, list) and msgs:
-                import hashlib
-                seed = json.dumps(msgs[:2], ensure_ascii=False, default=str)[:2000]
-                session = "auto:" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
 
         try:
             inject_cb = None

@@ -2,6 +2,12 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.58] — 2026-11-22
+
+### 修复
+- **聚合目录未收录的 `<provider>/<model>` 不再 500**（实测日志：`AggregateError: 未找到模型` 反复出现）。客户端自带 provider 前缀的模型名（如 `cline-deepseek/deepseek-v4.1-flash`）若厂商未配置：最后一段恰是账号池里的模型 → **按池泳道无感兜底执行**（`X-Wbspy-Fallback` 标注）；池也没有 → 明码 404 `model_not_found`。
+- **新登录账号的模型即时可见**：登录成功/删除账号现在同时作废两层目录缓存（账号池层 + 网关 `/v1/models` 层）——此前两层各缓存 5 分钟，新登的账号（如 GLM/ZCode）最长要等约 10 分钟才出现在模型列表。
+
 ## [0.2.57] — 2026-11-22
 
 ### 修复

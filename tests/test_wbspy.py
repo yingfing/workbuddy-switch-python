@@ -5442,3 +5442,98 @@ class TestDoubaoQrLogin(unittest.TestCase):
         with patch("wbspy.login_flows.doubao.requests.get", return_value=resp):
             with self.assertRaises(RuntimeError):
                 db.start(None, ticket)
+
+
+class TestAggregateMissRescue(unittest.TestCase):
+    """聚合目录未收录的 <provider>/<model> → 池兜底或明 404，绝不 500。"""
+
+    def _app(self):
+        import tempfile
+        from fastapi.testclient import TestClient
+        from wbspy.webui import create_web_app
+        from wbspy.pool import AccountPool
+        from wbspy import store
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        ctx = (patch.object(store, "CONFIG_PATH", Path(self._tmp.name) / "config.json"),
+               patch("wbspy.webui.load_config", store.load_config),
+               patch("wbspy.webui.save_config", store.save_config),
+               patch("wbspy.webui.load_accounts", return_value=[]))
+        for p in ctx:
+            p.start()
+            self.addCleanup(p.stop)
+        app = create_web_app(AccountPool([]), api_key="")
+        return TestClient(app), app
+
+    def test_unknown_provider_rescued_by_pool_tail(self):
+        """cline-deepseek/deepseek-v4.1-flash → 池内同名模型兜底，model=请求值。"""
+        c, app = self._app()
+        from wbspy.pool import _key as _pool_key
+        from wbspy.document import Document
+        d1 = Document(raw={"account": {"uid": "u-tail"}}, uid="u-tail", token="t",
+                      domain="workbuddy.cn")
+        pool = app.state.pool
+        pool.documents = {_pool_key(d1): d1}
+        seen = {}
+
+        def fake_failover(payload, session=None, lane="workbuddy", inject=None):
+            seen["model"] = payload["model"]
+            seen["lane"] = lane
+            return d1, Mock()
+
+        pool.chat_failover = Mock(side_effect=fake_failover)
+        with patch("wbspy.gateway._sse_aggregate",
+                   return_value={"model": "x",
+                                 "choices": [{"message": {"content": "ok"}}]}):
+            r = c.post("/v1/chat/completions", json={
+                "model": "cline-deepseek/deepseek-v4.1-flash", "stream": False,
+                "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(seen["model"], "deepseek-v4.1-flash")
+        self.assertEqual(seen["lane"], "workbuddy")
+        self.assertEqual(r.json().get("model"), "cline-deepseek/deepseek-v4.1-flash")
+        self.assertEqual(r.headers.get("X-Wbspy-Fallback"),
+                         "cline-deepseek/deepseek-v4.1-flash -> workbuddy:deepseek-v4.1-flash")
+
+    def test_unknown_provider_no_pool_match_is_clean_404(self):
+        """池也没有 → 原样返回聚合的 404 model_not_found，绝不 500。"""
+        c, app = self._app()
+        from wbspy.upstream import UpstreamError
+        pool = app.state.pool
+        pool.chat_failover = Mock(
+            side_effect=UpstreamError(503, "no_available_accounts", "无"))
+        r = c.post("/v1/chat/completions", json={
+            "model": "opencode/muse-free", "stream": False,
+            "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json()["error"]["code"], "model_not_found")
+
+
+class TestCatalogInvalidate(unittest.TestCase):
+    """登录/账号变更 → 模型目录缓存即时作废（新账号模型马上可见）。"""
+
+    def test_pool_invalidate_model_cache(self):
+        from wbspy.pool import AccountPool
+        pool = AccountPool([])
+        pool._mba_cache = [("x", [])]
+        pool.invalidate_model_cache()
+        self.assertIsNone(pool._mba_cache)
+
+    def test_account_remove_invalidates_gateway_catalog(self):
+        """删除账号端点会作废网关目录缓存。"""
+        import tempfile
+        from fastapi.testclient import TestClient
+        from wbspy.webui import create_web_app
+        from wbspy.pool import AccountPool
+        from wbspy import store
+        with patch.object(store, "CONFIG_PATH",
+                          Path(tempfile.mkdtemp()) / "config.json"), \
+             patch("wbspy.webui.load_config", store.load_config), \
+             patch("wbspy.webui.save_config", store.save_config), \
+             patch("wbspy.webui.load_accounts", return_value=[]), \
+             patch("wbspy.webui.remove_account", return_value=True):
+            app = create_web_app(AccountPool([]), api_key="")
+            app.state.model_cached_at = 123.0
+            c = TestClient(app)
+            c.delete("/api/accounts/u-x")
+            self.assertEqual(app.state.model_cached_at, 0.0)

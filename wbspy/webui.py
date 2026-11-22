@@ -265,6 +265,10 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         result = sessions.poll(ticket)
         if result.get("status") == "success":
             pool.refresh_documents(load_accounts())   # 新账号即时进池
+            # 目录两层缓存（池 5 分钟 + 网关 /v1/models 5 分钟）即时作废：
+            # 否则新登的账号（如 GLM）最长要等约 10 分钟才出现在模型列表
+            pool.invalidate_model_cache()
+            app.state.model_cached_at = 0.0
         return _ok(result)
 
     @app.get("/authorize")
@@ -419,6 +423,8 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
         if not remove_account(uid, domain=domain):
             raise HTTPException(404, "账号不存在")
         pool.refresh_documents(load_accounts())
+        pool.invalidate_model_cache()
+        app.state.model_cached_at = 0.0
         return _ok()
 
     # -- 自动化 ---------------------------------------------------------------

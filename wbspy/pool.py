@@ -163,6 +163,10 @@ class AccountPool:
 
     # -- 状态 -----------------------------------------------------------------
 
+    def invalidate_model_cache(self) -> None:
+        """模型目录缓存作废（登录成功/账号变更后调用，下次请求即时重建）。"""
+        self._mba_cache = None
+
     def refresh_documents(self, documents: list[Document]) -> None:
         with self._lock:
             for doc in documents:
