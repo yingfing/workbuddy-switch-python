@@ -6099,3 +6099,48 @@ class TestDownloadProbe(unittest.TestCase):
                  self.assertRaises(RuntimeError) as cm:
                 U._download_tarball("refs/tags/v0.2.66", Path(tmp) / "t.tar.gz")
             self.assertIn("不可达", str(cm.exception))
+
+
+class TestQuotaDispatch(unittest.TestCase):
+    """wbspy quota CLI 按渠道分派（v0.2.67）——0.2.63 网页端修复的 CLI 漏网：
+    硬编码 WorkBuddyClient 对 zcode.z.ai 域名必抛「无法识别」。"""
+
+    def test_quota_skips_and_dispatches(self):
+        import io
+        import contextlib
+        from unittest.mock import MagicMock, patch
+        from wbspy.document import parse_auth
+        from wbspy import cli
+        docs = [
+            parse_auth({"account": {"uid": "b9", "nickname": "B"},
+                        "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}}),
+            parse_auth({"account": {"uid": "zc9", "nickname": "Z"},
+                        "auth": {"accessToken": "jwt", "domain": "zcode.z.ai"}}),
+            parse_auth({"account": {"uid": "qd9", "nickname": "Q"},
+                        "auth": {"accessToken": "t", "domain": "qoder.com"}}),
+        ]
+        for k, d in {"b9": 55, "zc9": 1234}.items():
+            pass                      # 占位说明：客户端桩按 label 匹配更稳
+        stubs = {}
+
+        def fake_client_for(doc):
+            m = MagicMock()
+            if doc.uid in ("b9", "zc9"):
+                m.credits.return_value = {
+                    "total": {"b9": 55, "zc9": 1234}[doc.uid],
+                    "packages": [{"name": "套餐", "remain": 1, "size": 2,
+                                  "monthly": False}]}
+                stubs[doc.uid] = m
+            return m
+
+        buf = io.StringIO()
+        with patch.object(cli, "load_accounts", return_value=docs), \
+             patch("wbspy.pool._client_for", side_effect=fake_client_for), \
+             contextlib.redirect_stdout(buf):
+            rc = cli._cmd_quota(None)
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("55 积分", out)                       # buddy 正常
+        self.assertIn("1234 积分", out)                     # zcode 走分派桩
+        self.assertIn("未声明余额查询能力", out)            # qoder 中性提示
+        self.assertNotIn("积分查询失败", out)               # 不再报域名错误

@@ -64,13 +64,19 @@ def _cmd_accounts(args) -> int:
 
 
 def _cmd_quota(_args) -> int:
+    from .pool import _client_for
     for doc in load_accounts():
         print(f"· {doc.label()}")
+        if "credits" not in doc.capabilities:
+            print("    该渠道未声明余额查询能力。")
+            continue
         if not doc.token:
             print("    加密凭据，请重新网页授权后查询。")
             continue
         try:
-            c = WorkBuddyClient(doc).credits()
+            # 按渠道分派：ZCode 走自己的余额接口——硬编码 WorkBuddyClient 会对
+            # zcode.z.ai 域名抛「无法识别」（v0.2.63 修了网页端，这里是 CLI 漏网）
+            c = _client_for(doc).credits()
             print(f"    剩余 {c['total']} 积分"
                   + (f"（其中 {c['expiring_soon']} 三天内到期）" if c.get("expiring_soon") else ""))
             for p in c.get("packages", []):

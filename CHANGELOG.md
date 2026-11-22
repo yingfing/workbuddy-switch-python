@@ -2,6 +2,17 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.67] — 2026-11-22
+
+### 修复
+- **`wbspy quota` CLI 按渠道分派**（全渠道审查抓出的漏网）：CLI 的 quota 命令仍硬编码 `WorkBuddyClient`，对 ZCode 账号必抛「账号服务地区或域名无法识别」（v0.2.63 修了网页端 `/api/credits`，CLI 漏了）。改走 `_client_for` 渠道分派：ZCode 走自己的余额接口，未声明 credits 能力的渠道显示中性提示而非报错。
+
+### 审查结论（全渠道能力矩阵自查）
+- 14 渠道逐一核对：域名识别 → 客户端分派 → 声明能力 vs 实现，矩阵自洽；
+- 签到托管 10 渠道全部有实现类（`benefits._OTHER`）且兜底轮询覆盖；
+- 网关目录只聚合声明 chat 能力的账号（`healthy()` 过滤），纯签到渠道不会误挂模型；
+- Raccoon / Gemini 登录后无 API 能力为有意设计（凭据仅用于桌面切换/占位），非缺陷。
+
 ## [0.2.66] — 2026-11-22
 
 ### 增强
