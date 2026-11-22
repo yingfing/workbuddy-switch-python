@@ -1833,6 +1833,31 @@ class TestGatewayLogging(unittest.TestCase):
         self.assertIn("对话失败", app2.state.auto_log[-1])
         self.assertIn("no_available_accounts", app2.state.auto_log[-1])
 
+    def test_chat_fail_log_keeps_full_annotation(self):
+        """对话失败日志不再把 11128 注解砍成半句——[:160] 曾把消息尾部的
+        留存路径、建议、「换账号无效」真相全砍掉，用户看到的是话说一半。"""
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from wbspy.gateway import create_app
+        from wbspy.pool import AccountPool
+        from wbspy.upstream import UpstreamError
+        tail = "本次被拒请求体已留存：~/.wbspy/denials/x.json，管理面板「诊断」可查看"
+        msg = ("上游 access denied（11128）｜本请求体 488 KB，上下文偏大；"
+               "已自动尝试 system 降级重试仍被拒（触发点在会话内容，不在 system）"
+               "；该审查按请求内容判定，换账号无效；真相：上游按关键词拦截，"
+               "unapproved channel 文案是误导；建议新开会话；" + tail)
+        self.assertGreater(len(msg), 160)      # 确保旧截断确实砍到尾巴
+        class _P(AccountPool):
+            def chat_failover(self, payload, session=None, lane="workbuddy", inject=None):
+                raise UpstreamError(403, "upstream_denied", msg)
+        app = create_app(_P([]), api_key="")
+        c = TestClient(app, raise_server_exceptions=False)
+        c.post("/v1/chat/completions", json={"model": "auto",
+                                             "messages": [{"role": "user", "content": "hi"}]})
+        line = app.state.auto_log[-1]
+        self.assertIn("对话失败", line)
+        self.assertIn(tail, line)              # 尾部注解完整进日志
+
     def test_pool_emit_wired_to_webui_log(self):
         """pool.event_log 钩子 → 网页日志；换号/auth 事件触发 _emit。"""
         from unittest.mock import MagicMock, patch

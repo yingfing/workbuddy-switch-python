@@ -819,7 +819,10 @@ def create_app(pool: AccountPool, api_key: str = "") -> FastAPI:
             doc, resp = pool.chat_failover(raw, session=session, lane=lane,
                                            inject=inject_cb)
         except UpstreamError as exc:
-            _gw_log(f"对话失败：{model} → HTTP {exc.status} {exc.code}：{exc.message[:160]}")
+            # 11128 注解（annotate_denial）的价值全在尾部：留存路径、建议、
+            # 「换账号无效」真相——[:160] 曾把它们全砍掉，日志只见前半句
+            # 像话说一半。[:800] 保完整注解，又防上游异常巨消息刷爆日志。
+            _gw_log(f"对话失败：{model} → HTTP {exc.status} {exc.code}：{exc.message[:800]}")
             # 失败请求也要入账：封控/限流/失效不进统计的话，健康横幅
             # 就看不见「最近正在报错」，7 日错误率与实时可用率全失真
             LEDGER.record(model=model, provider=lane, error=exc.code)
