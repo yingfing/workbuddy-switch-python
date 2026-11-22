@@ -4832,6 +4832,24 @@ class TestMemoryInject(unittest.TestCase):
         self.assertEqual(p.call_count, 1)
         mem.invalidate()
 
+    def test_negative_cache_on_failure(self):
+        """拉取失败 → 负缓存 60 秒内不重试（接口挂时防每发卡超时），过期后再试。"""
+        import time as _time
+        import wbspy.memory as mem
+        mem.invalidate()
+        doc = self._doc()
+        with patch("wbspy.memory.requests.get",
+                   return_value=self._resp({"error": 500}, status=500)) as p:
+            self.assertIsNone(mem.get_profile(doc))
+            self.assertIsNone(mem.get_profile(doc))
+            self.assertEqual(p.call_count, 1)
+        with patch("wbspy.memory.time.time", return_value=_time.time() + 61), \
+             patch("wbspy.memory.requests.get",
+                   return_value=self._resp(self._PROFILE)) as p2:
+            self.assertEqual(mem.get_profile(doc)["version"], 4)
+            self.assertEqual(p2.call_count, 1)
+        mem.invalidate()
+
     def test_inject_messages_prepends_system(self):
         """注入：头部插 system，原列表不动。"""
         import wbspy.memory as mem

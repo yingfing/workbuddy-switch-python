@@ -30,6 +30,7 @@ from typing import Any, Iterable
 import requests
 
 TTL_S = 600                       # 与桌面端 10 分钟同步节奏对齐
+NEG_TTL_S = 60                    # 失败负缓存：60 秒内不重试（接口挂时防每发卡超时）
 _FETCH_TIMEOUT = 12
 
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}   # uid -> (fetched_at, data)
@@ -63,19 +64,24 @@ def fetch_profile(doc, timeout: int = _FETCH_TIMEOUT) -> dict[str, Any] | None:
 
 
 def get_profile(doc, force: bool = False) -> dict[str, Any] | None:
-    """带 TTL 缓存的记忆快照；force=True 跳过缓存。"""
+    """带 TTL 缓存的记忆快照；force=True 跳过缓存。
+
+    成功缓存 TTL_S（10 分钟）；失败也缓存（负缓存 NEG_TTL_S，60 秒）——
+    接口挂掉时每分钟最多白等一次，不会每个对话都卡满超时。
+    """
     uid = getattr(doc, "uid", None)
     if not uid:
         return None
     now = time.time()
     with _lock:
         hit = _cache.get(uid)
-        if hit and not force and now - hit[0] < TTL_S:
-            return hit[1]
+        if hit and not force:
+            ts, data = hit
+            if now - ts < (TTL_S if data is not None else NEG_TTL_S):
+                return data or None
     data = fetch_profile(doc)
-    if data is not None:
-        with _lock:
-            _cache[uid] = (now, data)
+    with _lock:
+        _cache[uid] = (now, data)
     return data
 
 
