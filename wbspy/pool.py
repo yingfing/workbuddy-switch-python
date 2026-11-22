@@ -188,6 +188,19 @@ class AccountPool:
         return [d for k, d in self.documents.items()
                 if self._is_usable(d, model, now, lane=lane)]
 
+    def disabled_channels(self) -> set[str]:
+        """被屏蔽的对话渠道（config gateway.disabled_channels，热读）。
+
+        屏蔽 = 对话下架：模型从客户端目录消失、路由不再选中该渠道；
+        签到托管、余额监控、token 续期照常——入口少一个，功能不受伤。
+        默认空集 = 什么都不屏蔽（这是共识，绝不预屏蔽）。"""
+        try:
+            from .store import load_config
+            v = (load_config().get("gateway") or {}).get("disabled_channels")
+            return {str(x) for x in v} if isinstance(v, list) else set()
+        except Exception:                              # noqa: BLE001
+            return set()
+
     def _is_usable(self, doc: Document, model: str, now: float | None = None,
                    lane: str | None = None) -> bool:
         """账号此刻能否接「model」的活：chat 能力 + 凭据就绪 + 未死亡 + 该模型未冷却。
@@ -199,6 +212,8 @@ class AccountPool:
         k = _key(doc)
         if "chat" not in doc.capabilities or not doc.api_ready or self.dead_until.get(k, 0) > now:
             return False                 # 渠道未声明 chat 能力 / 死亡 → 不进上游路由
+        if doc.channel_id in self.disabled_channels():
+            return False                 # 渠道被屏蔽 → 对话下架（签到/余额照常）
         if lane is not None and _lane_of(doc) != lane:
             return False
         if model != "*" and self.cooldowns.get(k, model) > now:

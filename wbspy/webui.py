@@ -1122,6 +1122,34 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
                         "matched": matched, "count": len(matched)})
         return out
 
+    # -- 渠道屏蔽（对话下架；签到/余额/续期照常，默认什么都不屏蔽）--------------
+
+    @app.get("/api/settings/channel-hide")
+    def channel_hide_get():
+        from .channels import CHANNELS
+        disabled = pool.disabled_channels()
+        chans = [{"id": c.id, "name": c.name, "note": c.note,
+                  "disabled": c.id in disabled}
+                 for c in CHANNELS.values() if "chat" in c.capabilities]
+        return _ok({"channels": chans})
+
+    @app.post("/api/settings/channel-hide")
+    async def channel_hide_set(request: Request):
+        """body: {disabled?: [channel_id]}——空数组 = 全部恢复（默认态）。"""
+        from .channels import CHANNELS
+        body = await request.json()
+        ids = body.get("disabled") or []
+        if not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
+            raise HTTPException(400, "disabled 必须是渠道 id 字符串数组")
+        unknown = [x for x in ids if x not in CHANNELS]
+        if unknown:
+            raise HTTPException(400, f"未知渠道：{'/'.join(unknown)}")
+        cfg = load_config()
+        cfg.setdefault("gateway", {})["disabled_channels"] = ids
+        save_config(cfg)
+        pool.invalidate_model_cache()          # 模型目录即时刷新
+        return _ok({"disabled": ids})
+
     @app.get("/api/settings/gateway")
     def gateway_settings_get():
         cfg = load_config()

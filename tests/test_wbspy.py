@@ -6144,3 +6144,59 @@ class TestQuotaDispatch(unittest.TestCase):
         self.assertIn("1234 积分", out)                     # zcode 走分派桩
         self.assertIn("未声明余额查询能力", out)            # qoder 中性提示
         self.assertNotIn("积分查询失败", out)               # 不再报域名错误
+
+
+class TestChannelHide(unittest.TestCase):
+    """渠道屏蔽（v0.2.68）：屏蔽 = 对话下架（目录消失 + 路由不选），
+    签到/余额/续期照常；默认空 = 什么都不屏蔽（共识）。"""
+
+    def _docs(self):
+        from wbspy.document import parse_auth
+        return [
+            parse_auth({"account": {"uid": "b1", "nickname": "B"},
+                        "auth": {"accessToken": "t", "domain": "www.codebuddy.cn"}}),
+            parse_auth({"account": {"uid": "zc1", "nickname": "Z"},
+                        "auth": {"accessToken": "jwt", "domain": "zcode.z.ai"}}),
+        ]
+
+    def test_disabled_channel_out_of_healthy_and_models(self):
+        from unittest.mock import MagicMock, patch
+        from wbspy.pool import AccountPool
+        docs = self._docs()
+        pool = AccountPool(docs)
+        for k, d in pool.documents.items():
+            m = MagicMock()
+            m.models.return_value = [{"id": "m-" + d.uid, "display_name": "x"}]
+            pool.clients[k] = m
+        self.assertEqual({d.uid for d in pool.healthy("*")}, {"b1", "zc1"})
+        with patch("wbspy.store.load_config",
+                   return_value={"gateway": {"disabled_channels": ["zcode"]}}), \
+             patch("wbspy.store.save_config"):
+            self.assertEqual({d.uid for d in pool.healthy("*")}, {"b1"})
+            rows = {r["id"] for r in pool.models()}
+            self.assertNotIn("workbuddy:m-zc1", rows)    # zcode 模型从目录消失
+            self.assertIn("workbuddy:m-b1", rows)        # buddy 照常（带泳道前缀）
+        # 配置恢复空（默认态）→ 全部回来
+        self.assertEqual({d.uid for d in pool.healthy("*")}, {"b1", "zc1"})
+
+    def test_hide_api_roundtrip_and_validation(self):
+        from unittest.mock import patch
+        from wbspy.pool import AccountPool
+        from wbspy.webui import create_web_app
+        from fastapi.testclient import TestClient
+        pool = AccountPool(self._docs())
+        c = TestClient(create_web_app(pool, api_key=""))
+        with patch("wbspy.webui.load_config", return_value={"gateway": {}}), \
+             patch("wbspy.webui.save_config") as sv:
+            r = c.get("/api/settings/channel-hide")
+            chans = {x["id"]: x for x in r.json()["data"]["channels"]}
+            self.assertFalse(chans["zcode"]["disabled"])       # 默认全不屏蔽
+            self.assertNotIn("trae", chans)                    # 只列有 chat 的渠道
+            r = c.post("/api/settings/channel-hide", json={"disabled": ["zcode"]})
+            self.assertEqual(r.status_code, 200)
+            saved = sv.call_args[0][0]["gateway"]["disabled_channels"]
+            self.assertEqual(saved, ["zcode"])                 # 已落盘
+            self.assertEqual(c.post("/api/settings/channel-hide",
+                                    json={"disabled": ["nope"]}).status_code, 400)
+            self.assertEqual(c.post("/api/settings/channel-hide",
+                                    json={"disabled": "zcode"}).status_code, 400)

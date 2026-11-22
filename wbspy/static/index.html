@@ -297,6 +297,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
     <button data-tab="auto">积分自动化</button>
     <button data-tab="switch">桌面切换</button>
     <button data-tab="gateway">网关</button>
+    <button data-tab="hide">屏蔽</button>
     <button data-tab="diag">诊断</button>
   </nav>
 
@@ -617,6 +618,14 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
   </section>
 
   <!-- 诊断（一键排查现场 + 报告复制给 AI） -->
+  <section id="tab-hide" hidden>
+    <h2>屏蔽管理
+      <button class="btn sm" id="chHideSave" hidden onclick="saveChannelHide()">保存屏蔽</button>
+      <span class="qmark" data-tip="屏蔽 = 该渠道对话下架：模型从客户端目录消失、对话不再路由到它；签到托管、余额监控、token 续期照常运行。默认全部可用（什么都不屏蔽）。保存即时生效。" tabindex="0">?</span>
+    </h2>
+    <p class="dim">用不了的渠道在这里屏蔽掉，客户端就看不到它、也不会把请求发向它；想恢复随时回来打开。默认什么都不屏蔽。</p>
+    <div id="chHideList" style="display:grid;gap:8px;max-width:640px;margin-top:12px"></div>
+  </section>
   <section id="tab-diag" hidden>
     <div class="card">
       <h2>一键排查 <span class="qmark" data-tip="聚合健康判定、账号池状态（含冷却）、最近 10 分钟错误分布、近 7 日用量、配置摘要与最近 30 行运行日志，生成一份脱敏纯文本报告——token 与 API Key 不出现原文。复制后直接发给 AI 即可远程排障。" tabindex="0">?</span></h2>
@@ -839,6 +848,36 @@ function gotoTab(t) {
   if (btn) btn.click();
 }
 
+// -- 屏蔽管理：对话渠道下架（默认全不屏蔽）--
+async function loadChannelHide() {
+  const r = await api('/api/settings/channel-hide');
+  const list = $('#chHideList');
+  const chans = (r.data && r.data.channels) || [];
+  window._chHideBase = chans.filter(c => c.disabled).map(c => c.id);
+  list.innerHTML = chans.map(c => `
+    <label style="display:flex;gap:12px;align-items:center;padding:10px 14px;
+                  border:1px solid rgba(128,128,128,.25);border-radius:8px;cursor:pointer">
+      <input type="checkbox" data-ch="${c.id}" ${c.disabled ? 'checked' : ''}
+             onchange="chHidePaint()">
+      <span><b>${c.name}</b>
+        <span class="dim" style="margin-left:8px">${c.note || ''}</span>
+        ${c.disabled ? '<span class="tag" style="color:var(--bad)">已屏蔽</span>' : ''}
+      </span>
+    </label>`).join('');
+}
+function chHidePaint() {
+  const cur = [...document.querySelectorAll('#chHideList input:checked')].map(i => i.dataset.ch);
+  $('#chHideSave').hidden = JSON.stringify(cur.sort()) === JSON.stringify([...window._chHideBase].sort());
+}
+async function saveChannelHide() {
+  const disabled = [...document.querySelectorAll('#chHideList input:checked')].map(i => i.dataset.ch);
+  const r = await api('/api/settings/channel-hide', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({disabled})});
+  r.ok ? toast('已保存：模型目录与对话路由即时生效' + (disabled.length ? '' : '（全部恢复可用）'))
+       : toast(r.error || '保存失败', false);
+  loadChannelHide();
+}
+
 // -- 诊断：一键排查现场 + 报告复制（发给 AI 排障）--
 async function runDiag() {
   const btn = $('#diagBtn'), out = $('#diagOut');
@@ -884,7 +923,7 @@ pollMobile();
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#tabs button').forEach(x => x.classList.remove('on'));
   b.classList.add('on');
-  ['dash','login','accounts','free','auto','switch','gateway','diag'].forEach(t =>
+  ['dash','login','accounts','free','auto','switch','gateway','hide','diag'].forEach(t =>
     $('#tab-' + t).hidden = t !== b.dataset.tab);
   if (b.dataset.tab === 'dash') loadDashboard();
   if (b.dataset.tab === 'accounts') loadAccounts();
@@ -893,6 +932,7 @@ document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   if (b.dataset.tab === 'switch') loadSnapshots();
   if (b.dataset.tab === 'gateway') { loadGateway(); loadForensics(); }
   if (b.dataset.tab === 'free') loadFree();
+  if (b.dataset.tab === 'hide') loadChannelHide();
 });
 
 // -- 概览仪表盘（1Panel 风格：统计卡 + 7 日用量 + 渠道分布 + 最近签到）--
