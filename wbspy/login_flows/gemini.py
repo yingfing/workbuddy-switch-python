@@ -49,11 +49,15 @@ def poll(ticket: Ticket) -> "Document | None":
                              timeout=10).json().get("email", "")
     except Exception:
         pass
+    try:
+        expires_in = float(tok.get("expires_in") or 3600)
+    except (TypeError, ValueError):
+        expires_in = 3600.0
     doc = parse_auth({
         "account": {"uid": email or "gemini-user", "nickname": f"Gemini ({email or 'google'})"},
         "auth": {"accessToken": token, "refreshToken": tok.get("refresh_token", ""),
                  "domain": "googleapis.com",
-                 "expiresAt": int(time.time() * 1000 + float(tok.get("expires_in", 3600)) * 1000)},
+                 "expiresAt": int(time.time() * 1000 + expires_in * 1000)},
     })
     doc.raw.setdefault("channel", "gemini")
     return doc

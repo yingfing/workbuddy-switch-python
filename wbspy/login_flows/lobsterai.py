@@ -28,9 +28,11 @@ USER_AGENT = "LobsterAI/0.1.0"
 EXCHANGE_PATH = "/api/auth/exchange"
 
 
-def _public_base() -> str:
-    return (os.environ.get("WBSPY_PUBLIC_ORIGIN") or
-            "http://127.0.0.1:8178").rstrip("/")
+def _public_base(ticket: "Ticket | None" = None) -> str:
+    """回调基地址：显式环境变量 > 登录请求推导（跟随面板部署地址）> 本机默认。"""
+    return (os.environ.get("WBSPY_PUBLIC_ORIGIN")
+            or (ticket.origin_hint if ticket is not None else "")
+            or "http://127.0.0.1:8178").rstrip("/")
 
 
 def _client_version() -> str:

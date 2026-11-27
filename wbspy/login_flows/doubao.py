@@ -70,6 +70,16 @@ def _collect_cookie(resp: requests.Response) -> str:
     return "; ".join(parts)
 
 
+def _collect_cookie_from_session(session: requests.Session) -> str:
+    """会话全程（含重定向各跳）累积的 Cookie——confirmed 的 Set-Cookie
+    常分散在重定向链的多跳响应里，只看最后一跳会丢 sessionid。"""
+    parts = []
+    for c in session.cookies:
+        if c.name:
+            parts.append(f"{c.name}={c.value}")
+    return "; ".join(parts)
+
+
 def start(channel, ticket: Ticket) -> None:
     params = "&".join(f"{k}={quote_plus(v)}" for k, v in _QR_QUERY.items())
     resp = requests.get(f"{_GET_QRCODE}?{params}", headers=_headers(), timeout=20)
@@ -98,7 +108,9 @@ def poll(ticket: Ticket) -> "Document | None":
     params = _QR_QUERY.copy()
     params["token"] = ticket.state
     qs = "&".join(f"{k}={quote_plus(v)}" for k, v in params.items())
-    resp = requests.get(f"{_CHECK_URL}?{qs}", headers=_headers(), timeout=20)
+    session = requests.Session()
+    session.headers.update(_headers())
+    resp = session.get(f"{_CHECK_URL}?{qs}", timeout=20)
     if not resp.ok:
         return None
     data = (resp.json() or {}).get("data") or {}
@@ -110,7 +122,14 @@ def poll(ticket: Ticket) -> "Document | None":
         raise RuntimeError("二维码已失效或被取消，请重新发起登录。")
     if status != "confirmed":
         return None
-    cookie = _collect_cookie(resp)
+    # confirmed 后服务端可能下发 redirect_url（会话 Cookie 挂在这次跳转上）——跟进
+    redirect_url = str(data.get("redirect_url") or data.get("next_url") or "")
+    if redirect_url:
+        try:
+            session.get(redirect_url, timeout=20)
+        except requests.RequestException:
+            pass
+    cookie = _collect_cookie_from_session(session)
     if not re.search(r"(?:^|;\s*)sessionid=", cookie):
         # 确认了但会话没下来（App 端偶发）——如实报错让用户重试
         detail = str(data.get("description") or "")[:120]

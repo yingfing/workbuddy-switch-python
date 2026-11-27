@@ -256,6 +256,7 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
                                     origin=origin)
             if result.get("kind") == "browser" and "accounts.google.com" in (result.get("auth_url") or ""):
                 _ensure_gemini_listener()
+            _log(f"登录发起：{body.get('channel', '?')}（ticket {result.get('ticket', '?')}）")
             return _ok(result)
         except (KeyError, RuntimeError, ValueError) as exc:
             return _err(exc)
@@ -264,18 +265,24 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
     def login_poll(ticket: str):
         result = sessions.poll(ticket)
         if result.get("status") == "success":
+            doc = result.get("document") or {}
+            _log(f"登录成功：{doc.get('label') or doc.get('uid') or '?'}（{ticket}）")
             pool.refresh_documents(load_accounts())   # 新账号即时进池
             # 目录两层缓存（池 5 分钟 + 网关 /v1/models 5 分钟）即时作废：
             # 否则新登的账号（如 GLM）最长要等约 10 分钟才出现在模型列表
             pool.invalidate_model_cache()
             app.state.model_cached_at = 0.0
+        elif result.get("status") == "failed":
+            _log(f"登录失败（{ticket}）：{result.get('error', '?')}")
         return _ok(result)
 
     @app.get("/authorize")
     def authorize_callback(request: Request):
         """TRAE / LobsterAI 授权回调：把查询参数投递给等待中的登录票据。"""
         from fastapi.responses import HTMLResponse
-        message = sessions.deliver_callback(dict(request.query_params))
+        params = dict(request.query_params)
+        message = sessions.deliver_callback(params)
+        _log(f"授权回调收到：{message}（keys: {','.join(list(params)[:8]) or '无'}）")
         return HTMLResponse(
             '<!doctype html><meta charset="utf-8"><title>wbspy 授权</title>'
             '<body style="font:16px system-ui;padding:48px;text-align:center">'

@@ -61,8 +61,11 @@ def poll(ticket: Ticket) -> "Document | None":
     exp_ms = None
     if expires_raw:
         try:
-            exp_ms = int(time.mktime(time.strptime(
-                expires_raw[:19], "%Y-%m-%dT%H:%M:%S")) * 1000)
+            # 华为云返回 UTC ISO 串（末尾 Z）；calendar.timegm 按 UTC 换算，
+            # 不能用 time.mktime（本地时区）——否则快/慢 8 小时
+            import calendar
+            exp_ms = calendar.timegm(time.strptime(
+                expires_raw[:19], "%Y-%m-%dT%H:%M:%S")) * 1000
         except (ValueError, OverflowError, OSError):
             exp_ms = None
     doc = parse_auth({
