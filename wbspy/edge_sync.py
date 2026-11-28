@@ -552,6 +552,13 @@ class MobileGateway:
         for entry in workers.values():         # 全局停止：等 worker 收尾
             entry["thread"].join(timeout=3.0)
 
+    def _models_prewarm(self) -> None:
+        """后台预热模型目录缓存（TTL 5 分钟），wb:models:list 秒回。"""
+        try:
+            self.pool.models()
+        except Exception:
+            pass
+
     def _worker_loop(self, doc) -> None:
         """单账号连接线程：指数退避重连；账号掉池/失效或全局停止即退。"""
         delay = RECONNECT_BASE_S
@@ -639,6 +646,11 @@ class MobileGateway:
                                  connected_at=time.time(), last_error="")
             self.log(f"[mobile] 已上线：「{doc.label()}」device={dev['device_name']} "
                      f"uid={doc.uid[:8]}… 心跳 {heartbeat_s:.0f}s")
+            import queue as _queue
+            self._outbox = _queue.Queue()         # 本会话回执发件箱（泵统一发布）
+            # 模型目录预热：wb:models:list 冷缓存要逐账号打上游，会超手机超时
+            threading.Thread(target=lambda: self._models_prewarm(),
+                             daemon=True, name="mobile-models-prewarm").start()
             self._pump(ws, doc, dev, devices_channel, heartbeat_s)
         finally:
             ws.close()
@@ -662,8 +674,10 @@ class MobileGateway:
             try:
                 msg = ws.next_message(timeout=min(remaining, PUMP_TICK_S))
             except WsTimeout:
+                self._drain_outbox(ws)            # 空转间隙也把积压回执发掉
                 continue                          # 空转：回循环查心跳/停止
             if msg is None:
+                self._drain_outbox(ws)
                 continue
             push = msg.get("push") or {}
             channel = push.get("channel") or ""
@@ -674,20 +688,45 @@ class MobileGateway:
             if channel == devices_channel and data.get("type") in (
                     EVENT_DEVICE_ONLINE, EVENT_DEVICE_OFFLINE):
                 continue                          # 其他设备的心跳回响，不处理
-            self._handle_command(ws, doc, data)
+            # 指令异步执行：chat_failover 等长耗时 handler 绝不能堵泵——
+            # 心跳一停服务端就踢线（Errno 104 / 服务器关闭连接），手机端
+            # 表现为「电脑端未响应」。回执经 outbox 由泵统一发布（_request
+            # 非线程安全，旁路线程直接 publish 会和泵抢收帧）。
+            threading.Thread(target=self._handle_command,
+                             args=(ws, doc, data, outbox), daemon=True,
+                             name="mobile-cmd").start()
 
-    def _handle_command(self, ws: CentrifugeWs, doc, cmd: dict) -> None:
+    def _drain_outbox(self, ws) -> None:
+        """把异步 handler 产出的回执从泵线程统一发布（串行化发送帧）。"""
+        import queue as _queue
+        outbox = getattr(self, "_outbox", None)
+        if outbox is None:
+            return
+        while True:
+            try:
+                item = outbox.get_nowait()
+            except _queue.Empty:
+                return
+            try:
+                ws.publish(item["channel"], item["data"])
+                state = "ok" if item["data"].get("success") else "err"
+                self.log(f"[mobile] 指令 {item['data'].get('_cmd', '?')} → {state}")
+            except (MobileGatewayError, WsError, OSError) as exc:
+                self.log(f"[mobile] 回执未送达（连接已切换，手机会重试）：{exc}")
+                return
+
+    def _handle_command(self, ws, doc, cmd: dict, outbox=None) -> None:
         cmd_type = str(cmd.get("type") or "")
         result = self._router.dispatch(cmd)
+        result.setdefault("_cmd", cmd_type)
         reply_channel = str(cmd.get("replyChannel") or "")
         if not reply_channel:
             self.log(f"[mobile] 指令 {cmd_type or '?'}（无 replyChannel）→ 忽略回执")
             return
-        try:
-            ws.publish(reply_channel, result)
-            state = "ok" if result.get("success") else "err"
-            self.log(f"[mobile] 指令 {cmd_type} → {state}")
-        except MobileGatewayError as exc:
-            raise                                 # 发布失败视为连接级故障 → 重连
-        except (WsError, OSError) as exc:
-            raise MobileGatewayError(f"回执发布失败：{exc}") from exc
+        if outbox is None:                        # 兼容直调（测试等）：同步回执
+            try:
+                ws.publish(reply_channel, result)
+            except (MobileGatewayError, WsError, OSError) as exc:
+                raise MobileGatewayError(f"回执发布失败：{exc}") from exc
+            return
+        outbox.put({"channel": reply_channel, "data": result})
