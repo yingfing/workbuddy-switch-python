@@ -556,27 +556,41 @@ class MobileGateway:
         """单账号连接线程：指数退避重连；账号掉池/失效或全局停止即退。"""
         delay = RECONNECT_BASE_S
         uid = doc.uid
-        while not self._stop.is_set():
-            current = self.pool.documents.get(
-                getattr(self.pool, "_key", lambda d: d.uid)(doc), None) \
-                if hasattr(self.pool, "documents") else None
-            if current is not doc and current is not None:
-                return                          # 账号被移出池子（对象已被替换）
-            if not (doc.token and not doc.protected_token):
-                return                          # 凭据失效 → 退出，监督循环会重新对账
-            try:
-                self._session(doc)
-                delay = RECONNECT_BASE_S
-            except (MobileGatewayError, WsError, OSError, ValueError) as exc:
-                self._account_status(uid, last_error=str(exc)[:300])
-                self.log(f"[mobile] {uid[:8]}… 连接中断：{exc}")
-            except Exception as exc:              # 框架级意外：保命，退避重试
-                self._account_status(uid, last_error=repr(exc)[:300])
-                self.log(f"[mobile] {uid[:8]}… 意外错误：{exc!r}")
-            if self._stop.is_set():
-                return
-            self._stop.wait(timeout=delay)
-            delay = min(delay * 2, RECONNECT_MAX_S)
+        try:
+            while not self._stop.is_set():
+                current = self.pool.documents.get(
+                    getattr(self.pool, "_key", lambda d: d.uid)(doc), None) \
+                    if hasattr(self.pool, "documents") else None
+                if current is not doc and current is not None:
+                    break                   # 账号被移出池子（对象已被替换）
+                if not (doc.token and not doc.protected_token):
+                    break                   # 凭据失效 → 退出，监督循环会重新对账
+                try:
+                    self._session(doc)
+                    delay = RECONNECT_BASE_S
+                except (MobileGatewayError, WsError, OSError, ValueError) as exc:
+                    self._account_status(uid, last_error=str(exc)[:300])
+                    self.log(f"[mobile] {uid[:8]}… 连接中断：{exc}")
+                except Exception as exc:      # 框架级意外：保命，退避重试
+                    self._account_status(uid, last_error=repr(exc)[:300])
+                    self.log(f"[mobile] {uid[:8]}… 意外错误：{exc!r}")
+                if self._stop.is_set():
+                    break
+                self._stop.wait(timeout=delay)
+                delay = min(delay * 2, RECONNECT_MAX_S)
+        finally:
+            self._deregister(doc)             # 下线即注销，云端设备列表不留僵尸
+
+    def _deregister(self, doc) -> None:
+        """remote-view flag=0：把该账号的设备从云端「选择设备」列表撤下。"""
+        import requests
+        try:
+            dev = self.device_for(doc.uid)
+            set_remote_view(doc, requests.Session(), dev["device_id"], flag=0)
+            self._account_status(doc.uid, connected=False, deregistered=True)
+            self.log(f"[mobile] 已注销设备：「{doc.label()}」")
+        except Exception as exc:              # 注销失败不影响退出（下次上线覆盖）
+            self.log(f"[mobile] 注销失败（忽略）：{doc.uid[:8]}… {exc}")
 
     def _account_status(self, uid: str, **kwargs) -> None:
         with self._lock:
@@ -597,6 +611,11 @@ class MobileGateway:
         import requests
 
         dev = self.device_for(doc.uid)
+        # 设备名带账号标签：手机「选择设备」一眼认出谁是谁（多账号不再一排同名）
+        try:
+            dev = {**dev, "device_name": f"{dev['device_name']}·{doc.label()}"}
+        except Exception:
+            pass
         devices_channel = f"user:{doc.uid}:devices"
         http = requests.Session()
         http.headers.update({"User-Agent": "wbspy"})
