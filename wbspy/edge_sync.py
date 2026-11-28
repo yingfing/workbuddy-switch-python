@@ -721,7 +721,7 @@ class MobileGateway:
         result.setdefault("_cmd", cmd_type)
         reply_channel = str(cmd.get("replyChannel") or "")
         if not reply_channel:
-            self.log(f"[mobile] 指令 {cmd_type or '?'}（无 replyChannel）→ 忽略回执")
+            # 手机端 30s 一轮的无类型探测帧——静默忽略（打日志纯属刷屏）
             return
         if outbox is None:                        # 兼容直调（测试等）：同步回执
             try:
