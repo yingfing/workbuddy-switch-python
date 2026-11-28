@@ -51,6 +51,7 @@ CONNECT_TIMEOUT_S = 10.0
 PUMP_TICK_S = 1.0                            # recv 空转步长（驱动心跳/开关）
 RECONNECT_BASE_S = 2.0
 RECONNECT_MAX_S = 60.0
+SCAN_S = 15.0                                 # 监督循环对账周期（池子增删账号）
 
 
 class MobileGatewayError(Exception):
@@ -362,36 +363,79 @@ class MobileGateway:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._accounts: dict[str, dict] = {}   # uid → 每账号连接状态
         self._status = {"running": False, "connected": False, "uid": "",
                         "device_id": "", "device_name": "", "last_error": "",
-                        "connected_at": 0.0}
-        self._reconnect_delay = RECONNECT_BASE_S
+                        "connected_at": 0.0, "accounts": []}
 
     # -- 设备身份 -------------------------------------------------------------
 
-    def device(self) -> dict:
-        """设备身份（uuid4 持久化：同一台 wbspy 对手机始终是同一台桌面端）。"""
+    def _device_state_file(self) -> Path | None:
+        return (self._state_dir / "mobile-device.json") if self._state_dir else None
+
+    def _device_name(self) -> str:
+        """设备名（主机名，全账号共用；云端按 uid 空间隔离，互不可见）。"""
         with self._lock:
             if self._device:
-                return self._device
-            state_file = (self._state_dir / "mobile-device.json") if self._state_dir else None
+                return str(self._device.get("device_name")
+                           or socket.gethostname() or "wbspy")
+        state_file = self._device_state_file()
+        if state_file and state_file.exists():
+            try:
+                data = json.loads(state_file.read_text(encoding="utf-8"))
+                with self._lock:
+                    self._device = data
+                return str(data.get("device_name")
+                           or socket.gethostname() or "wbspy")
+            except (json.JSONDecodeError, OSError):
+                pass
+        name = socket.gethostname() or "wbspy"
+        with self._lock:
+            self._device = {"device_name": name, "devices": {}}
+        return name
+
+    def device_for(self, uid: str) -> dict:
+        """按账号派生设备身份：同一 uid 永远同一台「桌面端」，持久化落盘。
+
+        兼容旧版单账号格式（{"device_id", "device_name"}）：旧 device_id
+        迁移为首账号的设备，其余账号各派生新 id。
+        """
+        name = self._device_name()
+        state_file = self._device_state_file()
+        with self._lock:
+            devices = dict((self._device or {}).get("devices") or {})
+        if uid not in devices:
+            # 旧格式迁移：原全局 device_id 归首个出现的账号所有
+            legacy = ""
+            state_file = self._device_state_file()
             if state_file and state_file.exists():
                 try:
-                    self._device = json.loads(state_file.read_text(encoding="utf-8"))
-                    return self._device
+                    legacy = str(json.loads(
+                        state_file.read_text(encoding="utf-8")).get("device_id") or "")
                 except (json.JSONDecodeError, OSError):
-                    pass
-            device = {"device_id": str(uuid_mod.uuid4()),
-                      "device_name": socket.gethostname() or "wbspy"}
+                    legacy = ""
+            if legacy and not devices:
+                devices[uid] = legacy
+            else:
+                devices[uid] = str(uuid_mod.uuid4())
+            with self._lock:
+                if self._device is None:
+                    self._device = {"device_name": name, "devices": {}}
+                self._device["device_name"] = name
+                self._device.setdefault("devices", {}).update(
+                    {uid: devices[uid]})
+                snapshot = json.dumps(self._device, ensure_ascii=False)
             if state_file:
                 try:
                     state_file.parent.mkdir(parents=True, exist_ok=True)
-                    state_file.write_text(json.dumps(device, ensure_ascii=False),
-                                          encoding="utf-8")
+                    state_file.write_text(snapshot, encoding="utf-8")
                 except OSError:
                     pass
-            self._device = device
-            return device
+        return {"device_id": devices[uid], "device_name": name}
+
+    def device(self) -> dict:
+        """兼容旧接口：返回默认设备名身份（device() 功能已按账号拆分）。"""
+        return {"device_id": "", "device_name": self._device_name()}
 
     # -- 生命周期 -------------------------------------------------------------
 
@@ -400,10 +444,9 @@ class MobileGateway:
             if self._thread and self._thread.is_alive():
                 return
             self._stop.clear()
-        dev = self.device()                          # 锁外：device() 内部另取锁
+        name = self._device_name()                   # 锁外：身份函数内部另取锁
         with self._lock:
-            self._status.update(running=True, device_id=dev["device_id"],
-                                device_name=dev["device_name"], last_error="")
+            self._status.update(running=True, device_name=name, last_error="")
             self._thread = threading.Thread(target=self._run_loop,
                                             name="mobile-gateway", daemon=True)
             thread = self._thread
@@ -428,47 +471,85 @@ class MobileGateway:
 
     # -- 协议主循环 -----------------------------------------------------------
 
-    def _pick_doc(self):
-        """选一个 workbuddy 泳道明文 token 账号；没有则返回 None。"""
+    def _docs(self) -> list:
+        """全部 workbuddy 泳道明文 token 账号（多账号各开一条连接）。"""
         docs = self.pool.healthy(lane="workbuddy")
-        for doc in docs:
-            if doc.token and not doc.protected_token:
-                return doc
-        return None
+        return [d for d in docs if d.token and not d.protected_token]
 
     def _run_loop(self) -> None:
-        """外层重连循环：指数退避，stop 立即退出。"""
+        """监督循环：为每个国内版账号维护一条独立连接线程。
+
+        池子增删账号 / 账号健康度变化 → 每 SCAN_S 秒对账一次：
+        新账号拉起 worker、失效账号的 worker 自行退出。
+        """
+        workers: dict[str, dict] = {}          # uid → {thread, doc}
         while not self._stop.is_set():
-            doc = self._pick_doc()
-            if doc is None:
-                self._set_status(last_error="无可用 workbuddy 账号（需明文 token）")
-                if self._stop.wait(timeout=30.0):
-                    return
-                continue
+            uids = set()
+            for doc in self._docs():
+                uids.add(doc.uid)
+                if doc.uid in workers:
+                    continue
+                workers[doc.uid] = {
+                    "thread": threading.Thread(
+                        target=self._worker_loop, args=(doc,), daemon=True,
+                        name=f"mobile-{doc.uid[:8]}"),
+                    "doc": doc,
+                }
+                workers[doc.uid]["thread"].start()
+                self.log(f"[mobile] 账号接入：「{doc.label()}」（{len(workers)} 个账号在线）")
+            for uid in [u for u in workers if u not in uids]:
+                entry = workers.pop(uid)       # worker 检测到掉池后自行退出
+                self.log(f"[mobile] 账号退出连接池：{entry['doc'].uid[:8]}…")
+            if self._stop.wait(timeout=SCAN_S):
+                break
+        for entry in workers.values():         # 全局停止：等 worker 收尾
+            entry["thread"].join(timeout=3.0)
+
+    def _worker_loop(self, doc) -> None:
+        """单账号连接线程：指数退避重连；账号掉池/失效或全局停止即退。"""
+        delay = RECONNECT_BASE_S
+        uid = doc.uid
+        while not self._stop.is_set():
+            current = self.pool.documents.get(
+                getattr(self.pool, "_key", lambda d: d.uid)(doc), None) \
+                if hasattr(self.pool, "documents") else None
+            if current is not doc and current is not None:
+                return                          # 账号被移出池子（对象已被替换）
+            if not (doc.token and not doc.protected_token):
+                return                          # 凭据失效 → 退出，监督循环会重新对账
             try:
                 self._session(doc)
-                self._reconnect_delay = RECONNECT_BASE_S
+                delay = RECONNECT_BASE_S
             except (MobileGatewayError, WsError, OSError, ValueError) as exc:
-                self._set_status(connected=False, last_error=str(exc)[:300])
-                self.log(f"[mobile] 连接中断：{exc}")
+                self._account_status(uid, last_error=str(exc)[:300])
+                self.log(f"[mobile] {uid[:8]}… 连接中断：{exc}")
             except Exception as exc:              # 框架级意外：保命，退避重试
-                self._set_status(connected=False, last_error=str(exc)[:300])
-                self.log(f"[mobile] 意外错误：{exc!r}")
+                self._account_status(uid, last_error=repr(exc)[:300])
+                self.log(f"[mobile] {uid[:8]}… 意外错误：{exc!r}")
             if self._stop.is_set():
                 return
-            delay = min(self._reconnect_delay, RECONNECT_MAX_S)
-            self._reconnect_delay = min(self._reconnect_delay * 2, RECONNECT_MAX_S)
             self._stop.wait(timeout=delay)
+            delay = min(delay * 2, RECONNECT_MAX_S)
+
+    def _account_status(self, uid: str, **kwargs) -> None:
+        with self._lock:
+            acc = self._accounts.setdefault(uid, {})
+            acc.update(kwargs)
+            connected = [u for u, a in self._accounts.items() if a.get("connected")]
+            self._status.update(
+                connected=bool(connected),
+                uid=(connected[0] if connected else ""),
+                accounts=[{"uid": u, **a} for u, a in self._accounts.items()])
 
     def _set_status(self, **kwargs) -> None:
         with self._lock:
             self._status.update(kwargs)
 
     def _session(self, doc) -> None:
-        """一次完整的「注册 → 凭据 → WS → 心跳泵」会话。"""
+        """一次完整的「注册 → 凭据 → WS → 心跳泵」会话（按账号设备身份）。"""
         import requests
 
-        dev = self.device()
+        dev = self.device_for(doc.uid)
         devices_channel = f"user:{doc.uid}:devices"
         http = requests.Session()
         http.headers.update({"User-Agent": "wbspy"})
@@ -488,14 +569,14 @@ class MobileGateway:
                 sub_token = (cred.get("subscriptionTokens") or {}).get(wildcard)
             ws.subscribe(devices_channel, token=sub_token or "")
             ws.publish(devices_channel, self._heartbeat_payload(dev))
-            self._set_status(connected=True, uid=doc.uid,
-                             connected_at=time.time(), last_error="")
-            self.log(f"[mobile] 已上线：device={dev['device_name']} "
+            self._account_status(doc.uid, connected=True,
+                                 connected_at=time.time(), last_error="")
+            self.log(f"[mobile] 已上线：「{doc.label()}」device={dev['device_name']} "
                      f"uid={doc.uid[:8]}… 心跳 {heartbeat_s:.0f}s")
             self._pump(ws, doc, dev, devices_channel, heartbeat_s)
         finally:
             ws.close()
-            self._set_status(connected=False)
+            self._account_status(doc.uid, connected=False)
 
     @staticmethod
     def _heartbeat_payload(dev: dict, event: str = EVENT_DEVICE_ONLINE) -> dict:

@@ -4522,20 +4522,28 @@ class TestEdgeSync(unittest.TestCase):
     # -- 设备身份 + 生命周期 ------------------------------------------------------
 
     def test_device_identity_persisted(self):
-        """设备 uuid 持久化：同一目录两次取值一致；不同目录不同。"""
+        """按账号派生设备身份：同账号稳定、跨账号独立、落盘持久。"""
         import tempfile
         from wbspy.edge_sync import MobileGateway
         from wbspy.pool import AccountPool
         with tempfile.TemporaryDirectory() as tmp:
             gw = MobileGateway(AccountPool([]), log=lambda *_: None,
                                state_dir=Path(tmp))
-            d1 = gw.device()
-            d2 = MobileGateway(AccountPool([]), log=lambda *_: None,
-                               state_dir=Path(tmp)).device()
-            self.assertEqual(d1["device_id"], d2["device_id"])
-            self.assertTrue(len(d1["device_id"]) == 36)
+            d1 = gw.device_for("u-aaa")
+            d2 = gw.device_for("u-bbb")
+            self.assertEqual(len(d1["device_id"]), 36)
+            self.assertNotEqual(d1["device_id"], d2["device_id"])
+            # 同账号两次取值一致；跨实例（重新加载落盘）也一致
+            self.assertEqual(gw.device_for("u-aaa")["device_id"],
+                             d1["device_id"])
+            gw2 = MobileGateway(AccountPool([]), log=lambda *_: None,
+                                state_dir=Path(tmp))
+            self.assertEqual(gw2.device_for("u-aaa")["device_id"],
+                             d1["device_id"])
+            saved = json.loads((Path(tmp) / "mobile-device.json").read_text())
+            self.assertEqual(set(saved["devices"]), {"u-aaa", "u-bbb"})
         other = MobileGateway(AccountPool([]), log=lambda *_: None,
-                              state_dir=Path(tempfile.mkdtemp())).device()
+                              state_dir=Path(tempfile.mkdtemp())).device_for("u-aaa")
         self.assertNotEqual(d1["device_id"], other["device_id"])
 
     def test_heartbeat_payload_shape(self):
@@ -4562,7 +4570,7 @@ class TestEdgeSync(unittest.TestCase):
                 st = c.get("/api/mobile/connection").json()["data"]
                 self.assertFalse(st["enabled"])
                 self.assertFalse(st["running"])
-                self.assertTrue(st["device_id"])
+                self.assertTrue(st["device_name"])
                 on = c.post("/api/mobile/connection", json={"enabled": True})
                 self.assertTrue(on.json()["data"]["enabled"])
                 self.assertTrue(on.json()["data"]["running"])

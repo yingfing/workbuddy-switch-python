@@ -1476,8 +1476,12 @@ function pollMobile() {
     const d = r.data;
     $('#mobileConn').textContent = d.enabled ? '手机连接：开' : '手机连接：关';
     $('#mobileConn').className = 'btn ' + (d.enabled ? '' : 'ghost');
-    const dev = (d.device_name || 'wbspy') + ' · ' + (d.device_id || '').slice(0, 8) + '…';
-    $('#mobileDevice').textContent = d.uid ? dev + ' · 账号 ' + d.uid.slice(0, 8) + '…' : dev;
+    const accs = d.accounts || [];
+    const onlineCnt = accs.filter(a => a.connected).length;
+    const dev = (d.device_name || 'wbspy') + (accs.length ? ` · ${onlineCnt}/${accs.length} 账号在线` : '');
+    $('#mobileDevice').textContent = onlineCnt
+      ? dev + ' · ' + accs.filter(a => a.connected).map(a => '账号 ' + a.uid.slice(0, 8) + '…').join('、')
+      : dev;
     const online = d.enabled && d.connected;
     $('#mobileState').textContent = online ? '● 已上线（手机可连接）'
       : (d.enabled ? (d.running ? ' connecting…' : '未上线') : '已关闭');
