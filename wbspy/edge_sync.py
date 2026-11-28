@@ -277,6 +277,22 @@ class CommandRouter:
         return {"success": True, "result": result}
 
 
+def _friendly_upstream_reason(exc: Exception) -> str:
+    """上游异常 → 一句话人话原因（手机端回复用，不上纲上线）。"""
+    kind = getattr(exc, "kind", "")
+    code = str(getattr(exc, "code", "") or "")
+    if kind == "auth" or code in ("credential_required", "upstream_auth_expired"):
+        return "账号登录态刚好失效了，自动续期没能救回来"
+    if kind == "rate" or code == "upstream_quota":
+        return "账号池里暂时没有可用额度（限流或额度耗尽），正在等冷却"
+    if kind == "channel" or code in ("upstream_access_denied", "11128"):
+        return "上游渠道审查拦截了这条内容，换个说法再试试"
+    if code == "no_available_accounts":
+        return "账号池里所有账号都在冷却中"
+    text = str(exc)
+    return (text[:120] + "…") if len(text) > 120 else (text or "上游服务暂时不可用")
+
+
 def make_default_handlers(pool, log: Callable[[str], None] = print) -> dict:
     """内置最小指令面：能力探测 / 数据同步 / 会话消息（云端桥接）。
 
@@ -321,7 +337,19 @@ def make_default_handlers(pool, log: Callable[[str], None] = print) -> dict:
                    "stream": False}
         if model:
             payload["model"] = model
-        doc, resp = pool.chat_failover(payload, session=f"mobile:{cmd.get('requestId', '')}")
+        try:
+            doc, resp = pool.chat_failover(
+                payload, session=f"mobile:{cmd.get('requestId', '')}")
+        except Exception as exc:
+            # 上游报错不进手机端的错误通道——拦截后转成一条 AI 语气回复，
+            # 免得客户端满屏红。原错误仍照常写进服务端日志留痕。
+            reason = _friendly_upstream_reason(exc)
+            log(f"[mobile] 会话失败（已转为回复）：{exc}")
+            return {"success": True,
+                    "content": f"抱歉，这条消息没能送达——{reason}。"
+                               "请稍等片刻再发一次；如果连续失败，"
+                               "可以到 wbspy 面板的账号页看看账号状态。",
+                    "uid": ""}
         body = resp.json()
         try:
             content = body["choices"][0]["message"]["content"]
