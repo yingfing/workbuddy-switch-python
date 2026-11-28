@@ -300,15 +300,130 @@ class LobsterCheckin:
 # -- 码道 CodeArts ------------------------------------------------------------
 
 class CodeartsCheckin:
-    """码道活动福利每日领取：CDP 驱动系统浏览器（无 token 体系，走持久 profile）。"""
+    """码道活动福利每日领取：优先走 snap 网关 IDE 通道（AK/SK 签名）。
+
+    账号里有 codeartsCredential（AK/SK/security_token）时，直接用它调
+    ``ops/delivery → ops/claim → ops/confirm``，与模型调用同一套
+    SDK-HMAC-SHA256 签名（协议对照 FreeModelHub CodeArtsAdapter，
+    needsChromium=false）；只有缺凭据时才回落 CDP。
+    """
+
+    _SNAP = "https://snap-access.cn-north-4.myhuaweicloud.com"
+    _PACKAGE_INFO = f"{_SNAP}/snap-manager/v1/statistics/plugin"
+    _OPS_DELIVERY = f"{_SNAP}/v1/ops/delivery"
+    _OPS_CLAIM = f"{_SNAP}/v1/ops/claim"
+    _OPS_CONFIRM = f"{_SNAP}/v1/ops/confirm"
+    _CHANNEL = "IDE"
+    _DAILY_TYPE = "USER_LOGIN"
+    _CLAIMED = {"CLAIMED", "CONFIRMED", "CONSUMED"}
 
     def __init__(self, doc, log=print):
         self.doc = doc
         self.log = log
 
     def run(self) -> dict:
-        from .codearts_browser import checkin_by_browser
-        return checkin_by_browser(self.log)
+        cred = dict((self.doc.raw or {}).get("codeartsCredential") or {})
+        if not (cred.get("access_key_id") and cred.get("security_token")):
+            from .codearts_browser import checkin_by_browser
+            return checkin_by_browser(self.log)
+        try:
+            return self._claim_by_ak(cred)
+        except Exception as exc:
+            return {"checkin": f"失败：{str(exc)[:120]}"}
+
+    def _sign(self, cred: dict, method: str, url: str, body: str = "") -> dict:
+        """SDK-HMAC-SHA256 全头签名（与模型调用同一套）。"""
+        import datetime as _dt
+        import hashlib
+        import hmac as _hmac
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        canonical_uri = parsed.path if parsed.path.endswith("/") else parsed.path + "/"
+        sdk_date = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        body_hash = hashlib.sha256(body.encode()).hexdigest()
+        signed = {"host": parsed.hostname or "", "x-sdk-date": sdk_date}
+        sts = cred.get("security_token") or ""
+        if sts:
+            signed["x-security-token"] = sts
+        names = sorted(signed)
+        canonical_headers = "".join(f"{n}:{signed[n]}\n" for n in names)
+        signed_headers = ";".join(names)
+        canonical_request = "\n".join([
+            method.upper(), canonical_uri, parsed.query or "",
+            canonical_headers, signed_headers, body_hash])
+        string_to_sign = "\n".join([
+            "SDK-HMAC-SHA256", sdk_date,
+            hashlib.sha256(canonical_request.encode()).hexdigest()])
+        signature = _hmac.new((cred.get("secret_access_key") or "").encode(),
+                              string_to_sign.encode(), hashlib.sha256).hexdigest()
+        headers = {"user-agent": "codearts-agent", "x-sdk-date": sdk_date,
+                   "Agent-Type": "PromptCenter", "X-Language": "zh-cn"}
+        if sts:
+            headers["x-security-token"] = sts
+        headers["authorization"] = (
+            f"SDK-HMAC-SHA256 Access={cred.get('access_key_id', '')}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}")
+        if body:
+            headers["content-type"] = "application/json"
+        return headers
+
+    def _call(self, cred: dict, method: str, url: str, body=None, timeout=20):
+        import json as _json
+        import requests as _requests
+        body_text = "" if body is None else _json.dumps(body, ensure_ascii=False)
+        headers = self._sign(cred, method, url, body_text)
+        r = _requests.request(method, url, headers=headers,
+                              data=body_text if body is not None else None,
+                              timeout=timeout)
+        try:
+            data = r.json()
+        except ValueError:
+            data = None
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code} {str(data)[:120]}")
+        if isinstance(data, dict) and isinstance(data.get("code"), int):
+            if data["code"] != 0:
+                msg = data.get("message") or data.get("msg") or f"业务码 {data['code']}"
+                raise RuntimeError(msg)
+            return data.get("data")
+        return data
+
+    def _claim_by_ak(self, cred: dict) -> dict:
+        """三层请求，顺序与字段严格照 FreeModelHub CodeArtsAdapter。"""
+        info = self._call(cred, "GET", self._PACKAGE_INFO) or {}
+        pkg = info.get("package_info") if isinstance(info, dict) else None
+        pkg = pkg if isinstance(pkg, dict) else {}
+        if not pkg.get("is_credit_package"):
+            return {"checkin": "Token 计费账号，不在积分活动范围"} if pkg.get("is_token_package") \
+                else {"checkin": "非积分计费账号，不参与签到"}
+        delivery = self._call(cred, "GET",
+                              f"{self._OPS_DELIVERY}?channel={self._CHANNEL}") or {}
+        items = delivery.get("items") if isinstance(delivery, dict) else None
+        items = items if isinstance(items, list) else []
+        activity = next((i for i in items
+                         if isinstance(i, dict) and i.get("type") == self._DAILY_TYPE), None)
+        if activity is None:
+            return {"checkin": "未找到每日签到活动"}
+        if not activity.get("claimable"):
+            status = activity.get("status") or ""
+            if status in self._CLAIMED:
+                return {"checkin": "今日已签到"}
+            return {"checkin": f"当前不可领取（status={status}）"}
+        cid = activity.get("campaignId")
+        if cid is None or cid == "":
+            return {"checkin": "活动缺 campaignId，无法领取"}
+        claim = self._call(cred, "POST", self._OPS_CLAIM,
+                          {"campaignId": str(cid), "channel": self._CHANNEL}) or {}
+        claim = claim if isinstance(claim, dict) else {}
+        if claim.get("id") not in (None, ""):
+            try:
+                self._call(cred, "POST", self._OPS_CONFIRM,
+                          {"campaignId": str(cid)}, timeout=15)
+            except Exception:
+                pass
+        credit = (claim.get("benefitAmount") or claim.get("credit")
+                  or activity.get("benefitAmount") or 0)
+        return {"checkin": f"签到成功 +{credit} 积分" if credit else "签到成功"}
 
 
 # -- Loomy（讯飞星火）----------------------------------------------------------

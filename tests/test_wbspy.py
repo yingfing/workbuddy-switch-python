@@ -6293,3 +6293,219 @@ class TestChannelHide(unittest.TestCase):
                                     json={"disabled": ["nope"]}).status_code, 400)
             self.assertEqual(c.post("/api/settings/channel-hide",
                                     json={"disabled": "zcode"}).status_code, 400)
+
+
+class TestCodeartsCheckinAkPath(unittest.TestCase):
+    """CodeartsCheckin：有 AK/SK 时走 snap 网关 IDE 通道，不需要 CDP。"""
+
+    def _doc(self, cred=None):
+        from wbspy.document import parse_auth
+        cc = cred or {"access_key_id": "AK", "secret_access_key": "SK",
+                      "security_token": "ST"}
+        doc = parse_auth({"account": {"uid": "ca1", "nickname": "C"},
+                          "auth": {"accessToken": "ST",
+                                   "domain": "codearts.huaweicloud.com"}})
+        doc.raw.setdefault("channel", "codearts")
+        doc.raw["codeartsCredential"] = cc
+        return doc
+
+    def _no_browser(self):
+        """确保任何 CDP 回落都会立刻失败（证明没走浏览器）。"""
+        import wbspy.codearts_browser as cb
+        from unittest.mock import patch
+        return patch.object(cb, "checkin_by_browser",
+                            side_effect=AssertionError("不该走 CDP"))
+
+    def test_missing_cred_falls_back_to_browser(self):
+        """没有 AK/SK 时才回落到 CDP。"""
+        from wbspy.benefits import CodeartsCheckin
+        from unittest.mock import patch
+        doc = self._doc()                       # 有 AK/SK
+        doc.raw["codeartsCredential"] = {}     # 抹掉
+        with patch("wbspy.codearts_browser.checkin_by_browser",
+                   return_value={"checkin": "来自CDP"}) as cb:
+            out = CodeartsCheckin(doc, log=lambda *_: None).run()
+        self.assertEqual(out["checkin"], "来自CDP")
+        cb.assert_called_once()
+
+    def test_token_package_not_eligible(self):
+        """Token 计费号不参与积分活动，直接返回说明，不发 claim。"""
+        from wbspy.benefits import CodeartsCheckin
+        from unittest.mock import patch
+        doc = self._doc()
+        pkg = {"package_info": {"is_credit_package": False, "is_token_package": True}}
+        with patch.object(CodeartsCheckin, "_call", return_value=pkg) as mc, \
+             self._no_browser():
+            out = CodeartsCheckin(doc, log=lambda *_: None).run()
+        self.assertIn("Token 计费", out["checkin"])
+        self.assertEqual(mc.call_count, 1)     # 只查了 package_info
+
+    def test_claim_flow_ide_channel(self):
+        """完整三层请求：package_info -> delivery?channel=IDE -> claim -> confirm。"""
+        from wbspy.benefits import CodeartsCheckin
+        from unittest.mock import patch
+        doc = self._doc()
+        seq = [
+            {"package_info": {"is_credit_package": True}},
+            {"items": [{"type": "USER_LOGIN", "claimable": True,
+                        "campaignId": 777, "benefitAmount": 100}]},
+            {"id": "b-1", "benefitAmount": 100},
+            None,
+        ]
+        with patch.object(CodeartsCheckin, "_call", side_effect=seq) as mc, \
+             self._no_browser():
+            out = CodeartsCheckin(doc, log=lambda *_: None).run()
+        self.assertIn("签到成功", out["checkin"])
+        self.assertIn("100", out["checkin"])
+        urls = [c.args[2] for c in mc.call_args_list]
+        self.assertIn("statistics/plugin", urls[0])
+        self.assertIn("ops/delivery?channel=IDE", urls[1])
+        self.assertIn("ops/claim", urls[2])
+        self.assertIn("ops/confirm", urls[3])
+        claim_body = mc.call_args_list[2].args[3]
+        self.assertEqual(claim_body, {"campaignId": "777", "channel": "IDE"})
+
+    def test_already_claimed_is_quiet(self):
+        """claimable=false 且 status 已领 -> 报「今日已签到」，不报失败。"""
+        from wbspy.benefits import CodeartsCheckin
+        from unittest.mock import patch
+        doc = self._doc()
+        seq = [
+            {"package_info": {"is_credit_package": True}},
+            {"items": [{"type": "USER_LOGIN", "claimable": False,
+                        "status": "CLAIMED"}]},
+        ]
+        with patch.object(CodeartsCheckin, "_call", side_effect=seq) as mc, \
+             self._no_browser():
+            out = CodeartsCheckin(doc, log=lambda *_: None).run()
+        self.assertEqual(out["checkin"], "今日已签到")
+        self.assertEqual(mc.call_count, 2)
+
+    def test_sign_headers_shape(self):
+        """签名头：SDK-HMAC-SHA256 + x-security-token，与模型调用同一套。"""
+        from wbspy.benefits import CodeartsCheckin
+        doc = self._doc()
+        c = CodeartsCheckin(doc)
+        h = c._sign({"access_key_id": "AK", "secret_access_key": "SK",
+                     "security_token": "ST"},
+                    "POST", "https://snap-access.cn-north-4.myhuaweicloud.com/v1/ops/claim",
+                    '{"campaignId":"1"}')
+        self.assertTrue(h["authorization"].startswith("SDK-HMAC-SHA256 Access=AK,"))
+        self.assertIn("Signature=", h["authorization"])
+        self.assertEqual(h["x-security-token"], "ST")
+        self.assertEqual(h["x-sdk-date"][-1], "Z")
+        self.assertEqual(h["content-type"], "application/json")
+        self.assertEqual(h["Agent-Type"], "PromptCenter")
+
+
+class TestCodeartsChannelCapabilities(unittest.TestCase):
+    """codearts 渠道声明 refresh/chat 能力，pool 的续期线程才会接管。"""
+
+
+
+class TestCodeartsCheckinAkPath(unittest.TestCase):
+    """CodeartsCheckin：有 AK/SK 时走 snap 网关 IDE 通道，不需要 CDP。"""
+
+    def _doc(self, cred=None):
+        from wbspy.document import parse_auth
+        cc = cred or {"access_key_id": "AK", "secret_access_key": "SK",
+                      "security_token": "ST"}
+        doc = parse_auth({"account": {"uid": "ca1", "nickname": "C"},
+                          "auth": {"accessToken": "ST",
+                                   "domain": "codearts.huaweicloud.com"}})
+        doc.raw.setdefault("channel", "codearts")
+        doc.raw["codeartsCredential"] = cc
+        return doc
+
+    def _no_browser(self):
+        """确保任何 CDP 回落都会立刻失败（证明没走浏览器）。"""
+        import wbspy.codearts_browser as cb
+        from unittest.mock import patch
+        return patch.object(cb, "checkin_by_browser",
+                            side_effect=AssertionError("不该走 CDP"))
+
+    def test_missing_cred_falls_back_to_browser(self):
+        """没有 AK/SK 时才回落到 CDP。"""
+        from wbspy.benefits import CodeartsCheckin
+        from unittest.mock import patch
+        doc = self._doc()                       # 有 AK/SK
+        doc.raw["codeartsCredential"] = {}     # 抹掉
+        with patch("wbspy.codearts_browser.checkin_by_browser",
+                   return_value={"checkin": "来自CDP"}) as cb:
+            out = CodeartsCheckin(doc, log=lambda *_: None).run()
+        self.assertEqual(out["checkin"], "来自CDP")
+        cb.assert_called_once()
+
+    def test_token_package_not_eligible(self):
+        """Token 计费号不参与积分活动，直接返回说明，不发 claim。"""
+        from wbspy.benefits import CodeartsCheckin
+        from unittest.mock import patch
+        doc = self._doc()
+        pkg = {"package_info": {"is_credit_package": False, "is_token_package": True}}
+        with patch.object(CodeartsCheckin, "_call", return_value=pkg) as mc, \
+             self._no_browser():
+            out = CodeartsCheckin(doc, log=lambda *_: None).run()
+        self.assertIn("Token 计费", out["checkin"])
+        self.assertEqual(mc.call_count, 1)     # 只查了 package_info
+
+    def test_claim_flow_ide_channel(self):
+        """完整三层请求：package_info -> delivery?channel=IDE -> claim -> confirm。"""
+        from wbspy.benefits import CodeartsCheckin
+        from unittest.mock import patch
+        doc = self._doc()
+        seq = [
+            {"package_info": {"is_credit_package": True}},
+            {"items": [{"type": "USER_LOGIN", "claimable": True,
+                        "campaignId": 777, "benefitAmount": 100}]},
+            {"id": "b-1", "benefitAmount": 100},
+            None,
+        ]
+        with patch.object(CodeartsCheckin, "_call", side_effect=seq) as mc, \
+             self._no_browser():
+            out = CodeartsCheckin(doc, log=lambda *_: None).run()
+        self.assertIn("签到成功", out["checkin"])
+        self.assertIn("100", out["checkin"])
+        urls = [c.args[2] for c in mc.call_args_list]
+        self.assertIn("statistics/plugin", urls[0])
+        self.assertIn("ops/delivery?channel=IDE", urls[1])
+        self.assertIn("ops/claim", urls[2])
+        self.assertIn("ops/confirm", urls[3])
+        claim_body = mc.call_args_list[2].args[3]
+        self.assertEqual(claim_body, {"campaignId": "777", "channel": "IDE"})
+
+    def test_already_claimed_is_quiet(self):
+        """claimable=false 且 status 已领 -> 报「今日已签到」，不报失败。"""
+        from wbspy.benefits import CodeartsCheckin
+        from unittest.mock import patch
+        doc = self._doc()
+        seq = [
+            {"package_info": {"is_credit_package": True}},
+            {"items": [{"type": "USER_LOGIN", "claimable": False,
+                        "status": "CLAIMED"}]},
+        ]
+        with patch.object(CodeartsCheckin, "_call", side_effect=seq) as mc, \
+             self._no_browser():
+            out = CodeartsCheckin(doc, log=lambda *_: None).run()
+        self.assertEqual(out["checkin"], "今日已签到")
+        self.assertEqual(mc.call_count, 2)
+
+    def test_sign_headers_shape(self):
+        """签名头：SDK-HMAC-SHA256 + x-security-token，与模型调用同一套。"""
+        from wbspy.benefits import CodeartsCheckin
+        doc = self._doc()
+        c = CodeartsCheckin(doc)
+        h = c._sign({"access_key_id": "AK", "secret_access_key": "SK",
+                     "security_token": "ST"},
+                    "POST", "https://snap-access.cn-north-4.myhuaweicloud.com/v1/ops/claim",
+                    '{"campaignId":"1"}')
+        self.assertTrue(h["authorization"].startswith("SDK-HMAC-SHA256 Access=AK,"))
+        self.assertIn("Signature=", h["authorization"])
+        self.assertEqual(h["x-security-token"], "ST")
+        self.assertEqual(h["x-sdk-date"][-1], "Z")
+        self.assertEqual(h["content-type"], "application/json")
+        self.assertEqual(h["Agent-Type"], "PromptCenter")
+
+
+class TestCodeartsChannelCapabilities(unittest.TestCase):
+    """codearts 渠道声明 refresh/chat 能力，pool 的续期线程才会接管。"""
+

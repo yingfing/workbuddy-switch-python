@@ -79,7 +79,7 @@ CHANNELS: dict[str, Channel] = {c.id: c for c in (
             origin="https://www.huaweicloud.com", login_kind="codearts-ticket",
             note="免费体验套餐自动续期不收费；每日活动福利签到（CDP 驱动系统浏览器，先跑 wbspy codearts-login）",
             credits_claim=True, welfare=("daily",),
-            capabilities=("checkin",)),
+            capabilities=("checkin", "credits")),
     Channel("lobsterai", "LobsterAI", "有道", "browser",
             login_kind="lobsterai-callback", origin="https://lobsterai.youdao.com",
             note="每日签到领积分，积分换模型调用额度", credits_claim=True,
