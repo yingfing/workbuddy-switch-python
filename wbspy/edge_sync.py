@@ -293,7 +293,8 @@ def _friendly_upstream_reason(exc: Exception) -> str:
     return (text[:120] + "…") if len(text) > 120 else (text or "上游服务暂时不可用")
 
 
-def make_default_handlers(pool, log: Callable[[str], None] = print) -> dict:
+def make_default_handlers(pool, log: Callable[[str], None] = print,
+                          dbg: Callable[[dict], None] | None = None) -> dict:
     """内置最小指令面：能力探测 / 数据同步 / 会话消息（云端桥接）。
 
     handler 签名 fn(cmd) -> dict（含 success），由 CommandRouter 归一化。
@@ -337,6 +338,7 @@ def make_default_handlers(pool, log: Callable[[str], None] = print) -> dict:
                    "stream": False}
         if model:
             payload["model"] = model
+        t0 = time.monotonic()
         try:
             doc, resp = pool.chat_failover(
                 payload, session=f"mobile:{cmd.get('requestId', '')}")
@@ -345,6 +347,14 @@ def make_default_handlers(pool, log: Callable[[str], None] = print) -> dict:
             # 免得客户端满屏红。原错误仍照常写进服务端日志留痕。
             reason = _friendly_upstream_reason(exc)
             log(f"[mobile] 会话失败（已转为回复）：{exc}")
+            if dbg:
+                dbg({"ip": "mobile", "method": "MOBILE",
+                     "path": "conversations:send",
+                     "status": int(getattr(exc, "status", 0) or 502),
+                     "ms": int((time.monotonic() - t0) * 1000),
+                     "auth": str(model or "auto"),
+                     "body": f"「{text[:40]}」",
+                     "note": reason, "ua": "手机指令通道"})
             return {"success": True,
                     "content": f"抱歉，这条消息没能送达——{reason}。"
                                "请稍等片刻再发一次；如果连续失败，"
@@ -356,6 +366,13 @@ def make_default_handlers(pool, log: Callable[[str], None] = print) -> dict:
         except (KeyError, IndexError, TypeError):
             content = str(body)[:500]
         log(f"[mobile] 会话消息：「{doc.label()}」{len(content)} 字")
+        if dbg:
+            dbg({"ip": "mobile", "method": "MOBILE",
+                 "path": "conversations:send", "status": 200,
+                 "ms": int((time.monotonic() - t0) * 1000),
+                 "auth": f"{doc.label()} · {model or 'auto'}",
+                 "body": f"问：「{text[:40]}」 答 {len(content)} 字",
+                 "ua": "手机指令通道"})
         return {"success": True, "content": content, "uid": doc.uid}
 
     return {
@@ -380,13 +397,15 @@ class MobileGateway:
     """
 
     def __init__(self, pool, log: Callable[[str], None] = print,
-                 state_dir: Path | None = None):
+                 state_dir: Path | None = None,
+                 dbg: Callable[[dict], None] | None = None):
         self.pool = pool
         self.log = log
+        self._dbg = dbg                    # 调试环回调（webui 传入 app.state.gw_dbg）
         self._state_dir = Path(state_dir) if state_dir else None
         self._device: dict | None = None
         self._router = CommandRouter()
-        for cmd_type, handler in make_default_handlers(pool, log).items():
+        for cmd_type, handler in make_default_handlers(pool, log, dbg=dbg).items():
             self._router.on(cmd_type, handler)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()

@@ -504,7 +504,8 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
 
     from .store import ROOT as _store_root
     app.state.mobile_gateway = MobileGateway(pool, log=_log,
-                                             state_dir=_store_root / "data")
+                                             state_dir=_store_root / "data",
+                                             dbg=getattr(app.state, "gw_dbg", None))
 
     def _mobile_sync() -> dict:
         """按 config.mobile.enabled 同步网关线程状态。"""
