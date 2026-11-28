@@ -237,19 +237,27 @@ def is_third_party_opening(value: str) -> bool:
 
 
 def apply_channel_lead_in(messages: list[dict]) -> list[dict]:
-    """对策一：首条 system 若以第三方指纹开头，前置中性导语。"""
-    for i, msg in enumerate(messages):
-        if msg.get("role") == "system":
-            text = _system_text(msg.get("content"))
-            if not is_third_party_opening(text):
-                return messages
+    """对策一：system 若以第三方指纹开头，前置中性导语。
+
+    必须扫全部 system——记忆注入（gateway.memory_inject）会在最前面插一条
+    「【用户长期记忆】」system，它本身不以指纹开头；只看第一条的话，真正的
+    指纹 system 被记忆块挡住而漏检，11128 必现且随注入开关时好时坏。
+    对每条指纹开头 system 分别加导语，无指纹的（含记忆块）不动。
+    """
+    out: list[dict] = []
+    changed = False
+    for msg in messages:
+        if (msg.get("role") == "system"
+                and is_third_party_opening(_system_text(msg.get("content")))):
             if isinstance(msg["content"], str):
-                lead = {**msg, "content": f"{CHANNEL_LEAD_IN}\n\n{text}"}
+                out.append({**msg, "content": f"{CHANNEL_LEAD_IN}\n\n{msg['content']}"})
             else:
-                lead = {**msg, "content": [
-                    {"type": "text", "text": CHANNEL_LEAD_IN}, *msg["content"]]}
-            return messages[:i] + [lead] + messages[i + 1:]
-    return messages
+                out.append({**msg, "content": [
+                    {"type": "text", "text": CHANNEL_LEAD_IN}, *msg["content"]]})
+            changed = True
+        else:
+            out.append(msg)
+    return out if changed else messages
 
 
 # 11128 对策三（真相实锤，blog.balong.in/archives/workbuddy-unapproved-channel-400-fix）：

@@ -2,6 +2,11 @@
 
 全部 notable 变更按版本倒序记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [未发布]
+
+### 修复
+- **记忆注入开启时 11128 必现**（对策一锚点被抢，v0.2.47 记忆功能上线起存在）：记忆注入把「【用户长期记忆】」system 插到 messages 最前，而 `apply_channel_lead_in` 只检查第一条 system——它不以第三方指纹开头即直接返回，真正的指纹 system（如 "You are … powered by …"）被记忆块挡住漏检、拿不到中性导语，11128 渠道拒绝必现；关闭记忆注入即消失（开关成了伪装成配置项的临时解）。现在逐条扫描全部 system，凡指纹开头的都加导语；豆包扫码登录同批修复（对齐 doubao2api：Web aid 497858 + ttwid/csrf 暖会话 + redirect 链逐跳收 Cookie）。
+
 ## [0.2.68] — 2026-11-22
 
 ### 增强
