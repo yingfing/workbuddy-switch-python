@@ -3,7 +3,20 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from wbspy import __version__, update
+
+
+@pytest.fixture(autouse=True)
+def _isolated_best_ip(monkeypatch, tmp_path):
+    """优选缓存落盘隔离：任何测试都不得读写真实 ~/.wbspy/github_best.json。
+
+    v0.2.68 的「上次优选」缓存会把成功通道写进真实用户目录，紧随其后的
+    候选排序测试会读到上一条测试留下的 IP（198.51.100.9 抢占 DoH 首位），
+    导致 CI 必挂。统一重定向到本测试的临时目录。
+    """
+    monkeypatch.setattr(update, "BEST_IP_FILE", tmp_path / "github_best.json")
 
 
 def test_vtuple_variants():
