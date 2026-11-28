@@ -95,6 +95,9 @@ input:focus{border-color:var(--accent);border-width:2px;padding:7px 11px}
   width:min(420px,92vw);text-align:center;box-shadow:var(--shadow)}
 .modal .box h3{font-size:15px;margin-bottom:8px}
 .modal .box .note{color:var(--dim);font-size:12px;margin:10px 0}
+.cl-body{font-size:13px;line-height:1.65;word-break:break-word}
+.cl-body h4{font-size:13.5px}
+.cl-body code{background:var(--line);padding:1px 5px;border-radius:5px;font-size:12px}
 #qr{background:#fff;border-radius:8px;padding:10px;display:inline-block;min-width:180px;min-height:180px}
 #qr svg{display:block;width:200px;height:200px}
 .pill{font-size:11px;color:var(--dim)}
@@ -298,6 +301,7 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
     <button data-tab="switch">桌面切换</button>
     <button data-tab="gateway">网关</button>
     <button data-tab="hide">屏蔽</button>
+    <button data-tab="changelog">更新日志</button>
     <button data-tab="diag">诊断</button>
   </nav>
 
@@ -626,6 +630,14 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
     <p class="dim">用不了的渠道在这里屏蔽掉，客户端就看不到它、也不会把请求发向它；想恢复随时回来打开。默认什么都不屏蔽。</p>
     <div id="chHideList" style="display:grid;gap:8px;max-width:640px;margin-top:12px"></div>
   </section>
+  <section id="tab-changelog" hidden>
+    <div class="card">
+      <h2>更新日志 <span class="tag" id="clCurVer"></span>
+        <span class="qmark" data-tip="版本倒序展示 <code>CHANGELOG.md</code> 全部条目。新版本发布后首次打开面板会弹窗提示本次更新内容，确认后浏览器记一枚饼干，同一版本不再打扰；想回看随时来这里。" tabindex="0">?</span></h2>
+      <p class="pill">更新完成后自动弹窗告诉你「这次更新了啥」；看完确认就不再弹。想翻旧账，全在这页。</p>
+      <div id="changelogList" style="display:grid;gap:14px;max-width:860px"></div>
+    </div>
+  </section>
   <section id="tab-diag" hidden>
     <div class="card">
       <h2>一键排查 <span class="qmark" data-tip="聚合健康判定、账号池状态（含冷却）、最近 10 分钟错误分布、近 7 日用量、配置摘要与最近 30 行运行日志，生成一份脱敏纯文本报告——token 与 API Key 不出现原文。复制后直接发给 AI 即可远程排障。" tabindex="0">?</span></h2>
@@ -653,6 +665,19 @@ th{text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
       <a href="#" id="mLink" target="_blank" hidden><button class="btn ghost">在新窗口打开官方登录页 ↗</button></a>
     </div>
     <div style="margin-top:14px"><button class="btn ghost" onclick="closeModal()">关闭</button></div>
+  </div>
+</div>
+
+<!-- 新版本更新弹窗：版本变化时弹一次，确认后记饼干 -->
+<div class="modal" id="updModal">
+  <div class="box" style="max-width:640px">
+    <h3>🎉 已更新到 <span id="updVer"></span></h3>
+    <div class="note">这次更新了啥（<span id="updDate"></span>）：</div>
+    <div id="updBody" class="cl-body" style="max-height:46vh;overflow:auto"></div>
+    <div class="row" style="justify-content:center;margin-top:14px;gap:8px">
+      <button class="btn" onclick="updAck()">知道了，别再弹这个版本</button>
+      <button class="btn ghost" onclick="updToHistory()">翻完整更新历史</button>
+    </div>
   </div>
 </div>
 
@@ -923,7 +948,7 @@ pollMobile();
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#tabs button').forEach(x => x.classList.remove('on'));
   b.classList.add('on');
-  ['dash','login','accounts','free','auto','switch','gateway','hide','diag'].forEach(t =>
+  ['dash','login','accounts','free','auto','switch','gateway','hide','changelog','diag'].forEach(t =>
     $('#tab-' + t).hidden = t !== b.dataset.tab);
   if (b.dataset.tab === 'dash') loadDashboard();
   if (b.dataset.tab === 'accounts') loadAccounts();
@@ -933,6 +958,7 @@ document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   if (b.dataset.tab === 'gateway') { loadGateway(); loadForensics(); }
   if (b.dataset.tab === 'free') loadFree();
   if (b.dataset.tab === 'hide') loadChannelHide();
+  if (b.dataset.tab === 'changelog') loadChangelog();
 });
 
 // -- 概览仪表盘（1Panel 风格：统计卡 + 7 日用量 + 渠道分布 + 最近签到）--
@@ -1091,6 +1117,67 @@ setInterval(() => {
   if (!$('#tab-dash').hidden && !document.hidden) loadDashboard();
 }, 30000);
 loadDashboard();
+
+// -- 更新日志：新版本弹窗（饼干 = 浏览器记下已确认的版本号，不再重复弹）+ 历史 tab --
+const SEEN_COOKIE = 'wbspy_seen_ver';
+function seenVer(){
+  const m = document.cookie.match('(?:^|;\\s*)' + SEEN_COOKIE + '=([^;]*)');
+  return m ? decodeURIComponent(m[1]) : (localStorage.getItem(SEEN_COOKIE) || '');
+}
+function setSeenVer(v){
+  document.cookie = SEEN_COOKIE + '=' + encodeURIComponent(v) + ';max-age=31536000;path=/;samesite=lax';
+  try{ localStorage.setItem(SEEN_COOKIE, v); }catch(e){}
+}
+function clFmt(text){                       // 轻量 markdown：### 标题 / **加粗** / `代码` / 列表
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return esc(text)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/^###\s*(.+)/gm, '<h4 style="margin:10px 0 4px">$1</h4>')
+    .replace(/^-\s*/gm, '• ')
+    .replace(/\n/g, '<br>');
+}
+async function loadChangelog(){
+  try{
+    const r = await api('/api/changelog');
+    if (!r.ok) throw new Error(r.error || '读取失败');
+    $('#clCurVer').textContent = '当前 v' + r.data.current;
+    const list = $('#changelogList');
+    list.innerHTML = r.data.entries.length ? '' : '<p class="pill">没找到 CHANGELOG.md（pip 安装形态可能未随包分发）。</p>';
+    for (const e of r.data.entries){
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.style.marginBottom = '0';
+      const cur = e.version === r.data.current;
+      card.innerHTML =
+        `<h2 style="margin-bottom:6px">v${e.version} <span class="tag">${e.date}</span>${cur ? ' <span class="tag">当前</span>' : ''}</h2>` +
+        `<div class="cl-body">${clFmt(e.body)}</div>`;
+      list.appendChild(card);
+    }
+  }catch(e){ toast('更新日志读取失败：' + (e.message || e), false); }
+}
+function updToHistory(){
+  $('#updModal').classList.remove('on');
+  setSeenVer($('#updModal').dataset.ver || '');
+  gotoTab('changelog');
+}
+function updAck(){
+  $('#updModal').classList.remove('on');
+  setSeenVer($('#updModal').dataset.ver || '');
+}
+(async function checkNewVersion(){          // 启动时：版本变了 → 弹窗一次
+  try{
+    const r = await api('/api/changelog');
+    if (!r.ok || !r.data.entries.length) return;
+    const latest = r.data.entries[0];
+    if (seenVer() === latest.version) return;       // 饼干还在：不打扰
+    $('#updVer').textContent = 'v' + latest.version;
+    $('#updDate').textContent = latest.date;
+    $('#updBody').innerHTML = clFmt(latest.body);
+    $('#updModal').dataset.ver = latest.version;
+    $('#updModal').classList.add('on');
+  }catch(e){ /* 静默：日志读取失败不阻塞面板 */ }
+})();
 
 // -- 渠道列表 --
 async function loadChannels() {

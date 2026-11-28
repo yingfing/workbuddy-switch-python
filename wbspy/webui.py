@@ -55,6 +55,38 @@ from .switch import restore_previous, save_current_account, switch_account
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _parse_changelog() -> list[dict]:
+    """CHANGELOG.md → [{version, date, body}]（倒序）。
+
+    兼容三种安装形态：源码克隆（包目录的上级）、pip 安装（包目录内随包分发）、
+    下载替换（仓库根）。找不到文件返回空列表——前端不弹窗即可。
+    """
+    import re as _re
+    candidates = [Path(__file__).resolve().parent.parent / "CHANGELOG.md",
+                  Path(__file__).resolve().parent / "CHANGELOG.md",
+                  Path.cwd() / "CHANGELOG.md"]
+    text = ""
+    for cand in candidates:
+        if cand.is_file():
+            try:
+                text = cand.read_text("utf-8")
+                break
+            except OSError:
+                continue
+    entries: list[dict] = []
+    cur: dict | None = None
+    for line in text.splitlines():
+        m = _re.match(r"^##\s*\[([^\]]+)\]\s*[—–-]+\s*(.+?)\s*$", line)
+        if m:
+            cur = {"version": m.group(1).strip(), "date": m.group(2).strip(), "body": ""}
+            entries.append(cur)
+        elif cur is not None and line.strip() != "":
+            cur["body"] += (("\n" if cur["body"] else "") + line.rstrip())
+    for e in entries:                       # 去掉每节尾部的空行堆积
+        e["body"] = e["body"].strip()
+    return entries
+
+
 def _ok(data=None, **extra) -> dict:
     return {"ok": True, "data": data, **extra}
 
@@ -260,6 +292,14 @@ def create_web_app(pool: AccountPool, api_key: str = "", port: int | None = None
             return _ok(result)
         except (KeyError, RuntimeError, ValueError) as exc:
             return _err(exc)
+
+    @app.get("/api/changelog")
+    def api_changelog():
+        """更新日志（结构化，倒序）。前端：新版本弹窗 + 「更新日志」tab。"""
+        entries = _parse_changelog()
+        current = next((e["version"] for e in entries
+                        if e["version"] == __version__), __version__)
+        return _ok({"current": __version__, "entries": entries, "in_changelog": bool(entries)})
 
     @app.get("/api/login/poll/{ticket}")
     def login_poll(ticket: str):
