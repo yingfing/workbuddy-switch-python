@@ -375,6 +375,108 @@ def make_default_handlers(pool, log: Callable[[str], None] = print,
                  "ua": "手机指令通道"})
         return {"success": True, "content": content, "uid": doc.uid}
 
+    # -- 默认指令面补齐（原始 edge-sync 指令集） --------------------------------
+    # wbspy 是无头直连网关，没有本地会话库/工作区/产物——能如实报空的就报空，
+    # 能用本地数据合成的就合成，绝不让指令落进 router 的「不支持」失败通道。
+
+    def _automation_history() -> list[dict]:
+        from .automation import HISTORY_PATH
+        try:
+            if HISTORY_PATH.exists():
+                return json.loads(
+                    HISTORY_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+        return []
+
+    def conversations_list(cmd: dict) -> dict:
+        """本地无会话库：用自动化签到历史合成一份「会话列表」。"""
+        items = []
+        for entry in _automation_history()[:20]:
+            results = entry.get("results") or []
+            labels = "、".join(str(r.get("label", "")) for r in results)
+            ok = sum(1 for r in results if (r.get("summary") or {}).get("ok"))
+            items.append({
+                "id": f"auto-{entry.get('at', 0)}",
+                "title": f"自动签到 · {labels}" if labels else "自动签到",
+                "snippet": (f"{ok}/{len(results)} 账号完成"
+                            if results else (entry.get("log") or [""])[-1]),
+                "updatedAt": entry.get("at", 0),
+            })
+        return {"success": True, "conversations": items, "hasMore": False}
+
+    def conversations_get(cmd: dict) -> dict:
+        args = cmd.get("args") or []
+        cid = str(args[0].get("id") or args[0].get("conversationId") or ""
+                  ) if args and isinstance(args[0], dict) else ""
+        conv = None
+        if cid.startswith("auto-"):
+            for entry in _automation_history():
+                if cid == f"auto-{entry.get('at', 0)}":
+                    labels = "、".join(str(r.get("label", "")) for r in
+                                       entry.get("results") or [])
+                    conv = {"id": cid,
+                            "title": f"自动签到 · {labels}",
+                            "updatedAt": entry.get("at", 0),
+                            "messages": [
+                                {"role": "user",
+                                 "content": "执行一轮全渠道签到"},
+                                {"role": "assistant",
+                                 "content": "\n".join(
+                                     entry.get("log") or [])
+                                 or "（无日志）"}]}
+                    break
+        return {"success": True, "conversation": conv, "messages":
+                (conv or {}).get("messages", [])}
+
+    def conversations_request(cmd: dict) -> dict:
+        # 手机端「发起会话」预检：wbspy 任意模型可用，直接放行
+        return {"success": True, "allowed": True}
+
+    def session_create(cmd: dict) -> dict:
+        sid = str(uuid_mod.uuid4())
+        log(f"[mobile] session.create → {sid}")
+        return {"success": True, "sessionId": sid, "id": sid,
+                "session": {"id": sid, "createdAt": int(time.time() * 1000)}}
+
+    def task_run(cmd: dict) -> dict:
+        """派任务 = 跑一轮 wbspy 全渠道自动化（后台线程，不阻塞指令泵）。"""
+        def worker() -> None:
+            try:
+                from .automation import run_all
+                docs = list(pool.documents.values())
+                log(f"[mobile] task：启动自动化（{len(docs)} 个账号）")
+                run_all(docs, log)
+                log("[mobile] task：自动化完成")
+            except Exception as exc:
+                log(f"[mobile] task 失败：{exc}")
+        threading.Thread(target=worker, daemon=True).start()
+        return {"success": True, "accepted": True}
+
+    def workspaces_list(cmd: dict) -> dict:
+        return {"success": True,
+                "workspaces": [{"id": "wbspy", "name": "wbspy 网关",
+                                "type": "local"}]}
+
+    def artifacts_list(cmd: dict) -> dict:
+        return {"success": True, "artifacts": [], "hasMore": False}
+
+    def skills_installed(cmd: dict) -> dict:
+        return {"success": True, "skills": []}
+
+    def experts_list(cmd: dict) -> dict:
+        return {"success": True, "experts": []}
+
+    def config_preference(cmd: dict) -> dict:
+        return {"success": True, "preference": {}}
+
+    def config_set(cmd: dict) -> dict:
+        # 只读网关：确认收到但不落盘（applied:False 让手机端知道未生效）
+        return {"success": True, "applied": False}
+
+    def remote(cmd: dict) -> dict:
+        return {"success": True, "supported": False}
+
     return {
         "remoteDesktop.capabilities": capabilities,
         "wb:models:list": models_list,
@@ -382,6 +484,18 @@ def make_default_handlers(pool, log: Callable[[str], None] = print,
         "wb:connectors:states": connectors_states,
         "wb:automations:list": automations_list,
         "wb:conversations:send": conversations_send,
+        "wb:conversations:list": conversations_list,
+        "wb:conversations:get": conversations_get,
+        "wb:conversations:request": conversations_request,
+        "session.create": session_create,
+        "task": task_run,
+        "wb:workspaces:list": workspaces_list,
+        "wb:artifacts:list": artifacts_list,
+        "wb:skills:installed": skills_installed,
+        "wb:experts:list": experts_list,
+        "wb:config:preference": config_preference,
+        "wb:config:set": config_set,
+        "remote": remote,
     }
 
 

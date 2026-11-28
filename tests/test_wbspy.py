@@ -4519,6 +4519,83 @@ class TestEdgeSync(unittest.TestCase):
         empty = handlers["wb:conversations:send"]({"args": [{"text": ""}]})
         self.assertFalse(empty["success"])
 
+    def test_default_handlers_full_command_set(self):
+        """原始 edge-sync 默认指令全部有处理器（不落「不支持」通道）。"""
+        from unittest.mock import patch
+        from wbspy.edge_sync import make_default_handlers
+
+        class _P:
+            documents = {}
+            def models(self):
+                return []
+
+        pool = _P()
+        handlers = make_default_handlers(pool, log=lambda *_: None)
+        for name in ("wb:conversations:list", "wb:conversations:get",
+                     "wb:conversations:request", "session.create", "task",
+                     "wb:workspaces:list", "wb:artifacts:list",
+                     "wb:skills:installed", "wb:experts:list",
+                     "wb:config:preference", "wb:config:set", "remote"):
+            self.assertIn(name, handlers, f"缺少处理器：{name}")
+
+        lst = handlers["wb:conversations:list"]({})
+        self.assertTrue(lst["success"])
+        self.assertIsInstance(lst["conversations"], list)
+
+        got = handlers["wb:conversations:get"]({"args": [{"id": "nope"}]})
+        self.assertTrue(got["success"])
+        self.assertIsNone(got["conversation"])
+
+        req = handlers["wb:conversations:request"]({})
+        self.assertTrue(req["success"] and req["allowed"])
+
+        sess = handlers["session.create"]({})
+        self.assertTrue(sess["success"])
+        self.assertTrue(sess["sessionId"])
+
+        ws = handlers["wb:workspaces:list"]({})
+        self.assertTrue(ws["success"])
+        self.assertEqual(ws["workspaces"][0]["id"], "wbspy")
+
+        for name in ("wb:artifacts:list", "wb:skills:installed",
+                     "wb:experts:list"):
+            self.assertEqual(handlers[name]({})["success"], True)
+
+        pref = handlers["wb:config:preference"]({})
+        self.assertTrue(pref["success"])
+        cfg = handlers["wb:config:set"]({})
+        self.assertTrue(cfg["success"])
+        self.assertFalse(cfg["applied"])
+
+        rem = handlers["remote"]({})
+        self.assertTrue(rem["success"])
+        self.assertFalse(rem["supported"])
+
+    def test_task_handler_runs_automation_background(self):
+        """task：后台线程跑 automation.run_all，指令立即回执。"""
+        import threading as _th
+        from unittest.mock import patch
+        from wbspy.edge_sync import make_default_handlers
+
+        class _Doc:
+            uid = "u-1"
+        done = _th.Event()
+
+        class _P:
+            documents = {"k": _Doc()}
+
+        def fake_run_all(docs, log=None):
+            assert docs and docs[0].uid == "u-1"
+            done.set()
+            return {}
+
+        pool = _P()
+        handlers = make_default_handlers(pool, log=lambda *_: None)
+        with patch("wbspy.automation.run_all", fake_run_all):
+            out = handlers["task"]({})
+        self.assertTrue(out["success"] and out["accepted"])
+        self.assertTrue(done.wait(timeout=5), "后台任务未执行")
+
     # -- 设备身份 + 生命周期 ------------------------------------------------------
 
     def test_device_identity_persisted(self):
