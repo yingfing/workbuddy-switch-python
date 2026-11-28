@@ -4702,7 +4702,8 @@ class TestDoubaoCheckin(unittest.TestCase):
     # -- 扫码登录 ----------------------------------------------------------------
 
     def test_qr_start_renders_ticket(self):
-        """get_qrcode：data.qrcode(base64 png) → ticket 出码。"""
+        """get_qrcode：data.qrcode(base64 png) → ticket 出码（Web aid + 暖会话）。"""
+        import json as _json
         from unittest.mock import patch
         from wbspy.login_flows import doubao as flow
         from wbspy.channels import get_channel
@@ -4711,21 +4712,24 @@ class TestDoubaoCheckin(unittest.TestCase):
         r = Mock()
         r.status_code = 200
         r.ok = True
-        r.json.return_value = {"message": "ok", "data": {
+        r.json.return_value = {"message": "success", "data": {
             "error_code": 0, "token": "tok123", "qrcode": png}}
         t = Ticket(id="t", channel_id="doubao", method="qr")
-        with patch.object(flow.requests, "get", return_value=r) as p:
+        # start 全程走 Session（主页暖身 → csrf → 出码），patch 类方法收全部调用
+        with patch.object(flow.requests.Session, "get", return_value=r) as p:
             flow.start(get_channel("doubao"), t)
         self.assertEqual(t.kind, "qr")
         self.assertIn("<img", t.qr_svg)
         self.assertIn("data:image/png;base64", t.qr_svg)
-        url = p.call_args.args[0]
+        self.assertEqual(_json.loads(t.state)["token"], "tok123")
+        url = p.call_args.args[0]               # 最后一次调用是出码
         self.assertIn("passport/web/get_qrcode/", url)
-        self.assertIn("aid=582478", url)
-        self.assertNotIn("real_aid", url)        # 带 real_aid 会被判「非法应用」
+        self.assertIn("aid=497858", url)        # Web 端 aid（doubao2api 实测可用）
+        self.assertNotIn("real_aid", url)       # 带 real_aid 会被判「非法应用」
 
     def test_qr_poll_confirmed_collects_cookie(self):
-        """check_qrconnect：confirmed → Set-Cookie → Document 入库。"""
+        """check_qrconnect：confirmed → 全程累积 Cookie → Document 入库。"""
+        import json as _json
         from unittest.mock import patch
         from wbspy.login_flows import doubao as flow
         from wbspy.login_flows.core import Ticket
@@ -4734,22 +4738,24 @@ class TestDoubaoCheckin(unittest.TestCase):
         r.ok = True
         r.json.return_value = {"data": {"status": "confirmed",
                                         "redirect_url": "https://www.doubao.com/"}}
-        c1, c2 = Mock(), Mock()
-        c1.name, c1.value = "sessionid", "s1"   # Mock(name=) 是内部命名，必须显式赋值
-        c2.name, c2.value = "sid_tt", "s2"
-        r.cookies = [c1, c2]
-        t = Ticket(id="t", channel_id="doubao", method="qr", state="tok123")
-        with patch.object(flow.requests, "get", return_value=r) as p:
+        # 新协议：会话 Cookie 在暖身/轮询各跳累积进 Cookie 罐（state 持久化），
+        # confirmed 后跟随 redirect 链也不丢
+        state = _json.dumps({"token": "tok123", "csrf": "ck-1",
+                             "cookies": "sessionid=s1; sid_tt=s2"})
+        t = Ticket(id="t", channel_id="doubao", method="qr", state=state)
+        with patch.object(flow.requests.Session, "get", return_value=r) as p:
             doc = flow.poll(t)
         self.assertIsNotNone(doc)
         self.assertIn("sessionid=s1", doc.token)
         self.assertIn("sid_tt=s2", doc.token)
         self.assertEqual(doc.channel_id, "doubao")
         self.assertTrue(doc.uid.startswith("doubao-"))
-        self.assertIn("token=tok123", p.call_args.args[0])
+        self.assertIn("token=tok123", p.call_args_list[0].args[0])
+        self.assertIn("aid=497858", p.call_args_list[0].args[0])
 
     def test_qr_poll_states(self):
         """waiting 继续等；expired 报错；确认但无 sessionid 如实报错。"""
+        import json as _json
         from unittest.mock import patch
         from wbspy.login_flows import doubao as flow
         from wbspy.login_flows.core import Ticket
@@ -4762,15 +4768,16 @@ class TestDoubaoCheckin(unittest.TestCase):
             r.cookies = cookies or []
             return r
 
-        t = Ticket(id="t", channel_id="doubao", method="qr", state="tok")
-        with patch.object(flow.requests, "get",
+        state = _json.dumps({"token": "tok", "csrf": "", "cookies": ""})
+        t = Ticket(id="t", channel_id="doubao", method="qr", state=state)
+        with patch.object(flow.requests.Session, "get",
                           return_value=resp({"data": {"status": "new"}})):
             self.assertIsNone(flow.poll(t))
-        with patch.object(flow.requests, "get",
+        with patch.object(flow.requests.Session, "get",
                           return_value=resp({"data": {"status": "expired"}})):
             with self.assertRaises(RuntimeError):
                 flow.poll(t)
-        with patch.object(flow.requests, "get",
+        with patch.object(flow.requests.Session, "get",
                           return_value=resp({"data": {"status": "confirmed"}})):
             with self.assertRaises(RuntimeError) as cm:
                 flow.poll(t)
@@ -5550,9 +5557,10 @@ class TestDoubaoQrLogin(unittest.TestCase):
         resp = Mock(ok=True)
         resp.json = Mock(return_value={"data": {"token": "tok-1",
                                                 "qrcode": "data:image/png;base64,AAAA"}})
-        with patch("wbspy.login_flows.doubao.requests.get", return_value=resp):
+        with patch.object(db.requests.Session, "get", return_value=resp):
             db.start(None, ticket)
-        self.assertEqual(ticket.state, "tok-1")
+        import json as _json
+        self.assertEqual(_json.loads(ticket.state)["token"], "tok-1")
         self.assertEqual(ticket.code, "")          # 复制码栏必须为空
         self.assertIn("<img", ticket.qr_svg)
         self.assertIn("data:image/png;base64,AAAA", ticket.qr_svg)
@@ -5564,7 +5572,7 @@ class TestDoubaoQrLogin(unittest.TestCase):
         ticket = lf_core.Ticket(id="t2", channel_id="doubao", method="qr")
         resp = Mock(ok=True)
         resp.json = Mock(return_value={"data": {"qrcode": "data:image/png;base64,A"}})
-        with patch("wbspy.login_flows.doubao.requests.get", return_value=resp):
+        with patch.object(db.requests.Session, "get", return_value=resp):
             with self.assertRaises(RuntimeError):
                 db.start(None, ticket)
 
